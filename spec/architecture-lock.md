@@ -38,11 +38,13 @@ The v1.0 protocol contains these core domains:
 - `/outcomes`
 - `/settlement`
 - `/disputes`
+- `/workflows`
 
 Infrastructure boundaries:
 
 - `/api`
 - `/workers`
+- `/audit`
 - persistence
 - queues
 - object storage
