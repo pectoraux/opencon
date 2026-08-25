@@ -282,3 +282,72 @@ Later layers may add:
 - decentralized settlement
 
 Blockchain is a settlement/trust mechanism, not the real-time ad-serving database.
+
+## 17. Authoritative workflow
+
+All economically and operationally material protocol operations use a deterministic workflow owned by the `/workflows` boundary.
+
+Canonical opportunity/contribution lifecycle:
+
+```text
+DRAFT
+→ READY
+→ ASSIGNED
+→ IN_PROGRESS
+→ SUBMITTED
+→ MEASURING
+→ EVALUATING
+→ CHALLENGE_WINDOW
+→ SETTLING
+→ SETTLED
+→ VERIFIED
+```
+
+Exceptional states:
+
+```text
+BLOCKED
+FRAUD_REVIEW
+DISPUTED
+REJECTED
+CANCELLED
+```
+
+External agents, AI services and user interfaces may propose actions but may not directly mutate authoritative state. All transitions are authorized, deterministic and idempotent.
+
+## 18. Module ownership
+
+Each domain owns its entities and business rules. Cross-domain access occurs through declared application/domain interfaces.
+
+| Boundary | Authority |
+|---|---|
+| `/identity`, `/organizations`, `/participants` | identity, roles, organization membership and eligibility |
+| `/opportunities`, `/contributions` | opportunities, contribution lifecycle and submission state |
+| `/campaigns`, `/inventory`, `/creators` | campaign/inventory/creator domain rules |
+| `/demand`, `/benefits` | demand aggregation and benefit allocation |
+| `/evidence`, `/outcomes` | evidence, measurement semantics, outcome evaluation |
+| `/reputation` | reputation computation and provenance |
+| `/settlement` | credits, pending/mature value, cash/credit settlement |
+| `/disputes` | challenges, disputes, appeals and penalties |
+| `/workflows` | authoritative lifecycle transitions and orchestration |
+| `/api` | external application/API contract |
+| `/workers` | asynchronous execution only; not authoritative state |
+| `/llm`, `/agents` | provider-neutral AI and agent execution |
+| `/adapters` | external platform/provider integrations |
+| `/measurement` | measurement provider integrations; semantics remain in `/outcomes` |
+| `/payments` | payment provider integrations; settlement semantics remain in `/settlement` |
+
+## 19. Architectural authority rules
+
+- PostgreSQL is the authoritative application state in v1.0.
+- Redis, queues and caches are coordination infrastructure and are never authoritative.
+- Object storage holds large/immutable artifacts referenced from PostgreSQL.
+- External platforms are authoritative for their own platform state.
+- AI/model output is never sufficient by itself to authorize settlement, reputation, or governance state.
+- Frontend clients never own workflow or authorization authority.
+
+## 20. Initial-vs-future boundary
+
+The initial implementation proves the economic semantics with conventional centralized infrastructure before introducing decentralized settlement or public proofs.
+
+Decentralization features are extensions of stable semantics, not prerequisites for defining those semantics.
