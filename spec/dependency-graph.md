@@ -102,3 +102,20 @@ After NET-W001..003:
 5. Benefit allocation depends on verified economic value.
 6. Decentralization depends on stable off-chain semantics rather than defining them.
 7. Provider-specific integrations remain adapters.
+
+## API / workflow convergence
+
+```text
+NET-W001 → API contract conventions
+NET-W002 → authorization boundary
+NET-W003 → persistence/queue/object/secrets interfaces
+NET-W004 → authoritative opportunity/contribution workflow
+NET-W005 + NET-W006 + NET-W008 → economic settlement path
+```
+
+## Eligibility invariants
+
+- An implementation work item is not eligible until all dependencies are VERIFIED.
+- Economic work may not bypass evidence/evaluation dependencies.
+- Creator, advertising and demand clients consume protocol primitives rather than creating alternate settlement paths.
+- Work that changes a frozen architectural rule requires an Architecture Change Request before implementation continues.
