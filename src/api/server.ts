@@ -26,6 +26,12 @@ import type { Logger } from "../core/logger.ts";
 import type { ConfigSnapshot } from "../core/config.ts";
 import type { HealthAggregator } from "../observability/health.ts";
 import type { ModuleRegistry } from "../core/module.ts";
+import type {
+  ApiAuth,
+  ApiAuthSubject,
+  ApiCommands,
+} from "./port.ts";
+import type { ExecutionContext } from "../core/execution-context.ts";
 
 export interface ApiServerOptions {
   readonly port?: number;
@@ -36,6 +42,13 @@ export interface ApiServerOptions {
   readonly registry: ModuleRegistry;
   /** Accessor for a representative non-domain job queue (AC-03 demo). */
   readonly enqueueEchoJob?: (message: string) => Promise<string>;
+  /**
+   * Auth guard + protected-mutation commands. NET-W002 §4.6: minimum API
+   * middleware/guarding so protected operations reject unauthenticated /
+   * unauthorized principals. When absent, protected endpoints return 501.
+   */
+  readonly auth?: ApiAuth;
+  readonly commands?: ApiCommands;
 }
 
 export interface ApiServer {
@@ -77,7 +90,7 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       res.setHeader("x-execution-id", ctx.executionId);
 
       try {
-        const handled = await route(method, path, req, res);
+        const handled = await route(method, path, req, res, ctx);
         if (!handled) {
           await send(res, 404, { error: "not_found", path });
         }
@@ -101,11 +114,92 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
     });
   }
 
+  // Extract the opaque auth subject from request headers. NET-W002 §4.4:
+  // the auth boundary is provider-neutral; we accept an opaque subject id
+  // + provider kind via headers (deterministic in-memory resolver for tests;
+  // production would use a real auth adapter). Client-asserted claims are
+  // carried in the X-Client-Claims header and are NEVER trusted for
+  // authorization (§4.5, API-AC-02) — they are only logged/audited.
+  function extractAuthSubject(req: IncomingMessage): ApiAuthSubject | null {
+    const subjectId = req.headers["x-auth-subject-id"] as string | undefined;
+    if (!subjectId) return null;
+    const providerKind =
+      (req.headers["x-auth-provider-kind"] as string | undefined) ?? "internal";
+    let clientClaims: Record<string, unknown> | undefined;
+    const claimsHeader = req.headers["x-client-claims"] as string | undefined;
+    if (claimsHeader) {
+      try {
+        const parsed = JSON.parse(claimsHeader);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          clientClaims = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Malformed client-claims header — ignore (claims are never trusted).
+      }
+    }
+    return { subjectId, providerKind, clientClaims };
+  }
+
+  // Resolve the canonical person id for the request, using the auth guard.
+  // Returns null when the subject is unauthenticated OR no auth guard is
+  // configured. Client claims are carried forward so the authorizer can
+  // log/audit forged claims when it rejects them.
+  async function resolveActorPersonId(
+    req: IncomingMessage,
+  ): Promise<{ personId: string | null; clientClaims?: Record<string, unknown> } | null> {
+    if (!opts.auth) return null;
+    const subject = extractAuthSubject(req);
+    if (!subject) return { personId: null };
+    const resolved = await opts.auth.resolvePrincipal(subject);
+    return { personId: resolved.personId, clientClaims: subject.clientClaims as Record<string, unknown> | undefined };
+  }
+
+  // Guard a protected mutation: resolve actor + authorize, return 403 on
+  // deny. Returns the resolved personId on allow.
+  async function guardMutation(
+    ctx: ExecutionContext,
+    req: IncomingMessage,
+    action: string,
+    resource: string,
+    res: ServerResponse,
+  ): Promise<string | null> {
+    if (!opts.auth || !opts.commands) {
+      await send(res, 501, {
+        error: "not_implemented",
+        message: "auth/commands not configured on this server",
+      });
+      return null;
+    }
+    const resolved = await resolveActorPersonId(req);
+    const personId = resolved?.personId ?? null;
+    const clientClaims = resolved?.clientClaims;
+    const decision = await opts.auth.authorize({
+      execution: ctx,
+      personId,
+      action,
+      resource,
+      clientClaims,
+    });
+    if (decision.decision !== "allow") {
+      await send(res, 403, {
+        error: "authorization",
+        classification: "authorization",
+        message: decision.reason,
+        action,
+        resource,
+        matchedPolicyId: decision.matchedPolicyId,
+      });
+      return null;
+    }
+    return personId;
+  }
+
   async function route(
     method: string,
     path: string,
     req: IncomingMessage,
     res: ServerResponse,
+    ctx: ExecutionContext,
   ): Promise<boolean> {
     if (path === "/health" && method === "GET") {
       const report = await opts.health.report();
@@ -145,6 +239,103 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       await send(res, 202, { jobId, accepted: true });
       return true;
     }
+
+    // -- NET-W002 protected endpoints (§4.6) ---------------------------
+    // Every protected mutation is guarded by guardMutation(): unauthenticated
+    // → 403; unauthorized → 403 (deny-by-default); client-asserted role/
+    // scope claims are NEVER trusted (§4.5, API-AC-02).
+
+    // POST /api/identities — create a canonical identity (protected: only
+    // an authorized principal may provision identities).
+    if (path === "/api/identities" && method === "POST" && opts.commands) {
+      const actorId = await guardMutation(ctx, req, "identity.create", "*", res);
+      if (actorId === null) return true;
+      const body = await readBody(req);
+      const displayName =
+        typeof body === "object" && body !== null && "displayName" in body
+          ? String((body as { displayName?: unknown }).displayName)
+          : "";
+      const subjectId =
+        typeof body === "object" && body !== null && "subjectId" in body
+          ? String((body as { subjectId?: unknown }).subjectId)
+          : randomUUID();
+      const providerKind =
+        typeof body === "object" && body !== null && "providerKind" in body
+          ? String((body as { providerKind?: unknown }).providerKind)
+          : "internal";
+      const view = await opts.commands.createIdentity(ctx, { displayName, subjectId, providerKind });
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/identities/:id — public privacy-safe view (PRIV-001, AC-07).
+    // Public read; no auth required. Returns only the stable id + display name.
+    if (path.startsWith("/api/identities/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/identities/".length);
+      const view = await opts.commands.getPublicIdentity(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `identity not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/organizations — create an organization (protected).
+    if (path === "/api/organizations" && method === "POST" && opts.commands) {
+      const actorId = await guardMutation(ctx, req, "organization.create", "*", res);
+      if (actorId === null) return true;
+      const body = await readBody(req);
+      const name =
+        typeof body === "object" && body !== null && "name" in body
+          ? String((body as { name?: unknown }).name)
+          : "";
+      const view = await opts.commands.createOrganization(ctx, actorId, { name });
+      await send(res, 201, view);
+      return true;
+    }
+
+    // POST /api/organizations/:id/memberships — grant a membership (protected:
+    // the actor must be authorized for the target organization).
+    const grantMatch = path.match(/^\/api\/organizations\/([^/]+)\/memberships$/);
+    if (grantMatch && method === "POST" && opts.commands) {
+      const organizationId = grantMatch[1]!;
+      const actorId = await guardMutation(
+        ctx,
+        req,
+        "organization.membership.grant",
+        organizationId,
+        res,
+      );
+      if (actorId === null) return true;
+      const body = await readBody(req);
+      const personId =
+        typeof body === "object" && body !== null && "personId" in body
+          ? String((body as { personId?: unknown }).personId)
+          : "";
+      const result = await opts.commands.grantMembership(ctx, actorId, organizationId, { personId });
+      await send(res, result.created ? 201 : 200, result.membership);
+      return true;
+    }
+
+    // DELETE /api/organizations/:id/memberships/:membershipId — revoke (protected).
+    const revokeMatch = path.match(/^\/api\/organizations\/([^/]+)\/memberships\/([^/]+)$/);
+    if (revokeMatch && method === "DELETE" && opts.commands) {
+      const organizationId = revokeMatch[1]!;
+      const membershipId = revokeMatch[2]!;
+      const actorId = await guardMutation(
+        ctx,
+        req,
+        "organization.membership.revoke",
+        organizationId,
+        res,
+      );
+      if (actorId === null) return true;
+      const result = await opts.commands.revokeMembership(ctx, actorId, membershipId);
+      await send(res, 200, result.membership);
+      return true;
+    }
+
     return false;
   }
 

@@ -31,7 +31,24 @@ import type { SecretProvider } from "../core/secrets.ts";
 import type { JobQueue } from "../core/queue.ts";
 import type { JobHandler } from "../core/queue.ts";
 import type { ModuleRegistry } from "../core/module.ts";
+import type { ApiAuth, ApiCommands } from "../api/port.ts";
 import type { ApiServer } from "../api/server.ts";
+// NET-W002 domain wiring (composition root imports concrete in-memory
+// implementations for wiring — the only place permitted to do so).
+import { createInMemoryIdentityRepository } from "../identity/in-memory-identity-repository.ts";
+import { createIdentityService } from "../identity/identity-service.ts";
+import { createInMemoryPrincipalResolver } from "../identity/in-memory-principal-resolver.ts";
+import { createInMemoryOrganizationRepository, createInMemoryMembershipRepository } from "../organizations/in-memory-organization-repository.ts";
+import { createOrganizationService, createMembershipService } from "../organizations/organization-service.ts";
+import { createInMemoryParticipantRepository, createInMemoryPolicyRepository } from "../participants/in-memory-participant-repository.ts";
+import { createParticipantService } from "../participants/participant-service.ts";
+import { createAuthorizationService } from "../participants/authorization-service.ts";
+import { createPolicyService } from "../participants/policy-service.ts";
+import type { IdentityService } from "../identity/identity-service.ts";
+import type { OrganizationService, MembershipService } from "../organizations/organization-service.ts";
+import type { ParticipantService } from "../participants/participant-service.ts";
+import type { AuthorizationService, MembershipLookup, IdentityLookup } from "../participants/port.ts";
+import type { PolicyService } from "../participants/policy-service.ts";
 
 // Boundary module registrations (composition root imports all).
 import { identityModule } from "../identity/module.ts";
@@ -91,6 +108,15 @@ export interface Runtime {
   readonly health: HealthAggregator;
   readonly api: ApiServer;
   readonly logSink: LogEntrySink;
+  // NET-W002 domain services (exposed for integration/security tests).
+  readonly identityService: IdentityService;
+  readonly organizationService: OrganizationService;
+  readonly membershipService: MembershipService;
+  readonly participantService: ParticipantService;
+  readonly authorizationService: AuthorizationService;
+  readonly policyService: PolicyService;
+  readonly apiAuth: ApiAuth;
+  readonly apiCommands: ApiCommands;
   initialize(): Promise<readonly { name: string; initialized: boolean }[]>;
   shutdown(): Promise<void>;
   /** Enqueue a representative non-domain ECHO job (AC-03/AC-05 demo). */
@@ -129,6 +155,165 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     catalog: buildSecretCatalog(config.describe()),
   });
   const queue = createInMemoryJobQueue();
+
+  // -- NET-W002 domain wiring ------------------------------------------
+  // Identity boundary.
+  const identityRepo = createInMemoryIdentityRepository({ logger: logger.child("identity") });
+  const identityService = createIdentityService({
+    repository: identityRepo,
+    auditWriter,
+    logger: logger.forModule("identity"),
+  });
+  const principalResolver = createInMemoryPrincipalResolver({ repository: identityRepo });
+
+  // Organizations boundary.
+  const organizationRepo = createInMemoryOrganizationRepository({ logger: logger.child("organizations") });
+  const membershipRepo = createInMemoryMembershipRepository({ logger: logger.child("organizations") });
+  const organizationService = createOrganizationService({
+    organizations: organizationRepo,
+    memberships: membershipRepo,
+    auditWriter,
+    logger: logger.forModule("organizations"),
+  });
+  const membershipService = createMembershipService({
+    organizations: organizationRepo,
+    memberships: membershipRepo,
+    auditWriter,
+    logger: logger.forModule("organizations"),
+  });
+
+  // Participants boundary.
+  const participantRepo = createInMemoryParticipantRepository({ logger: logger.child("participants") });
+  const policyRepo = createInMemoryPolicyRepository({ logger: logger.child("participants") });
+  const participantService = createParticipantService({
+    participants: participantRepo,
+    auditWriter,
+    logger: logger.forModule("participants"),
+  });
+
+  // Cross-domain lookup adapters (the AuthorizationService needs org
+  // membership + identity existence, but participants cannot import the
+  // other domains' ports. We wire thin structural adapters here.)
+  const membershipLookup: MembershipLookup = {
+    async membershipStatus(personId, organizationId) {
+      const m = await membershipRepo.findByPersonAndOrganization(personId, organizationId);
+      return m ? m.status : null;
+    },
+  };
+  const identityLookup: IdentityLookup = {
+    async exists(personId) {
+      return identityRepo.exists(personId);
+    },
+  };
+  const authorizationService = createAuthorizationService({
+    participants: participantRepo,
+    policies: policyRepo,
+    membershipLookup,
+    identityLookup,
+    logger: logger.forModule("participants"),
+  });
+  const policyService = createPolicyService({
+    policies: policyRepo,
+    auditWriter,
+    logger: logger.forModule("participants"),
+  });
+
+  // API auth + commands adapter (dependency inversion: the API server
+  // consumes ApiAuth/ApiCommands; we bridge to the real domain services).
+  const apiAuth: ApiAuth = {
+    async resolvePrincipal(subject) {
+      const identity = await principalResolver.resolve({
+        subject: { subjectId: subject.subjectId, providerKind: subject.providerKind },
+        clientClaims: subject.clientClaims,
+      });
+      return { personId: identity ? identity.id : null };
+    },
+    async authorize(request) {
+      const resolved = await authorizationService.resolvePrincipal(
+        request.execution,
+        request.personId,
+      );
+      const decision = await authorizationService.authorize({
+        principal: resolved,
+        action: request.action,
+        resource: request.resource,
+        clientClaims: request.clientClaims,
+      });
+      return {
+        decision: decision.decision,
+        reason: decision.reason,
+        matchedPolicyId: decision.matchedPolicyId,
+      };
+    },
+  };
+  const apiCommands: ApiCommands = {
+    async createIdentity(execution, input) {
+      const identity = await identityService.createIdentity(execution, {
+        displayName: input.displayName,
+        subjectReferences: [{ subjectId: input.subjectId, providerKind: input.providerKind }],
+      });
+      return { id: identity.id, displayName: identity.displayName };
+    },
+    async getPublicIdentity(execution, id) {
+      try {
+        const view = await identityService.getPublicView(
+          // The API server passes the request's execution context. Use the
+          // active context if available (the API server wraps requests in
+          // one), falling back to the passed-in execution.
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return view;
+      } catch {
+        return null;
+      }
+    },
+    async createOrganization(execution, actorPersonId, input) {
+      const org = await organizationService.createOrganization(execution, {
+        name: input.name,
+        creatorId: actorPersonId,
+      });
+      return { id: org.id, name: org.name, createdBy: org.createdBy, createdAt: org.createdAt };
+    },
+    async grantMembership(execution, actorPersonId, organizationId, input) {
+      const result = await membershipService.grantMembership(execution, {
+        personId: input.personId,
+        organizationId,
+        grantedBy: actorPersonId,
+      });
+      const m = result.membership;
+      return {
+        membership: {
+          id: m.id,
+          personId: m.personId,
+          organizationId: m.organizationId,
+          status: m.status,
+          grantedAt: m.grantedAt,
+          grantedBy: m.grantedBy,
+          revokedAt: m.revokedAt,
+          revokedBy: m.revokedBy,
+        },
+        created: result.created,
+      };
+    },
+    async revokeMembership(execution, actorPersonId, membershipId) {
+      const result = await membershipService.revokeMembership(execution, membershipId, actorPersonId);
+      const m = result.membership;
+      return {
+        membership: {
+          id: m.id,
+          personId: m.personId,
+          organizationId: m.organizationId,
+          status: m.status,
+          grantedAt: m.grantedAt,
+          grantedBy: m.grantedBy,
+          revokedAt: m.revokedAt,
+          revokedBy: m.revokedBy,
+        },
+        already: result.already,
+      };
+    },
+  };
 
   const registry = createModuleRegistry(snapshot, logger);
   // Register all boundary modules. Domain modules are skeletal (§5).
@@ -201,8 +386,18 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       health,
       registry,
       enqueueEchoJob: (message) => runtime.enqueueEchoJob(message),
+      auth: apiAuth,
+      commands: apiCommands,
     }),
     logSink,
+    identityService,
+    organizationService,
+    membershipService,
+    participantService,
+    authorizationService,
+    policyService,
+    apiAuth,
+    apiCommands,
     async initialize() {
       const states = await registry.initializeAll();
       return states.map((s) => ({ name: s.name, initialized: s.initialized }));
