@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.pnp.*
+
+# Build artifacts
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# Environment & secrets — NEVER commit real credentials.
+# This project must not persist any real secret, token, key or password.
+.env
+.env.*
+!.env.example
+secrets.json
+*.pem
+*.key
+*.p12
+
+# Logs
+*.log
+dev.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test / coverage artifacts
+coverage/
+.nyc_output/
+.test-tmp/
+test-artifacts/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

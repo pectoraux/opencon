@@ -6,7 +6,7 @@ Open Contribution Protocol (OpenCon) is an open protocol for coordinating advert
 
 **Architecture:** v1.0 FROZEN  
 **Requirements:** v1.0 APPROVED BASELINE  
-**Implementation:** Not started  
+**Implementation:** NET-W001 in progress (platform + modular-monolith foundation)  
 **Next eligible work item:** `NET-W001`  
 **Implementation agent:** Z.ai  
 **Architect:** OpenCon architecture authority
@@ -37,6 +37,28 @@ Z.ai is an implementation participant, not the authority for architecture, workf
 - `spec/requirements.md` — v1.0 requirements and acceptance criteria
 - `spec/work-items.md` — implementation backlog and definitions of done
 - `spec/dependency-graph.md` — implementation dependencies and eligibility rules
+
+## Implementation (NET-W001)
+
+The modular-monolith foundation is implemented under `src/` with the
+frozen module boundaries (16 domain, 9 infrastructure, 6 external
+integration). See:
+
+- `docs/module-conventions.md` — documented module/dependency/DTO/error/transaction/async conventions
+- `docs/implementation-notes.md` — recorded technology choices and scope
+- `docs/evidence.md` — acceptance-criteria evidence + verification
+
+### Run
+
+```bash
+bun install
+bun run verify   # typecheck + architecture check + tests (canonical evidence)
+bun run dev      # start the server (development)
+```
+
+The HTTP surface (`/health`, `/ready`, `/live`, `/api/modules`,
+`/api/config`, `/api/echo`) is intentionally minimal — NET-W001 ships
+infrastructure only. No domain behaviour is implemented (work order §5).
 
 ## Architectural principles
 
