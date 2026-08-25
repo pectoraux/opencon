@@ -105,3 +105,30 @@ The protocol may be surfaced through separate products/clients:
 - Benefits — member benefit pools
 
 These are clients over common protocol primitives, not separate economic systems.
+
+## 11. Workflow invariants
+
+11. Opportunity/contribution lifecycle authority belongs to `/workflows`.
+12. Workflow transitions are deterministic and idempotent.
+13. External agents, AI services and UI clients cannot directly mutate authoritative lifecycle state.
+14. `SETTLED` requires completed evidence/evaluation and any required challenge window.
+15. `VERIFIED` is a terminal confirmation state and cannot bypass settlement/evidence rules.
+
+## 12. Data authority invariants
+
+16. Redis, caches, queues and worker memory are never authoritative state.
+17. Large/immutable artifacts live outside core relational rows and are referenced durably.
+18. External platform facts are not rewritten into protocol truth without provenance.
+
+## 13. Economic safety invariants
+
+19. Pending value is not equivalent to mature value.
+20. Participation Credit issuance requires a Proof-of-Value reference.
+21. A disputed or fraud-held claim cannot mature until the applicable resolution policy permits it.
+22. Reputation changes require evidence lineage.
+
+## 14. API and adapter invariants
+
+23. External clients consume versioned API contracts and cannot bypass domain boundaries.
+24. Provider-specific SDK/types do not cross into core domain modules.
+25. Measurement and payment adapters provide evidence/transaction facts; `/outcomes` and `/settlement` retain semantic authority.
