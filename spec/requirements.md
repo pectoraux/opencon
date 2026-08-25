@@ -12,7 +12,7 @@
 | ID | identity, organizations, participant roles |
 | OPP | opportunities and contributions |
 | CAMP | campaigns and advertising |
-| INV | inventory and placements |
+| INV | inventory, placements and supply authorization |
 | CRE | creators and UGC |
 | HELP | helpfulness/recommendation |
 | DEM | demand pools |
@@ -60,6 +60,21 @@
 - CAMP-003: Interoperate with existing advertising ecosystem.
 - CAMP-004: Support non-reciprocal cross-promotion.
 - CAMP-005: Support multilateral advertising-value clearing.
+
+## Inventory / placements
+
+- INV-001: Represent publisher/app/creator inventory and placements as first-class objects.
+- INV-002: Record inventory format, placement context, eligibility, policy and source identity.
+- INV-003: Support inventory authorization/provenance using existing ecosystem signals where available.
+- INV-004: Prevent inventory from being eligible for settlement without a registered owner/source and policy context.
+
+## API / protocol contracts
+
+- API-001: Expose provider-independent versioned API contracts for protocol clients.
+- API-002: Enforce authentication, authorization and tenant/participant scoping server-side.
+- API-003: Keep workflow transitions behind authorized workflow operations.
+- API-004: Make material mutation endpoints idempotent where duplicate delivery/retry is possible.
+- API-005: Return stable identifiers and traceable execution/evidence references for material operations.
 
 ## Creators
 
@@ -216,3 +231,18 @@
 - PROC-AC-01: A savings claim cannot settle without an evidence-backed baseline — integration test.
 - PROC-AC-02: Individual company commercial terms are not exposed to other pool participants by default — privacy test.
 - PROC-AC-03: Supplier selection records the offer set and selection rationale — audit/integration test.
+
+### Inventory / API
+- INV-AC-01: Every inventory record has an owner/source identity and placement definition — database/integration test.
+- INV-AC-02: Unauthorized or unregistered inventory cannot enter settlement — domain/integration test.
+- INV-AC-03: Supply authorization/provenance fields can be captured and audited — contract/integration test.
+- API-AC-01: Core API contracts are versioned and provider-independent — API contract/static architecture test.
+- API-AC-02: Unauthorized domain mutations are rejected server-side — security/end-to-end test.
+- API-AC-03: Duplicate material requests produce one logical mutation — idempotency integration test.
+- API-AC-04: Material responses expose stable identifiers and evidence/execution references — API contract test.
+
+### Workflow / settlement
+- WF-AC-01: Legal opportunity/contribution transitions are deterministic and invalid transitions are rejected — exhaustive state-machine test.
+- WF-AC-02: SETTLED cannot be reached before required evidence/evaluation/challenge conditions — workflow integration test.
+- WF-AC-03: Disputed or fraud-held pending value cannot mature — economic workflow test.
+- WF-AC-04: Replayed transitions are idempotent — workflow integration test.
