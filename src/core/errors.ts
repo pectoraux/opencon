@@ -95,6 +95,31 @@ export class ConfigurationValidationError extends OpenConError {
   }
 }
 
+/**
+ * Raised when a caller attempts to read secret material through the
+ * {@link ConfigurationProvider} (e.g. `config.get("DATABASE_URL")`).
+ *
+ * Classification: `invariant` — this is an architectural boundary
+ * violation, never retryable. Secret material MUST be resolved
+ * exclusively through the {@link SecretProvider}; the
+ * ConfigurationProvider only returns non-secret configuration values
+ * and opaque secret *references* (never the value).
+ */
+export class SecretAccessError extends OpenConError {
+  public constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+  ) {
+    super({
+      code: "SECRET_ACCESS",
+      classification: "invariant",
+      message,
+      retryable: false,
+      context,
+    });
+  }
+}
+
 export class AuthorizationError extends OpenConError {
   public constructor(
     message: string,

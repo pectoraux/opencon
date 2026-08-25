@@ -15,8 +15,12 @@ All evidence is reproducible from a clean repository checkout via
 | `bun install` | Install dependencies (zod) |
 | `bun run typecheck` | TypeScript strict typecheck |
 | `bun run arch:check` | Deterministic architecture/dependency check |
-| `bun test` | Full automated test suite (8 files, 40 tests) |
+| `bun test` | Full automated test suite (8 files, 52 tests) |
 | `bun run verify` | typecheck + arch:check + tests (canonical evidence command) |
+
+The same pipeline is enforced in CI by `.github/workflows/ci.yml`
+(runs on every push and every PR targeting `main`), satisfying
+NET-W001 §4.8 ("must be enforceable in CI").
 
 ## 2. Verification results (reproduced)
 
@@ -24,7 +28,7 @@ All evidence is reproducible from a clean repository checkout via
 $ bun run verify
 $ tsc --noEmit                       # typecheck: PASS (exit 0)
 $ bun scripts/check-architecture.ts # ✓ 127 files scanned, 0 violations (exit 0)
-$ bun test                          # 40 pass, 0 fail, 460 expect() calls, 8 files (exit 0)
+$ bun test                          # 52 pass, 0 fail, 519 expect() calls, 8 files (exit 0)
 ```
 
 Architecture check on the intentional failing fixture (proves the
@@ -38,6 +42,26 @@ $ bun run arch:check --root=tests/architecture/fixtures/violation/src
   - identity/port.ts  → domain-must-not-import-infrastructure
 exit 1
 ```
+
+### 2.1 CI enforcement (NET-W001 §4.8)
+
+`.github/workflows/ci.yml` runs on `push` (all branches) and
+`pull_request` (targeting `main`) and executes, as separate failing
+steps: `bun install --frozen-lockfile` → `bun run typecheck` →
+`bun run arch:check` → `bun test`. A dependency-direction or
+adapter-isolation violation therefore fails CI independently of the
+test suite (AC-02, AC-07).
+
+### 2.2 Remediations applied after architect review of PR #2
+
+| # | Architect concern | Remediation | Evidence |
+|---|---|---|---|
+| 1 | No CI workflow enforced the architecture checker | Added `.github/workflows/ci.yml` running `typecheck` + `arch:check` + `bun test` | `.github/workflows/ci.yml`; §2.1 above |
+| 2 | `ConfigurationProvider.get()` could retrieve `DATABASE_URL`/`REDIS_URL`/etc.; `getSecretReference()` returned secret material | `get()` throws `SecretAccessError` (`invariant`) for any classified secret key (present OR absent); `getSecretReference()` returns an opaque `SecretReference` (`key` + redacted diagnostics, never the value); the `SecretProvider` remains the sole resolver of secret values | `src/core/config.ts` (`SecretReference`), `src/core/errors.ts` (`SecretAccessError`), `src/config/provider.ts`; `tests/config/ac-04-…test.ts` ("configuration secrets boundary" suite — 9 tests assert no leak via `get()` / `getSecretReference()` / `describe()`) |
+| 3 | Audit immutability was only shallow (nested metadata still mutable) | `deepFreeze()` recursively freezes the event + metadata + nested objects/arrays; events are `structuredClone`d before freezing so the caller's input is never frozen in place; file-backed reloads are deep-frozen too | `src/audit/audit-writer.ts` (`deepFreeze`); `tests/audit/ac-06-…test.ts` ("audit deep immutability" suite — 3 tests assert nested/_array/deeper mutation throws, caller input untouched, file-backed reload immutable) |
+
+All three remediations are covered by objective, automated tests and
+are reproducible from `bun run verify`.
 
 ## 3. Changed-files summary mapped to acceptance criteria
 
@@ -53,6 +77,7 @@ exit 1
 - `scripts/check-architecture.ts` — CLI (`bun run arch:check`)
 - `tests/architecture/fixtures/violation/src/**` — intentional failing fixture (domain→infra, domain→adapter, domain→other-domain)
 - `tests/architecture/ac-02-dependency-direction.test.ts` — asserts src clean (passing suite) + fixture flagged
+- `.github/workflows/ci.yml` — enforces `arch:check` in CI on every push/PR (NET-W001 §4.8: "must be enforceable in CI")
 
 ### NET-W001-AC-03 — Async execution (PASS)
 - `src/core/queue.ts` — `JobQueue`/`JobHandler`/`RetryPolicy` contracts
@@ -63,9 +88,10 @@ exit 1
 
 ### NET-W001-AC-04 — Configuration validation (PASS)
 - `src/config/schema.ts` — zod schema, field classification
-- `src/config/provider.ts` — typed snapshot (frozen), fail-fast, redacted diagnostics
-- `src/core/errors.ts` — `ConfigurationValidationError`
-- `tests/config/ac-04-configuration-validation.test.ts` — invalid→classified error; valid dev→boots; production missing secrets→fail-fast
+- `src/config/provider.ts` — typed snapshot (frozen), fail-fast, redacted diagnostics; secrets boundary: `get()` throws `SecretAccessError` for classified secret keys, `getSecretReference()` returns an opaque `SecretReference` (never the value)
+- `src/core/config.ts` — `ConfigurationProvider` + `SecretReference` contract
+- `src/core/errors.ts` — `ConfigurationValidationError`, `SecretAccessError`
+- `tests/config/ac-04-configuration-validation.test.ts` — invalid→classified error; valid dev→boots; production missing secrets→fail-fast; secrets-boundary suite (9 tests) asserts no secret leak via `get()` / `getSecretReference()` / `describe()`
 
 ### NET-W001-AC-05 — Structured observability (PASS)
 - `src/observability/logger.ts` — JSON structured logs with execution+correlation IDs, level, module, classified error
@@ -75,8 +101,8 @@ exit 1
 
 ### NET-W001-AC-06 — Audit append boundary (PASS)
 - `src/core/audit.ts` — `AuditWriter`/`AuditEvent` contracts
-- `src/audit/audit-writer.ts` — in-memory + file-backed append-only; entries deeply frozen
-- `tests/audit/ac-06-audit-append.test.ts` — append+retrieve, no mutation of prior entries, file persistence across writer instances
+- `src/audit/audit-writer.ts` — in-memory + file-backed append-only; entries DEEPLY frozen (`deepFreeze` recurses through nested objects/arrays; `structuredClone` before freeze so the caller's input is never frozen in place)
+- `tests/audit/ac-06-audit-append.test.ts` — append+retrieve, no mutation of prior entries, file persistence across writer instances; deep-immutability suite (3 tests) asserts nested/array/deeper mutation throws, caller input untouched, file-backed reload immutable
 
 ### NET-W001-AC-07 — Adapter isolation (PASS)
 - `src/core/adapter.ts` — `ProviderAdapter` contract

@@ -126,3 +126,123 @@ describe("NET-W001-AC-06 audit append boundary", () => {
     expect(await writer.count()).toBe(3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Deep immutability regression (architect review on PR #2, remediation #3).
+// Audit entries must be DEEPLY immutable: nested metadata (objects,
+// arrays, and deeper nesting) cannot be mutated by callers, despite the
+// earlier shallow Object.freeze leaving nested layers writable.
+// ---------------------------------------------------------------------------
+
+describe("NET-W001-AC-06 audit deep immutability", () => {
+  test("nested metadata cannot be mutated (deep freeze, in-memory)", async () => {
+    const writer = createInMemoryAuditWriter();
+    const ctx = createExecutionContext({ correlationId: "ac06-D1" });
+    const appended = await writer.append({
+      eventType: "system.config_loaded",
+      context: ctx,
+      metadata: {
+        nested: { deep: "original", deeper: { leaf: 1 } },
+        arr: [{ x: 1 }, { y: 2 }],
+        scalar: "s",
+      },
+    });
+
+    // The returned event is itself deeply frozen.
+    expect(appended.metadata).toEqual({
+      nested: { deep: "original", deeper: { leaf: 1 } },
+      arr: [{ x: 1 }, { y: 2 }],
+      scalar: "s",
+    });
+
+    const retrieved = await writer.query({ correlationId: "ac06-D1" });
+    expect(retrieved).toHaveLength(1);
+    const m = retrieved[0]!.metadata as Record<string, unknown>;
+
+    // Top-level field is frozen.
+    expect(() => {
+      (m as { scalar: string }).scalar = "tampered";
+    }).toThrow();
+    // Nested object field is frozen (the previous shallow-freeze gap).
+    expect(() => {
+      ((m.nested as { deep: string }).deep) = "tampered";
+    }).toThrow();
+    // Deeper-nested object field is frozen.
+    expect(() => {
+      (((m.nested as { deeper: { leaf: number } }).deeper).leaf) = 999;
+    }).toThrow();
+    // Adding a new key to a nested frozen object throws.
+    expect(() => {
+      (m.nested as Record<string, unknown>).newProp = "x";
+    }).toThrow();
+    // Array element object field is frozen.
+    expect(() => {
+      ((m.arr as Array<{ x?: number; y?: number }>)[0]!.x) = 999;
+    }).toThrow();
+    // Array mutation (push) on a frozen array throws.
+    expect(() => {
+      (m.arr as unknown[]).push({ z: 3 });
+    }).toThrow();
+
+    // Value is unchanged after all attempted mutations.
+    expect((m.nested as { deep: string }).deep).toBe("original");
+    expect(((m.nested as { deeper: { leaf: number } }).deeper).leaf).toBe(1);
+    expect((m.arr as Array<{ x?: number }>).length).toBe(2);
+  });
+
+  test("the caller's own metadata input is not frozen in place (deep clone)", async () => {
+    const writer = createInMemoryAuditWriter();
+    const ctx = createExecutionContext({ correlationId: "ac06-D2" });
+    const callerMetadata = { nested: { deep: "v" } };
+    await writer.append({
+      eventType: "system.startup",
+      context: ctx,
+      metadata: callerMetadata,
+    });
+    // The caller can still mutate their own object after append — the
+    // writer must not freeze the caller's input in place.
+    expect(() => {
+      callerMetadata.nested.deep = "mutated-by-caller";
+    }).not.toThrow();
+    expect(callerMetadata.nested.deep).toBe("mutated-by-caller");
+
+    // ...and the stored event reflects the value at append time, not the
+    // caller's later mutation (deep clone, no shared reference).
+    const retrieved = await writer.query({ correlationId: "ac06-D2" });
+    expect(retrieved[0]!.metadata).toEqual({ nested: { deep: "v" } });
+  });
+
+  test("file-backed entries are deeply immutable after reload across instances", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opencon-audit-deep-"));
+    try {
+      const file = join(dir, "audit.jsonl");
+      const w1 = createFileAuditWriter(file);
+      const ctx = createExecutionContext({ correlationId: "ac06-D3" });
+      await w1.append({
+        eventType: "system.startup",
+        context: ctx,
+        metadata: { nested: { deep: "persisted", arr: [{ x: 1 }] } },
+      });
+
+      // New writer instance simulates a restart; loaded entries must be
+      // deeply frozen so prior metadata cannot be mutated.
+      const w2 = createFileAuditWriter(file);
+      const retrieved = await w2.query({ correlationId: "ac06-D3" });
+      expect(retrieved).toHaveLength(1);
+      const m = retrieved[0]!.metadata as { nested: { deep: string; arr: Array<{ x: number }> } };
+      expect(m.nested.deep).toBe("persisted");
+      expect(() => {
+        m.nested.deep = "tampered";
+      }).toThrow();
+      expect(() => {
+        m.nested.arr[0]!.x = 999;
+      }).toThrow();
+      expect(() => {
+        m.nested.arr.push({ x: 2 });
+      }).toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+

@@ -35,6 +35,14 @@ reproducibility and audit surface.
 - **Configuration:** typed, validated, fail-fast, with safe development
   defaults and required-secret enforcement in non-development
   environments. Snapshot is frozen (immutable) for process lifetime.
+  Secrets boundary: `ConfigurationProvider.get()` throws
+  `SecretAccessError` (classification `invariant`) for any classified
+  secret key — secret material is NEVER returned through the config
+  provider. `getSecretReference()` returns an opaque `SecretReference`
+  (`key` + redacted diagnostics, never the value); the value is
+  resolved exclusively by the `SecretProvider` at the infrastructure
+  boundary. This closes the boundary leak where secrets could previously
+  be retrieved via `get()` / `getSecretReference()`.
 - **Execution/correlation context:** propagates across HTTP (via
   `X-Correlation-Id`/`X-Causation-Id` headers and AsyncLocalStorage) and
   worker execution (via `deriveExecutionContext`).
@@ -46,10 +54,16 @@ reproducibility and audit surface.
   module/component, and classified errors.
 - **Health/readiness/liveness:** `/health`, `/ready`, `/live`.
 - **Audit foundation:** append-only `AuditWriter` (in-memory + file
-  backed), entries are deeply frozen (immutability enforced).
+  backed). Entries are DEEPLY frozen — the event object, its metadata,
+  and every nested object/array reachable through it are recursively
+  immutable (deep freeze via `structuredClone` + `deepFreeze`), so
+  callers cannot mutate prior entries, including nested metadata. The
+  caller's own input metadata is cloned, never frozen in place.
 - **Architecture enforcement:** deterministic import scanner enforcing
   dependency direction and adapter isolation; an intentional failing
-  fixture proves it fires.
+  fixture proves it fires. Enforced in CI via `.github/workflows/ci.yml`
+  (runs `typecheck` + `arch:check` + `bun test` on every push and PR
+  targeting `main`), satisfying NET-W001 §4.8 ("must be enforceable in CI").
 
 ## 3. What is deliberately NOT implemented (out of scope per §5)
 

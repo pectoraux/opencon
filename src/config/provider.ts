@@ -5,14 +5,25 @@
  * snapshot, and exposes redacted diagnostics. Fail-fast on invalid
  * required configuration (AC-04). Domain modules consume the snapshot
  * through the {@link ConfigurationProvider} interface declared in core.
+ *
+ * SECRETS BOUNDARY (architectural invariant, enforced here):
+ * Secret material is never returned through this provider. {@link get}
+ * throws {@link SecretAccessError} for any key classified as a secret;
+ * {@link getSecretReference} returns an opaque {@link SecretReference}
+ * (key + redacted diagnostics) that is resolved to the value only by
+ * the {@link SecretProvider}. The store of raw values is private and
+ * never exposed. This closes the boundary leak where secret values
+ * (DATABASE_URL, REDIS_URL, OBJECT_STORAGE_BUCKET, …) could previously
+ * be retrieved through the ConfigurationProvider.
  */
 
 import { ConfigSchema, CONFIG_FIELD_CLASSIFICATIONS, REQUIRED_IN_PRODUCTION } from "./schema.ts";
-import { ConfigurationValidationError } from "../core/errors.ts";
+import { ConfigurationValidationError, SecretAccessError } from "../core/errors.ts";
 import type {
   ConfigFieldDescriptor,
   ConfigSnapshot,
   ConfigurationProvider,
+  SecretReference,
 } from "../core/config.ts";
 
 export interface LoadConfigOptions {
@@ -81,26 +92,70 @@ export function loadConfig(opts: LoadConfigOptions = {}): {
     frozenAt,
   }) as ConfigSnapshot;
 
+  // Private store of raw validated values. This is NEVER exposed
+  // outside this closure for secret keys: get() throws on secrets and
+  // getSecretReference() returns only a redacted reference. The value
+  // is resolved exclusively by the SecretProvider at the infra boundary.
   const store = new Map<string, unknown>(Object.entries(raw));
+  // Catalog of ALL recognized keys (secret + non-secret). Used to
+  // distinguish "unknown key" (ConfigurationValidationError) from
+  // "known secret accessed via get()" (SecretAccessError) — the latter
+  // must fire even when the secret is absent in the environment.
+  const knownKeys: ReadonlySet<string> = new Set(
+    CONFIG_FIELD_CLASSIFICATIONS.map((f) => f.key),
+  );
+  const secretKeys: ReadonlySet<string> = new Set(
+    CONFIG_FIELD_CLASSIFICATIONS
+      .filter((f) => f.classification === "secret")
+      .map((f) => f.key),
+  );
+
   const provider: ConfigurationProvider = {
     snapshot,
     get<T = string>(key: string): T {
-      if (!store.has(key)) {
+      // Unknown key (not in the catalog at all).
+      if (!knownKeys.has(key)) {
         throw new ConfigurationValidationError(
           `Unknown configuration key: ${key}`,
           { key },
         );
       }
-      return store.get(key) as T;
-    },
-    getSecretReference(key: string): string {
-      if (!store.has(key)) {
-        throw new ConfigurationValidationError(
-          `Secret not configured: ${key}`,
+      // SECRETS BOUNDARY: never return secret material through get().
+      // Fires for every classified secret — present OR absent — so the
+      // leak is closed regardless of whether the env value is set.
+      if (secretKeys.has(key)) {
+        throw new SecretAccessError(
+          `Configuration key "${key}" is classified as a secret and must be resolved through the SecretProvider, not via ConfigurationProvider.get()`,
           { key },
         );
       }
-      return String(store.get(key));
+      return store.get(key) as T;
+    },
+    getSecretReference(key: string): SecretReference {
+      // Unknown key (not in the catalog at all).
+      if (!knownKeys.has(key)) {
+        throw new ConfigurationValidationError(
+          `Unknown configuration key: ${key}`,
+          { key },
+        );
+      }
+      if (!secretKeys.has(key)) {
+        throw new SecretAccessError(
+          `Configuration key "${key}" is not classified as a secret; use get() for non-secret values`,
+          { key },
+        );
+      }
+      // Return an opaque reference: the logical key plus redacted
+      // diagnostics. NEVER the secret value. Works whether or not a
+      // value is present in the environment (hasValue reflects presence).
+      // The SecretProvider resolves reference.key to the value at the
+      // infra boundary.
+      const hasValue = Boolean(source[key]);
+      return Object.freeze({
+        key,
+        redactedPreview: hasValue ? redact(key) : "<unset>",
+        hasValue,
+      }) as SecretReference;
     },
     describe: () => descriptors,
     isSecret: (key: string) =>
