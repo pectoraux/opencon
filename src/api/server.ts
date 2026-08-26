@@ -1021,6 +1021,202 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // -- NET-W007 reputation routes ---------------------------------------
+
+    // POST /api/reputation/policies — create a scoring-policy version
+    // (protected).
+    if (path === "/api/reputation/policies" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "reputationPolicy.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseReputationPolicyInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createReputationPolicy(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/reputation/policies/:policyId/versions — list a lineage's
+    // versions (public).
+    if (
+      path.startsWith("/api/reputation/policies/") &&
+      path.endsWith("/versions") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const policyId = path.slice("/api/reputation/policies/".length, -"/versions".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId") ?? undefined;
+      const views = await opts.commands.listReputationPolicyVersions(ctx, policyId, organizationScopeId);
+      await send(res, 200, { policyId, versions: views });
+      return true;
+    }
+
+    // GET /api/reputation/policies/:id — fetch a policy version by
+    // record id (public).
+    if (path.startsWith("/api/reputation/policies/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/reputation/policies/".length);
+      const view = await opts.commands.getReputationPolicy(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `reputation scoring policy not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/reputation/inputs — record a reputation input
+    // (protected; every input carries ≥1 upstream source reference).
+    if (path === "/api/reputation/inputs" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "reputationInput.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseReputationInputInput(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recordReputationInput(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/reputation/inputs/:id — fetch a reputation input (public).
+    if (path.startsWith("/api/reputation/inputs/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/reputation/inputs/".length);
+      const view = await opts.commands.getReputationInput(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `reputation input not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/reputation/subjects/:personId/scores — deterministic
+    // compute preview (public, read-only, explicit referenceAt).
+    if (
+      path.startsWith("/api/reputation/subjects/") &&
+      path.endsWith("/scores") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const personId = path.slice("/api/reputation/subjects/".length, -"/scores".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      const policyId = url.searchParams.get("policyId");
+      const referenceAt = url.searchParams.get("referenceAt");
+      const versionParam = url.searchParams.get("version");
+      if (!organizationScopeId || !policyId || !referenceAt) {
+        throw apiValidationError(
+          "query parameters organizationScopeId, policyId and referenceAt are required",
+        );
+      }
+      const version = versionParam !== null ? Number(versionParam) : undefined;
+      if (version !== undefined && (!Number.isInteger(version) || version < 1)) {
+        throw apiValidationError('query parameter "version" must be a positive integer');
+      }
+      const view = await opts.commands.computeReputationScores(ctx, {
+        organizationScopeId,
+        subjectPersonId: personId,
+        policyId,
+        ...(version !== undefined ? { version } : {}),
+        referenceAt,
+      });
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/reputation/snapshots — record a reputation snapshot
+    // (protected; computes deterministically inside the authoritative
+    // transaction).
+    if (path === "/api/reputation/snapshots" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "reputationSnapshot.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseReputationComputationInput(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recordReputationSnapshot(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/reputation/snapshots/:id — fetch a snapshot (public).
+    if (path.startsWith("/api/reputation/snapshots/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/reputation/snapshots/".length);
+      const view = await opts.commands.getReputationSnapshot(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `reputation snapshot not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/reputation/subjects/:personId/snapshots/latest — the
+    // subject's latest snapshot (public).
+    if (
+      path.startsWith("/api/reputation/subjects/") &&
+      path.endsWith("/snapshots/latest") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const personId = path.slice("/api/reputation/subjects/".length, -"/snapshots/latest".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const view = await opts.commands.getLatestReputationSnapshot(ctx, organizationScopeId, personId);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `no reputation snapshot recorded for subject ${personId}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/reputation/subjects/:personId/snapshots — the subject's
+    // snapshot history, oldest → newest (public).
+    if (
+      path.startsWith("/api/reputation/subjects/") &&
+      path.endsWith("/snapshots") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const personId = path.slice("/api/reputation/subjects/".length, -"/snapshots".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const views = await opts.commands.getReputationSnapshotHistory(ctx, organizationScopeId, personId);
+      await send(res, 200, { subjectPersonId: personId, snapshots: views });
+      return true;
+    }
+
+    // GET /api/reputation/subjects/:personId/inputs — the subject's
+    // reputation inputs (public).
+    if (
+      path.startsWith("/api/reputation/subjects/") &&
+      path.endsWith("/inputs") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const personId = path.slice("/api/reputation/subjects/".length, -"/inputs".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const views = await opts.commands.listReputationInputs(ctx, organizationScopeId, personId);
+      await send(res, 200, { subjectPersonId: personId, inputs: views });
+      return true;
+    }
+
     return false;
   }
 
@@ -1362,6 +1558,89 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       maturation: m,
       rollupStrategy: typeof obj.rollupStrategy === "string" ? obj.rollupStrategy : undefined,
       observationIds: Array.isArray(obj.observationIds) ? (obj.observationIds as string[]) : undefined,
+    };
+  }
+
+  // NET-W007: parse a scoring-policy create input. The rules array is
+  // passed through to the domain service, which validates it fully
+  // (one rule per dimension, deterministic parameters).
+  function parseReputationPolicyInput(body: unknown): import("./port.ts").ApiCreateReputationPolicyInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const rules = obj.rules;
+    if (!Array.isArray(rules) || rules.length === 0) {
+      throw apiValidationError('field "rules" must be a non-empty array of scoring rules');
+    }
+    const version = obj.version;
+    if (typeof version !== "number" || !Number.isInteger(version) || version < 1) {
+      throw apiValidationError('field "version" must be a positive integer');
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      policyId: strField(obj, "policyId"),
+      version,
+      description: typeof obj.description === "string" ? obj.description : undefined,
+      rules: rules as Record<string, unknown>[],
+    };
+  }
+
+  // NET-W007: parse a reputation-input record input. sources is REQUIRED
+  // (≥1 upstream reference — a bare activity/spend assertion cannot enter
+  // the reputation system).
+  function parseReputationInputInput(body: unknown): import("./port.ts").ApiRecordReputationInputInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const sources = obj.sources;
+    if (!Array.isArray(sources) || sources.length === 0) {
+      throw apiValidationError(
+        'field "sources" must be a non-empty array of { kind, id } upstream references (evidence, proof of value, measured outcome or contribution)',
+      );
+    }
+    for (const source of sources) {
+      if (!source || typeof source !== "object") {
+        throw apiValidationError('each entry of "sources" must be an object with kind and id');
+      }
+      const s = source as Record<string, unknown>;
+      if (typeof s.kind !== "string" || !s.kind.trim()) {
+        throw apiValidationError('each entry of "sources" requires a non-empty "kind"');
+      }
+      if (typeof s.id !== "string" || !s.id.trim()) {
+        throw apiValidationError('each entry of "sources" requires a non-empty "id"');
+      }
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      subjectPersonId: strField(obj, "subjectPersonId"),
+      dimension: strField(obj, "dimension"),
+      sources: sources as Record<string, unknown>[],
+      description: typeof obj.description === "string" ? obj.description : undefined,
+      occurredAt: strField(obj, "occurredAt"),
+      idempotencyKey: strField(obj, "idempotencyKey"),
+    };
+  }
+
+  // NET-W007: parse the shared computation/snapshot input. referenceAt is
+  // REQUIRED (the deterministic decay reference — no wall clock).
+  function parseReputationComputationInput(body: unknown): import("./port.ts").ApiRecordReputationSnapshotInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const version = obj.version;
+    if (version !== undefined && (typeof version !== "number" || !Number.isInteger(version) || version < 1)) {
+      throw apiValidationError('field "version" must be a positive integer when provided');
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      subjectPersonId: strField(obj, "subjectPersonId"),
+      policyId: strField(obj, "policyId"),
+      ...(version !== undefined ? { version } : {}),
+      referenceAt: strField(obj, "referenceAt"),
+      idempotencyKey: strField(obj, "idempotencyKey"),
     };
   }
 

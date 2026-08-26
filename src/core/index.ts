@@ -48,3 +48,10 @@ export * from "./evidence.ts";
 // work items (/reputation, /settlement, NET-W022 providers) consume
 // the vocabulary.
 export * from "./measurement.ts";
+// NET-W007 shared reputation vocabulary (the frozen dimension set
+// REP-001, input source kinds, derived verified/indicated bases, and
+// the deterministic per-dimension scoring-rule parameters REP-003).
+// The /reputation domain implements the behaviour; later work items
+// (fraud signals NET-W009, creator reputation NET-W015, portable
+// proofs NET-W031) consume the vocabulary.
+export * from "./reputation.ts";

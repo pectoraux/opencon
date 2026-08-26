@@ -44,11 +44,14 @@ const NET_W004_DOMAINS = ["opportunities", "contributions", "workflows"];
 // NET-W006 UPDATE: "outcomes" is now implemented (NET-W006 — outcome
 // observations, attribution, experiments/incrementality,
 // counterfactual baselines, measured-outcome maturation) and is no
-// longer deferred. The remaining domains stay skeletal until their
-// work items.
+// longer deferred. NET-W007 UPDATE: reputation is implemented by
+// NET-W007 (a separate work item) and left this list; the NET-W004
+// intent — NET-W004 itself introduced NO reputation behaviour — is
+// preserved (reputation's implementation arrives only with the
+// NET-W007 work item + its own AC-08 regression).
 const DEFERRED_DOMAINS = [
   "campaigns", "inventory", "creators", "demand", "benefits",
-  "reputation", "settlement", "disputes",
+  "settlement", "disputes",
 ];
 
 async function listTsFiles(dir: string, out: string[] = []): Promise<string[]> {

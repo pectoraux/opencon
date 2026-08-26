@@ -220,17 +220,18 @@ describe("NET-W006-AC-08 architecture/out-of-scope regression", () => {
     }
   });
 
-  test("settlement/reputation domains remain skeletal (NET-W006 introduces NO economic authority)", async () => {
-    // NET-W006's key rule: measurement ≠ economic truth. The
-    // economic domains are untouched by this work item.
-    for (const dir of ["settlement", "reputation"]) {
-      const mod = await import(`../../src/${dir}/module.ts`);
-      const moduleExport = Object.values(mod)[0] as {
-        tier: string;
-        describe?: () => string;
-      };
-      expect(moduleExport.tier).toBe("domain");
-      expect(moduleExport.describe?.() ?? "").toMatch(/skeleton/i);
-    }
+  test("the settlement domain remains skeletal (NET-W006 introduces NO economic authority; reputation arrives in NET-W007)", async () => {
+    // NET-W006's key rule: measurement ≠ economic truth. The economic
+    // domains are untouched by this work item. NET-W007 UPDATE:
+    // reputation is now implemented by NET-W007 (multidimensional
+    // derived trust — still NO economic authority); only settlement
+    // remains skeletal here (NET-W008).
+    const mod = await import("../../src/settlement/module.ts");
+    const moduleExport = Object.values(mod)[0] as {
+      tier: string;
+      describe?: () => string;
+    };
+    expect(moduleExport.tier).toBe("domain");
+    expect(moduleExport.describe?.() ?? "").toMatch(/skeleton/i);
   });
 });
