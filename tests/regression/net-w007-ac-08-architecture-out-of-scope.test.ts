@@ -146,16 +146,38 @@ describe("NET-W007-AC-08 architecture/out-of-scope regression", () => {
     expect(violations).toEqual([]);
   });
 
-  test("the settlement/ledger economic domains remain skeletal (NET-W008 untouched; reputation created no economic authority)", async () => {
-    for (const dir of ["settlement"]) {
-      const mod = await import(`../../src/${dir}/module.ts`);
-      const moduleExport = Object.values(mod)[0] as {
-        tier: string;
-        describe?: () => string;
-      };
-      expect(moduleExport.tier).toBe("domain");
-      expect(moduleExport.describe?.() ?? "").toMatch(/skeleton/i);
+  test("the settlement domain is implemented by NET-W008 (W007's intent — reputation carries no economic units — is preserved)", async () => {
+    // NET-W007's key rule: reputation ≠ economic ledger. The economic
+    // authority arrived in NET-W008 (/settlement). What SURVIVES from
+    // the W007 contract: the reputation domain still introduces NO
+    // economic units and NO credit/settlement channel — the economic
+    // input gate in /settlement accepts only proof_of_value /
+    // measured_outcome / evidence source kinds (a reputation snapshot
+    // id is not an economic source — asserted by the NET-W008 AC-03
+    // suite), and the reputation port carries no credit fields.
+    const reputationPort = await readFile(join(SRC, "reputation/port.ts"), "utf8");
+    for (const token of [
+      "creditBalance",
+      "cashValue",
+      "cashAmount",
+      "settlementAmount",
+      "rewardAmount",
+      "spendAmount",
+      "depositAmount",
+      "wealthAmount",
+      "issueCredits",
+    ]) {
+      expect(reputationPort.includes(token)).toBe(false);
     }
+    // The settlement module is no longer skeletal (NET-W008 owns it).
+    const mod = await import("../../src/settlement/module.ts");
+    const moduleExport = Object.values(mod)[0] as {
+      tier: string;
+      describe?: () => string;
+    };
+    expect(moduleExport.tier).toBe("domain");
+    expect(moduleExport.describe?.() ?? "").toMatch(/NET-W008/);
+    expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
   });
 
   test("the frozen dependency vocabulary did not grow a reputation lifecycle subject (reputation is append-only, not a workflow subject)", async () => {

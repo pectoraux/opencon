@@ -220,18 +220,28 @@ describe("NET-W006-AC-08 architecture/out-of-scope regression", () => {
     }
   });
 
-  test("the settlement domain remains skeletal (NET-W006 introduces NO economic authority; reputation arrives in NET-W007)", async () => {
+  test("the settlement domain is implemented by NET-W008 (W006's intent — measurement ≠ economic truth — is preserved: outcomes still mints no credits)", async () => {
     // NET-W006's key rule: measurement ≠ economic truth. The economic
-    // domains are untouched by this work item. NET-W007 UPDATE:
-    // reputation is now implemented by NET-W007 (multidimensional
-    // derived trust — still NO economic authority); only settlement
-    // remains skeletal here (NET-W008).
+    // authority arrived in NET-W008 (/settlement — the economic
+    // ledger); the OUTCOMES domain itself still mints no credits, no
+    // settlement and no pricing. The NET-W008 AC-08 suite asserts the
+    // economic domain's own boundaries; here we assert the W006
+    // invariant that survives: the outcomes domain carries NO economic
+    // authority of its own (measured outcomes are a qualifying SOURCE
+    // for economic inputs — the gate itself lives in /settlement).
+    const outcomesPort = await readFile(join(SRC, "outcomes/port.ts"), "utf8");
+    expect(outcomesPort).toContain("measurement ≠ economic truth");
+    for (const token of ["issueCredits", "creditAmount", "settleAmount", "cashPayable"]) {
+      expect(outcomesPort.includes(token)).toBe(false);
+    }
+    // The settlement module is no longer skeletal (NET-W008 owns it).
     const mod = await import("../../src/settlement/module.ts");
     const moduleExport = Object.values(mod)[0] as {
       tier: string;
       describe?: () => string;
     };
     expect(moduleExport.tier).toBe("domain");
-    expect(moduleExport.describe?.() ?? "").toMatch(/skeleton/i);
+    expect(moduleExport.describe?.() ?? "").toMatch(/NET-W008/);
+    expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
   });
 });

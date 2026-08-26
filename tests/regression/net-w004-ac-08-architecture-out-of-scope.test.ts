@@ -49,9 +49,14 @@ const NET_W004_DOMAINS = ["opportunities", "contributions", "workflows"];
 // intent — NET-W004 itself introduced NO reputation behaviour — is
 // preserved (reputation's implementation arrives only with the
 // NET-W007 work item + its own AC-08 regression).
+// NET-W008 UPDATE: settlement is implemented by NET-W008 (a separate
+// work item) and left this list; the NET-W004 intent — NET-W004
+// itself introduced NO economic behaviour — is preserved (the
+// economic ledger arrives only with the NET-W008 work item + its own
+// AC-08 regression).
 const DEFERRED_DOMAINS = [
   "campaigns", "inventory", "creators", "demand", "benefits",
-  "settlement", "disputes",
+  "disputes",
 ];
 
 async function listTsFiles(dir: string, out: string[] = []): Promise<string[]> {
