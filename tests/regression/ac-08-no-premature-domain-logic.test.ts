@@ -55,17 +55,31 @@ const NET_W002_DOMAINS = ["identity", "organizations", "participants"];
 // including the NET-W004 three.
 const NET_W004_DOMAINS = ["opportunities", "contributions", "workflows"];
 
-// Domains still deferred past NET-W004 (must remain skeletons).
+// Domains implemented in NET-W005 (no longer skeletons). The evidence
+// domain introduces the evidence/Proof-of-Value FOUNDATION (deterministic
+// grades, confidence/uncertainty, commitments, attestations, aggregation,
+// provider-neutral outcome claims, and the PoV model whose lifecycle
+// routes through /workflows). It introduces NO economically material
+// behaviour: no credit issuance, no settlement, no reputation mutation,
+// no campaign delivery, no benefit allocation — the Proof-of-Value
+// carries evidence lineage ONLY (NET-W005 work order §5 non-goals;
+// economic value attaches in NET-W008).
+const NET_W005_DOMAINS = ["evidence"];
+
+// Domains still deferred past NET-W005 (must remain skeletons).
 const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
-  (d) => !NET_W002_DOMAINS.includes(d) && !NET_W004_DOMAINS.includes(d),
+  (d) =>
+    !NET_W002_DOMAINS.includes(d) &&
+    !NET_W004_DOMAINS.includes(d) &&
+    !NET_W005_DOMAINS.includes(d),
 );
 
 // Patterns that would indicate economically/material domain logic,
 // which the foundation work item explicitly forbids (§5 non-goals).
-// Applied to ALL 16 domains — including the NET-W002 three, which
-// introduce identity/org/authz behaviour but NEVER economic-material
-// behaviour (no credit issuance, no settlement, no reputation mutation,
-// no campaign delivery, no benefit allocation).
+// Applied to ALL 16 domains — including the NET-W002/NET-W005 ones, which
+// introduce identity/org/authz/evidence-foundation behaviour but NEVER
+// economic-material behaviour (no credit issuance, no settlement, no
+// reputation mutation, no campaign delivery, no benefit allocation).
 const FORBIDDEN_PATTERNS: RegExp[] = [
   /issueCredit/i,
   /mintCredit/i,
@@ -74,9 +88,21 @@ const FORBIDDEN_PATTERNS: RegExp[] = [
   /allocateBenefit/i,
   /deliverCampaign/i,
   /issueReward/i,
-  /ProofOfValue/i,
-  /createProofOfValue/i,
   /\bcash(?:Settlement|Payout)\b/i,
+];
+
+// NET-W005 UPDATE: the Proof-of-Value object now legitimately lives in
+// the EVIDENCE domain — it is the evidence-backed claim foundation
+// (spec/work-orders/NET-W005.md), NOT economic settlement. The bare
+// /ProofOfValue/i identifier pattern was REMOVED because the workflows
+// domain legitimately references the proof_of_value lifecycle subject
+// (proofOfValueRepository routing) — /workflows is the SOLE lifecycle
+// authority for EVERY subject kind (architecture-lock §7), and its
+// routing reference carries no PoV ownership semantics. The meaningful
+// guard that REMAINS: PoV CREATION is evidence-domain only — the
+// createProofOfValue pattern is forbidden everywhere else.
+const PROOF_OF_VALUE_PATTERNS: RegExp[] = [
+  /createProofOfValue/i,
 ];
 
 async function listTsFiles(dir: string, out: string[] = []): Promise<string[]> {
@@ -144,12 +170,38 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
     }
   });
 
+  test("NET-W005 domain modules are non-skeletal (tier domain, no 'skeleton' marker, reference NET-W005)", async () => {
+    for (const dir of NET_W005_DOMAINS) {
+      const modulePath = join(SRC, dir, "module.ts");
+      expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
+      const mod = await import(`../../src/${dir}/module.ts`);
+      const moduleExport = Object.values(mod)[0] as {
+        name: string;
+        tier: string;
+        describe?: () => string;
+      };
+      expect(moduleExport.tier).toBe("domain");
+      // The evidence domain carries the NET-W005 evidence/Proof-of-Value
+      // foundation (deterministic grades, confidence, commitments,
+      // attestations, aggregation, outcome claims, PoV model). Still NO
+      // economically material behaviour (see FORBIDDEN_PATTERNS).
+      expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
+      expect(moduleExport.describe?.() ?? "").toMatch(/NET-W005/i);
+    }
+  });
+
   test("domain source contains no forbidden material-operation patterns", async () => {
     for (const dir of DOMAIN_DIRS) {
       const files = await listTsFiles(join(SRC, dir));
+      // The Proof-of-Value patterns are permitted ONLY in the evidence
+      // domain (its first-class object, NET-W005); every other domain
+      // is scanned for them too.
+      const patterns = NET_W005_DOMAINS.includes(dir)
+        ? FORBIDDEN_PATTERNS
+        : [...FORBIDDEN_PATTERNS, ...PROOF_OF_VALUE_PATTERNS];
       for (const file of files) {
         const content = await readFile(file, "utf8");
-        for (const pattern of FORBIDDEN_PATTERNS) {
+        for (const pattern of patterns) {
           if (pattern.test(content)) {
             throw new Error(
               `Forbidden material-operation pattern ${pattern} found in ${relative(REPO, file)}`,

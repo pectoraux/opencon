@@ -62,6 +62,7 @@ import { createWorkflowService } from "../../src/workflows/workflow-service.ts";
 import { createLifecycleRepository } from "../../src/workflows/lifecycle-repository.ts";
 import { createAuthorityOpportunityRepository } from "../../src/opportunities/authority-opportunity-repository.ts";
 import { createAuthorityContributionRepository } from "../../src/contributions/authority-contribution-repository.ts";
+import { createAuthorityProofOfValueRepository } from "../../src/evidence/authority-proof-of-value-repository.ts";
 import { createPostgresIdempotencyStore } from "../../src/persistence/idempotency-store.ts";
 import type { PostgresAuthorityShim } from "../../src/persistence/postgres-authority-shim.ts";
 import type { TransitionAuthorizer } from "../../src/workflows/port.ts";
@@ -95,6 +96,12 @@ function buildWorkflow(
     ),
     contributionRepository: createLifecycleRepository(
       createAuthorityContributionRepository({ authority: runtime.postgresAuthority }),
+    ),
+    // NET-W005: the workflow service now routes proof_of_value
+    // transitions to a PoV lifecycle repository; this NET-W004 test
+    // rebuilds the service with the same shape the runtime wires.
+    proofOfValueRepository: createLifecycleRepository(
+      createAuthorityProofOfValueRepository({ authority: runtime.postgresAuthority }),
     ),
     authorizer: allowAllAuthorizer,
     auditWriter,

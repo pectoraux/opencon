@@ -1,6 +1,7 @@
 /**
  * Transition table — the canonical, exhaustive legal-transition matrix
- * for the Opportunity/Contribution lifecycle (NET-W004 §3.3, §8).
+ * for the Opportunity/Contribution lifecycle (NET-W004 §3.3, §8) and the
+ * Proof-of-Value lifecycle (NET-W005 §3.8).
  *
  * Work order ref: §3.3 Workflow authority:
  *   DRAFT → READY → ASSIGNED → IN_PROGRESS → SUBMITTED → MEASURING
@@ -14,21 +15,32 @@
  *   source/target/required policy action/audit event name/version
  *   requirement.
  *
+ * NET-W005 §3.8 adds the Proof-of-Value lifecycle:
+ *   DRAFT → MEASURING → EVALUATING → VERIFIED
+ *   Exceptional: REJECTED (from MEASURING/EVALUATING), CANCELLED (from
+ *   DRAFT/MEASURING/EVALUATING). The PoV reuses the canonical state
+ * vocabulary (MEASURING = evidence gathering, EVALUATING = aggregation +
+ * attestation, VERIFIED = terminal confirmation) so the state universe
+ * stays small and the workflow machinery is untouched. The evidence
+ * domain service validates PoV business preconditions (≥1 evidence for
+ * MEASURING→EVALUATING; aggregation + ≥1 MEASURED/ATTESTED evidence +
+ * ≥1 attestation for EVALUATING→VERIFIED) but NEVER mutates lifecycle
+ * state itself — every transition routes through this table.
+ *
  * This file is the SOLE lifecycle authority. Domain services that own
- * Opportunity/Contribution entities may validate business preconditions
- * but may NOT mutate lifecycle state directly — they must route every
- * transition through the workflow service (which evaluates this table).
+ * Opportunity/Contribution/Proof-of-Value entities may validate business
+ * preconditions but may NOT mutate lifecycle state directly — they must
+ * route every transition through the workflow service (which evaluates
+ * this table).
  *
  * The table is data, not behaviour. The state machine in
  * `state-machine.ts` is a pure evaluator over this table.
  *
- * Out of scope (work order §5): no economic value, reputation, settlement,
- * fraud decision, evidence evaluation or Proof-of-Value. Transitions
- * that require later domains are represented as states + preconditions
- * only. For example, `EVALUATING` is a state whose preconditions
- * (evidence presence) are checked by later work items; NET-W004 just
- * routes the transition legally. `SETTLING` / `SETTLED` similarly are
- * routing states; the actual settlement lives in NET-W008.
+ * Out of scope (NET-W004 §5): no economic value, reputation, settlement,
+ * fraud decision. NET-W005 attaches evidence/Proof-of-Value FOUNDATION
+ * semantics (grades, confidence, aggregation, attestations) — still NO
+ * economic value: the Proof-of-Value carries evidence lineage only;
+ * credit issuance/settlement remain NET-W008.
  */
 
 import type {
@@ -37,6 +49,14 @@ import type {
   LifecycleState,
   LifecycleSubjectKind,
 } from "../core/workflow.ts";
+// NET-W005: the pure policy-action/audit-event string builders moved to
+// CORE (src/core/workflow.ts) so domain services that REQUEST
+// transitions (the evidence domain's PoV service) derive IDENTICAL
+// actions without importing the workflows domain. Re-exported here for
+// existing consumers.
+import { policyActionFor, auditEventFor } from "../core/workflow.ts";
+
+export { policyActionFor, auditEventFor };
 
 /**
  * A single legal transition rule. Every entry in the transition table
@@ -61,33 +81,6 @@ export interface TransitionRule {
   readonly policyAction: string;
   readonly auditEventName: string;
   readonly requiresEvidenceReference?: boolean;
-}
-
-/**
- * Build the policy-action string for a (subjectKind, from, to) triple.
- * Centralized so the table and the authorization policies stay aligned.
- */
-export function policyActionFor(
-  subjectKind: LifecycleSubjectKind,
-  from: LifecycleState,
-  to: LifecycleState,
-): string {
-  const fromKebab = from.toLowerCase();
-  const toKebab = to.toLowerCase();
-  return `${subjectKind}.transition.${fromKebab}_to_${toKebab}`;
-}
-
-/**
- * Build the audit event name for a (subjectKind, from, to) triple.
- */
-export function auditEventFor(
-  subjectKind: LifecycleSubjectKind,
-  from: LifecycleState,
-  to: LifecycleState,
-): string {
-  const fromKebab = from.toLowerCase();
-  const toKebab = to.toLowerCase();
-  return `${subjectKind}.transition.${fromKebab}_to_${toKebab}`;
 }
 
 /**
@@ -270,14 +263,105 @@ export const CONTRIBUTION_TRANSITION_TABLE: readonly TransitionRule[] = [
 ];
 
 /**
+ * The exhaustive transition table for Proof-of-Value objects
+ * (NET-W005 §3.8). The PoV lifecycle reuses the canonical state
+ * vocabulary with its intended semantics:
+ *
+ *   DRAFT      — created, referencing a subject + outcome claims
+ *   MEASURING  — evidence gathering open (evidence being attached)
+ *   EVALUATING — evidence complete; aggregation + attestations recorded
+ *   VERIFIED   — terminal: the complete, verified Proof-of-Value
+ *                (later work items — NET-W008 — reference it; credit
+ *                issuance requires a VERIFIED PoV, architecture-lock §20)
+ *
+ * Exceptional states: REJECTED (deterministic evaluation rules failed —
+ * from MEASURING or EVALUATING only; rejection is an evaluation outcome,
+ * not a fraud decision — NET-W009/010 own fraud) and CANCELLED (owner
+ * withdrew, from any non-terminal state).
+ *
+ * Domain preconditions validated by the evidence domain service BEFORE
+ * requesting the transition (work order §3.8; the workflow remains the
+ * sole lifecycle mutator):
+ *  - MEASURING → EVALUATING requires ≥1 attached evidence record.
+ *  - EVALUATING → VERIFIED requires a recorded aggregation + ≥1 MEASURED
+ *    or ATTESTED evidence record (never model/self-assessed alone —
+ *    architecture-lock §4: agent/model output is never authoritative)
+ *    + ≥1 attached attestation.
+ *
+ * No BLOCKED/FRAUD_REVIEW/DISPUTED states for the PoV: fraud/dispute
+ * semantics are NET-W009..010 non-goals (NET-W005 §5).
+ */
+export const PROOF_OF_VALUE_TRANSITION_TABLE: readonly TransitionRule[] = [
+  {
+    from: "DRAFT",
+    to: "MEASURING",
+    policyAction: policyActionFor("proof_of_value", "DRAFT", "MEASURING"),
+    auditEventName: auditEventFor("proof_of_value", "DRAFT", "MEASURING"),
+  },
+  {
+    from: "MEASURING",
+    to: "EVALUATING",
+    policyAction: policyActionFor("proof_of_value", "MEASURING", "EVALUATING"),
+    auditEventName: auditEventFor("proof_of_value", "MEASURING", "EVALUATING"),
+    // Requires at least one attached evidence record (validated by the
+    // evidence domain service before the transition is requested).
+    requiresEvidenceReference: true,
+  },
+  {
+    from: "EVALUATING",
+    to: "VERIFIED",
+    policyAction: policyActionFor("proof_of_value", "EVALUATING", "VERIFIED"),
+    auditEventName: auditEventFor("proof_of_value", "EVALUATING", "VERIFIED"),
+    // Requires recorded aggregation + ≥1 MEASURED/ATTESTED evidence +
+    // ≥1 attestation (validated by the evidence domain service).
+    requiresEvidenceReference: true,
+  },
+  {
+    from: "MEASURING",
+    to: "REJECTED",
+    policyAction: policyActionFor("proof_of_value", "MEASURING", "REJECTED"),
+    auditEventName: auditEventFor("proof_of_value", "MEASURING", "REJECTED"),
+  },
+  {
+    from: "EVALUATING",
+    to: "REJECTED",
+    policyAction: policyActionFor("proof_of_value", "EVALUATING", "REJECTED"),
+    auditEventName: auditEventFor("proof_of_value", "EVALUATING", "REJECTED"),
+  },
+  {
+    from: "DRAFT",
+    to: "CANCELLED",
+    policyAction: policyActionFor("proof_of_value", "DRAFT", "CANCELLED"),
+    auditEventName: auditEventFor("proof_of_value", "DRAFT", "CANCELLED"),
+  },
+  {
+    from: "MEASURING",
+    to: "CANCELLED",
+    policyAction: policyActionFor("proof_of_value", "MEASURING", "CANCELLED"),
+    auditEventName: auditEventFor("proof_of_value", "MEASURING", "CANCELLED"),
+  },
+  {
+    from: "EVALUATING",
+    to: "CANCELLED",
+    policyAction: policyActionFor("proof_of_value", "EVALUATING", "CANCELLED"),
+    auditEventName: auditEventFor("proof_of_value", "EVALUATING", "CANCELLED"),
+  },
+  // VERIFIED / REJECTED / CANCELLED are terminal: the table
+  // intentionally contains no rule whose source is a terminal state.
+  // Note: DRAFT → REJECTED is intentionally NOT legal — rejection is
+  // an evaluation outcome and therefore requires the PoV to have at
+  // least entered MEASURING (evidence gathering).
+];
+
+/**
  * Look up the transition table for a subject kind.
  */
 export function transitionTableFor(
   subjectKind: LifecycleSubjectKind,
 ): readonly TransitionRule[] {
-  return subjectKind === "opportunity"
-    ? OPPORTUNITY_TRANSITION_TABLE
-    : CONTRIBUTION_TRANSITION_TABLE;
+  if (subjectKind === "opportunity") return OPPORTUNITY_TRANSITION_TABLE;
+  if (subjectKind === "contribution") return CONTRIBUTION_TRANSITION_TABLE;
+  return PROOF_OF_VALUE_TRANSITION_TABLE;
 }
 
 /**

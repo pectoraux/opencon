@@ -203,7 +203,7 @@ export interface ApiCreateContributionInput {
  */
 export interface ApiRequestTransitionInput {
   readonly subjectId: string;
-  readonly subjectKind: "opportunity" | "contribution";
+  readonly subjectKind: "opportunity" | "contribution" | "proof_of_value";
   readonly targetState: string;
   readonly expectedVersion: number;
   readonly idempotencyKey: string;
@@ -225,6 +225,138 @@ export interface ApiTransitionResultView {
   readonly correlationId: string;
   readonly causationId: string | null;
   readonly transactionId: string;
+}
+
+// -- NET-W005 evidence/proof-of-value views + inputs ----------------
+
+/**
+ * The public view of an evidence record (NET-W005 AC-01). For
+ * sensitive evidence the view carries the commitment + reference
+ * ONLY — the raw material is never stored, so it can never be
+ * returned (architecture-lock §6).
+ */
+export interface ApiEvidenceView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly ownerId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly provenance: Readonly<Record<string, unknown>>;
+  readonly grade: string;
+  readonly confidence: Readonly<Record<string, unknown>>;
+  readonly sensitivity: string;
+  readonly payload: Readonly<Record<string, unknown>> | null;
+  readonly commitment: Readonly<Record<string, unknown>> | null;
+  readonly payloadReference: string | null;
+  readonly createdAt: string;
+}
+
+/** Inputs to create evidence via the API (NET-W005 §3.1). */
+export interface ApiCreateEvidenceInput {
+  readonly organizationScopeId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly provenance: {
+    readonly sourceType: string;
+    readonly sourceId?: string;
+    readonly method: string;
+    readonly collectedAt?: string;
+    readonly collectorId?: string;
+  };
+  readonly confidence: Readonly<Record<string, unknown>>;
+  readonly sensitivity?: string;
+  readonly payload?: Readonly<Record<string, unknown>>;
+  readonly sensitivePayload?: string;
+  readonly commitment?: Readonly<Record<string, unknown>>;
+  readonly payloadReference?: string;
+}
+
+/** The result of a commitment verification (NET-W005 AC-05). */
+export interface ApiCommitmentVerificationView {
+  readonly evidenceId: string;
+  readonly valid: boolean;
+  readonly reason: string;
+}
+
+/** The public view of an outcome claim (NET-W005 AC-03). */
+export interface ApiOutcomeClaimView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly claimantId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly outcomeType: string;
+  readonly claimedValue: { readonly value: number; readonly unit: string };
+  readonly confidence: Readonly<Record<string, unknown>>;
+  readonly evidenceIds: readonly string[];
+  readonly statement: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly version: number;
+}
+
+/** Inputs to create an outcome claim via the API (NET-W005 §3.4). */
+export interface ApiCreateOutcomeClaimInput {
+  readonly organizationScopeId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly outcomeType: string;
+  readonly claimedValue: { readonly value: number; readonly unit: string };
+  readonly confidence: Readonly<Record<string, unknown>>;
+  readonly evidenceIds?: readonly string[];
+  readonly statement?: string;
+}
+
+/** The public view of an attestation (NET-W005 AC-05). */
+export interface ApiAttestationView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly verifierId: string;
+  readonly statement: string;
+  readonly evidenceIds: readonly string[];
+  readonly algorithm: string;
+  readonly signature: string;
+  readonly signedAt: string;
+  readonly createdAt: string;
+}
+
+/** Inputs to create an attestation via the API (NET-W005 §3.5). */
+export interface ApiCreateAttestationInput {
+  readonly organizationScopeId: string;
+  readonly verifierId: string;
+  readonly statement: string;
+  readonly evidenceIds: readonly string[];
+}
+
+/** The result of an attestation verification (NET-W005 AC-05). */
+export interface ApiAttestationVerificationView {
+  readonly attestationId: string;
+  readonly valid: boolean;
+  readonly reason: string;
+}
+
+/** The public view of a proof of value (NET-W005 AC-06). */
+export interface ApiProofOfValueView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly ownerId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly outcomeClaimIds: readonly string[];
+  readonly evidenceIds: readonly string[];
+  readonly attestationIds: readonly string[];
+  readonly state: string;
+  readonly version: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** The detailed proof-of-value view (includes the aggregation). */
+export interface ApiProofOfValueDetailView extends ApiProofOfValueView {
+  readonly aggregation: Readonly<Record<string, unknown>> | null;
+}
+
+/** Inputs to create a proof of value via the API (NET-W005 §3.8). */
+export interface ApiCreateProofOfValueInput {
+  readonly organizationScopeId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly outcomeClaimIds?: readonly string[];
+  readonly evidenceIds?: readonly string[];
 }
 
 /**
@@ -304,13 +436,106 @@ export interface ApiCommands {
    * Request an authorized lifecycle transition (NET-W004 §3.4, §4.1 —
    * the SOLE entry point for authoritative lifecycle mutation).
    * Idempotent: repeating with the same idempotencyKey is a deterministic
-   * replay (NET-W004 §4.4).
+   * replay (NET-W004 §4.4). NET-W005 extends the endpoint to
+   * subjectKind "proof_of_value".
    */
   requestTransition(
     execution: ExecutionContext,
     actorPersonId: string,
     input: ApiRequestTransitionInput,
   ): Promise<ApiTransitionResultView>;
+
+  // -- NET-W005 evidence/proof-of-value commands ------------------
+
+  /** Create an evidence record (NET-W005 AC-01, protected mutation). */
+  createEvidence(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateEvidenceInput,
+  ): Promise<ApiEvidenceView>;
+
+  /** Fetch an evidence record (public read). */
+  getEvidence(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiEvidenceView | null>;
+
+  /** Verify presented plaintext against a stored commitment (AC-05). */
+  verifyEvidenceCommitment(
+    execution: ExecutionContext,
+    id: string,
+    presentedPayload: string,
+  ): Promise<ApiCommitmentVerificationView>;
+
+  /** Create an outcome claim (NET-W005 AC-03, protected mutation). */
+  createOutcomeClaim(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateOutcomeClaimInput,
+  ): Promise<ApiOutcomeClaimView>;
+
+  /** Fetch an outcome claim (public read). */
+  getOutcomeClaim(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiOutcomeClaimView | null>;
+
+  /** Attach evidence to an outcome claim (protected mutation). */
+  attachEvidenceToClaim(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    claimId: string,
+    evidenceId: string,
+  ): Promise<ApiOutcomeClaimView>;
+
+  /** Create an attestation (NET-W005 AC-05, protected mutation). */
+  createAttestation(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateAttestationInput,
+  ): Promise<ApiAttestationView>;
+
+  /** Verify an attestation WITHOUT plaintext disclosure (AC-05). */
+  verifyAttestation(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiAttestationVerificationView>;
+
+  /** Create a proof of value (NET-W005 AC-06, protected mutation). */
+  createProofOfValue(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateProofOfValueInput,
+  ): Promise<ApiProofOfValueView>;
+
+  /** Fetch the detailed view of a proof of value (public read). */
+  getProofOfValue(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiProofOfValueDetailView | null>;
+
+  /** Attach evidence to a proof of value (protected mutation). */
+  attachEvidenceToProof(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    proofId: string,
+    evidenceId: string,
+  ): Promise<ApiProofOfValueView>;
+
+  /** Aggregate the attached evidence on a proof of value (protected). */
+  aggregateProofEvidence(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    proofId: string,
+  ): Promise<ApiProofOfValueDetailView>;
+
+  /** Attach an attestation to a proof of value (protected mutation). */
+  attachAttestationToProof(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    proofId: string,
+    attestationId: string,
+  ): Promise<ApiProofOfValueView>;
 }
 
 export type { ExecutionContext };

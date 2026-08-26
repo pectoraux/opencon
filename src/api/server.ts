@@ -455,7 +455,8 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
     // POST /api/workflows/transitions — request an authorized lifecycle
     // transition (the SOLE entry point for authoritative lifecycle
     // mutation, NET-W004 §4.1). The actor must be authorized for the
-    // subject's organization scope.
+    // subject's organization scope. NET-W005 extends the endpoint to
+    // subjectKind "proof_of_value".
     if (path === "/api/workflows/transitions" && method === "POST" && opts.commands) {
       const commands = opts.commands;
       const guarded = await guardMutation(ctx, req, "workflow.transition", "*", res);
@@ -466,6 +467,252 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
         commands.requestTransition(guarded.execution, guarded.personId, input),
       );
       await send(res, result.executed ? 201 : 200, result);
+      return true;
+    }
+
+    // -- NET-W005 evidence/proof-of-value endpoints --------------------
+    // Every protected mutation is guarded by guardMutation() exactly like
+    // the NET-W004 endpoints (unauthenticated → 403; unauthorized → 403,
+    // deny-by-default). Verification endpoints are non-mutating reads and
+    // therefore public (they present no authority risk: they only compare
+    // presented material against stored commitments).
+
+    // POST /api/evidence — create an evidence record (protected).
+    if (path === "/api/evidence" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "evidence.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseEvidenceInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createEvidence(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/evidence/:id — fetch an evidence record (public read).
+    // Sensitive evidence returns commitment + reference only — the raw
+    // material is never stored, so it can never leak through this view.
+    if (path.startsWith("/api/evidence/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/evidence/".length);
+      const view = await opts.commands.getEvidence(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `evidence not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/evidence/:id/commitment:verify — verify presented
+    // plaintext against the stored commitment (public, non-mutating).
+    if (
+      path.startsWith("/api/evidence/") &&
+      path.endsWith("/commitment:verify") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/evidence/".length, -"/commitment:verify".length);
+      const body = await readBody(req);
+      const obj = body as Record<string, unknown>;
+      const payload = obj.payload;
+      if (typeof payload !== "string") {
+        throw apiValidationError('field "payload" must be a string');
+      }
+      const view = await runWithExecutionContextAsync(ctx, () =>
+        opts.commands!.verifyEvidenceCommitment(ctx, id, payload),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/outcome-claims — create an outcome claim (protected).
+    if (path === "/api/outcome-claims" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "outcomeClaim.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseOutcomeClaimInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createOutcomeClaim(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/outcome-claims/:id — fetch an outcome claim (public read).
+    if (path.startsWith("/api/outcome-claims/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/outcome-claims/".length);
+      const view = await opts.commands.getOutcomeClaim(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `outcome claim not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/outcome-claims/:id/evidence — attach evidence (protected).
+    if (
+      path.startsWith("/api/outcome-claims/") &&
+      path.endsWith("/evidence") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const claimId = path.slice("/api/outcome-claims/".length, -"/evidence".length);
+      const guarded = await guardMutation(ctx, req, "outcomeClaim.attachEvidence", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = body as Record<string, unknown>;
+      const evidenceId = obj.evidenceId;
+      if (typeof evidenceId !== "string" || !evidenceId.trim()) {
+        throw apiValidationError('field "evidenceId" must be a non-empty string');
+      }
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.attachEvidenceToClaim(
+          guarded.execution,
+          guarded.personId,
+          claimId,
+          evidenceId,
+        ),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/attestations — create an attestation (protected).
+    if (path === "/api/attestations" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "attestation.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseAttestationInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createAttestation(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // POST /api/attestations/:id/verify — verify an attestation WITHOUT
+    // plaintext disclosure (public, non-mutating).
+    if (
+      path.startsWith("/api/attestations/") &&
+      path.endsWith("/verify") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/attestations/".length, -"/verify".length);
+      const view = await runWithExecutionContextAsync(ctx, () =>
+        opts.commands!.verifyAttestation(ctx, id),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/proofs-of-value — create a proof of value (protected).
+    if (path === "/api/proofs-of-value" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "proofOfValue.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseProofOfValueInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createProofOfValue(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/proofs-of-value/:id — fetch a proof of value (public read).
+    if (path.startsWith("/api/proofs-of-value/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/proofs-of-value/".length);
+      const view = await opts.commands.getProofOfValue(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `proof of value not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/proofs-of-value/:id/evidence — attach evidence (protected).
+    if (
+      path.startsWith("/api/proofs-of-value/") &&
+      path.endsWith("/evidence") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const proofId = path.slice("/api/proofs-of-value/".length, -"/evidence".length);
+      const guarded = await guardMutation(ctx, req, "proofOfValue.attachEvidence", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = body as Record<string, unknown>;
+      const evidenceId = obj.evidenceId;
+      if (typeof evidenceId !== "string" || !evidenceId.trim()) {
+        throw apiValidationError('field "evidenceId" must be a non-empty string');
+      }
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.attachEvidenceToProof(
+          guarded.execution,
+          guarded.personId,
+          proofId,
+          evidenceId,
+        ),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/proofs-of-value/:id/aggregate — aggregate the attached
+    // evidence deterministically (protected).
+    if (
+      path.startsWith("/api/proofs-of-value/") &&
+      path.endsWith("/aggregate") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const proofId = path.slice("/api/proofs-of-value/".length, -"/aggregate".length);
+      const guarded = await guardMutation(ctx, req, "proofOfValue.aggregate", "*", res);
+      if (!guarded) return true;
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.aggregateProofEvidence(guarded.execution, guarded.personId, proofId),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/proofs-of-value/:id/attestations — attach an attestation
+    // (protected).
+    if (
+      path.startsWith("/api/proofs-of-value/") &&
+      path.endsWith("/attestations") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const proofId = path.slice("/api/proofs-of-value/".length, -"/attestations".length);
+      const guarded = await guardMutation(ctx, req, "proofOfValue.attest", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = body as Record<string, unknown>;
+      const attestationId = obj.attestationId;
+      if (typeof attestationId !== "string" || !attestationId.trim()) {
+        throw apiValidationError('field "attestationId" must be a non-empty string');
+      }
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.attachAttestationToProof(
+          guarded.execution,
+          guarded.personId,
+          proofId,
+          attestationId,
+        ),
+      );
+      await send(res, 200, view);
       return true;
     }
 
@@ -513,8 +760,12 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
     }
     const obj = body as Record<string, unknown>;
     const subjectKind = obj.subjectKind;
-    if (subjectKind !== "opportunity" && subjectKind !== "contribution") {
-      throw apiValidationError(`subjectKind must be "opportunity" or "contribution" (got ${String(subjectKind)})`);
+    if (
+      subjectKind !== "opportunity" &&
+      subjectKind !== "contribution" &&
+      subjectKind !== "proof_of_value"
+    ) {
+      throw apiValidationError(`subjectKind must be "opportunity", "contribution" or "proof_of_value" (got ${String(subjectKind)})`);
     }
     const targetState = strField(obj, "targetState");
     const expectedVersion = numField(obj, "expectedVersion");
@@ -528,6 +779,106 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       idempotencyKey,
       policyAction,
       metadata: obj.metadata && typeof obj.metadata === "object" ? obj.metadata as Readonly<Record<string, unknown>> : undefined,
+    };
+  }
+
+  // Parse a subject reference ({ subjectId, subjectType }) from a body.
+  function parseSubjectReference(obj: Record<string, unknown>): {
+    subjectId: string;
+    subjectType: string;
+  } {
+    const ref = obj.subjectReference;
+    if (!ref || typeof ref !== "object") {
+      throw apiValidationError('field "subjectReference" must be an object with subjectId and subjectType');
+    }
+    const r = ref as Record<string, unknown>;
+    return {
+      subjectId: strField(r, "subjectId"),
+      subjectType: strField(r, "subjectType"),
+    };
+  }
+
+  // Parse a confidence estimate ({ point, lower?, upper?, method? }).
+  function parseConfidence(obj: Record<string, unknown>): Record<string, unknown> {
+    const conf = obj.confidence;
+    if (!conf || typeof conf !== "object") {
+      throw apiValidationError('field "confidence" must be an object with a point estimate in [0, 1]');
+    }
+    return conf as Record<string, unknown>;
+  }
+
+  function parseEvidenceInput(body: unknown): import("./port.ts").ApiCreateEvidenceInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const provenance = obj.provenance;
+    if (!provenance || typeof provenance !== "object") {
+      throw apiValidationError('field "provenance" must be an object with sourceType and method');
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      subjectReference: parseSubjectReference(obj),
+      provenance: provenance as Record<string, unknown> as import("./port.ts").ApiCreateEvidenceInput["provenance"],
+      confidence: parseConfidence(obj),
+      sensitivity: typeof obj.sensitivity === "string" ? obj.sensitivity : undefined,
+      payload: obj.payload && typeof obj.payload === "object" ? obj.payload as Readonly<Record<string, unknown>> : undefined,
+      sensitivePayload: typeof obj.sensitivePayload === "string" ? obj.sensitivePayload : undefined,
+      commitment: obj.commitment && typeof obj.commitment === "object" ? obj.commitment as Readonly<Record<string, unknown>> : undefined,
+      payloadReference: typeof obj.payloadReference === "string" ? obj.payloadReference : undefined,
+    };
+  }
+
+  function parseOutcomeClaimInput(body: unknown): import("./port.ts").ApiCreateOutcomeClaimInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const claimedValue = obj.claimedValue;
+    if (!claimedValue || typeof claimedValue !== "object") {
+      throw apiValidationError('field "claimedValue" must be an object with value and unit');
+    }
+    const cv = claimedValue as Record<string, unknown>;
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      subjectReference: parseSubjectReference(obj),
+      outcomeType: strField(obj, "outcomeType"),
+      claimedValue: {
+        value: numField(cv, "value"),
+        unit: strField(cv, "unit"),
+      },
+      confidence: parseConfidence(obj),
+      evidenceIds: Array.isArray(obj.evidenceIds) ? (obj.evidenceIds as string[]) : undefined,
+      statement: typeof obj.statement === "string" ? obj.statement : undefined,
+    };
+  }
+
+  function parseAttestationInput(body: unknown): import("./port.ts").ApiCreateAttestationInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    if (!Array.isArray(obj.evidenceIds) || obj.evidenceIds.length === 0) {
+      throw apiValidationError('field "evidenceIds" must be a non-empty array of evidence ids');
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      verifierId: strField(obj, "verifierId"),
+      statement: strField(obj, "statement"),
+      evidenceIds: obj.evidenceIds as string[],
+    };
+  }
+
+  function parseProofOfValueInput(body: unknown): import("./port.ts").ApiCreateProofOfValueInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      subjectReference: parseSubjectReference(obj),
+      outcomeClaimIds: Array.isArray(obj.outcomeClaimIds) ? (obj.outcomeClaimIds as string[]) : undefined,
+      evidenceIds: Array.isArray(obj.evidenceIds) ? (obj.evidenceIds as string[]) : undefined,
     };
   }
 

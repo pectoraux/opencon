@@ -39,9 +39,12 @@ const FORBIDDEN_PATTERNS: RegExp[] = [
 const NET_W004_DOMAINS = ["opportunities", "contributions", "workflows"];
 
 // Domains deferred past NET-W004 (must remain skeletons).
+// NET-W005 UPDATE: "evidence" is now implemented (NET-W005) and is no
+// longer deferred; the remaining domains stay skeletal until their
+// work items.
 const DEFERRED_DOMAINS = [
   "campaigns", "inventory", "creators", "demand", "benefits",
-  "reputation", "evidence", "outcomes", "settlement", "disputes",
+  "reputation", "outcomes", "settlement", "disputes",
 ];
 
 async function listTsFiles(dir: string, out: string[] = []): Promise<string[]> {
