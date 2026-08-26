@@ -21,3 +21,10 @@ export * from "./object-store.ts";
 export * from "./secrets.ts";
 export * from "./adapter.ts";
 export * from "./domain-module.ts";
+// NET-W003 provider-neutral contracts (persistence/coordination/
+// idempotency/observability). Infrastructure tier implements these;
+// domain tier consumes via infrastructure, never a concrete driver.
+export * from "./postgres-authority.ts";
+export * from "./coordination.ts";
+export * from "./idempotency.ts";
+export * from "./trace.ts";

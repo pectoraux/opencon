@@ -22,7 +22,12 @@ import { createInMemoryJobQueue } from "../queues/in-memory-queue.ts";
 import { createWorkerLoop } from "../workers/worker-loop.ts";
 import { createModuleRegistry } from "./module-registry.ts";
 import { createApiServer } from "../api/server.ts";
-import { createExecutionContext, runWithExecutionContextAsync, deriveExecutionContext, getExecutionContext } from "../core/execution-context.ts";
+import {
+  createExecutionContext,
+  runWithExecutionContextAsync,
+  deriveExecutionContext,
+  getExecutionContext,
+} from "../core/execution-context.ts";
 import type { ConfigurationProvider } from "../core/config.ts";
 import type { Logger } from "../core/logger.ts";
 import type { AuditWriter } from "../core/audit.ts";
@@ -33,6 +38,9 @@ import type { JobHandler } from "../core/queue.ts";
 import type { ModuleRegistry } from "../core/module.ts";
 import type { ApiAuth, ApiCommands } from "../api/port.ts";
 import type { ApiServer } from "../api/server.ts";
+import type { PostgresAuthority } from "../core/postgres-authority.ts";
+import type { CoordinationService } from "../core/coordination.ts";
+import type { ProviderSelection } from "./provider-selection.ts";
 // NET-W002 domain wiring (composition root imports concrete in-memory
 // implementations for wiring — the only place permitted to do so).
 import { createInMemoryIdentityRepository } from "../identity/in-memory-identity-repository.ts";
@@ -49,6 +57,15 @@ import type { OrganizationService, MembershipService } from "../organizations/or
 import type { ParticipantService } from "../participants/participant-service.ts";
 import type { AuthorizationService, MembershipLookup, IdentityLookup } from "../participants/port.ts";
 import type { PolicyService } from "../participants/policy-service.ts";
+// NET-W003 composition-root provider selection. The bootstrap tier is
+// the ONLY non-adapter tier permitted to import the concrete
+// PostgresAuthorityAdapter / RedisCoordinationAdapter classes; it does
+// so via selectProviders, which resolves the connection strings
+// through the SecretProvider and constructs the REAL adapters in
+// configured production/staging deployments (failing fast when
+// required provider configuration is missing). In development/test it
+// selects the clearly-marked test/dev doubles.
+import { selectProviders } from "./provider-selection.ts";
 
 // Boundary module registrations (composition root imports all).
 import { identityModule } from "../identity/module.ts";
@@ -90,6 +107,17 @@ export interface Runtime {
   readonly objectStore: ObjectStore;
   readonly secretProvider: SecretProvider;
   readonly queue: JobQueue;
+  // NET-W003 composition-root provider selection. The authoritative
+  // persistence boundary (PostgresAuthority) and the non-authoritative
+  // coordination boundary (CoordinationService) are exposed via
+  // provider-neutral contracts. In configured production/staging these
+  // are the REAL pg/ioredis adapter instances; in development/test they
+  // are the clearly-marked test/dev doubles. The `providerSelection`
+  // field records which concrete implementation was selected for
+  // diagnostics and composition-root tests.
+  readonly postgresAuthority: PostgresAuthority;
+  readonly coordinationService: CoordinationService;
+  readonly providerSelection: ProviderSelection;
   readonly workerLoop: {
     registerHandler(handler: JobHandler): void;
     start(): void;
@@ -154,6 +182,24 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     source: opts.env ?? process.env,
     catalog: buildSecretCatalog(config.describe()),
   });
+
+  // -- NET-W003 composition-root provider selection ---------------
+  // Resolve the persistence + coordination providers through the
+  // SecretProvider. In configured production/staging this constructs
+  // the REAL PostgresAuthorityAdapter + RedisCoordinationAdapter
+  // (failing fast if required provider configuration is missing —
+  // NEVER silently selecting a shim). In development/test it selects
+  // the clearly-marked test/dev doubles so the runtime is operable
+  // out-of-the-box without a real PostgreSQL or Redis.
+  const providerSelection = selectProviders({
+    config,
+    secretProvider,
+    logger,
+    forceEnv: opts.forceEnv,
+  });
+  const postgresAuthority = providerSelection.postgresAuthority;
+  const coordinationService = providerSelection.coordinationService;
+
   const queue = createInMemoryJobQueue();
 
   // -- NET-W002 domain wiring ------------------------------------------
@@ -375,6 +421,9 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     auditWriter,
     objectStore,
     secretProvider,
+    postgresAuthority,
+    coordinationService,
+    providerSelection,
     queue,
     workerLoop,
     registry,
@@ -406,6 +455,11 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       await workerLoop.stop();
       await runtime.api.stop();
       await registry.shutdownAll();
+      // Release the selected providers' resources (real adapter
+      // pools/connections in production/staging; no-op for dev/test
+      // shims). Best-effort: never let a provider-close failure mask
+      // other shutdown errors.
+      await providerSelection.close();
     },
     async enqueueEchoJob(message) {
       const parent = getExecutionContext();

@@ -30,7 +30,16 @@
  *   domain         -> core, neutral, self(same dir), builtin, external-allowed
  *   infrastructure -> core, neutral, infrastructure, builtin, external-allowed
  *   neutral        -> core, neutral, builtin, external-allowed
- *   adapter        -> core, neutral, adapter, builtin, external-allowed
+ *   adapter        -> core, neutral, adapter, builtin, external-allowed,
+ *                    external-adapter-only
+ *
+ * Provider packages in `ADAPTER_ALLOWED_EXTERNAL_PACKAGES` (e.g. `pg`,
+ * `ioredis`) are classified `external-adapter-only` and are permitted
+ * ONLY in the adapter tier. Every other tier rejects them as
+ * `external-provider-package-not-allowed-outside-adapter` — this is
+ * the enforcement of frozen Architecture v1.0 §14 ("Provider-specific
+ * SDK/types do not cross into core domain modules") and §2/§18
+ * (external providers/platforms are integrated through `/adapters`).
  *
  * Domain to infrastructure/adapter/other-domain is a violation (AC-02,
  * AC-07). The intentional failing fixture for AC-02 lives under
@@ -67,7 +76,21 @@ export const NEUTRAL_BOUNDARY_DIRS = [
   "llm", "agents", "measurement", "payments", "ledger", "adapters",
 ] as const;
 
+// Packages allowed in EVERY tier (utilities shared across the codebase).
 const ALLOWED_EXTERNAL_PACKAGES = new Set(["zod"]);
+
+// Provider packages permitted ONLY in the adapter tier. These are real
+// external persistence/coordination drivers (frozen architecture §14:
+// provider-specific SDK/types do not cross into core domain modules;
+// §2/§18: external providers/platforms are integrated through
+// `/adapters`). The adapter tier is the only place a concrete driver
+// may be imported; core/domain/infrastructure/neutral consume the
+// provider-neutral contracts in `src/core` and `src/persistence` /
+// `src/queues` instead.
+export const ADAPTER_ALLOWED_EXTERNAL_PACKAGES = new Set([
+  "pg",      // real PostgreSQL driver (PostgresAuthority adapter)
+  "ioredis", // real Redis client (CoordinationService adapter)
+]);
 
 const BUILTIN_MODULES = new Set([
   "assert", "async_hooks", "buffer", "child_process", "cluster",
@@ -122,7 +145,13 @@ export function boundaryDir(modulePath: string): string {
   return modulePath.split("/")[0] ?? "";
 }
 
-type SpecifierKind = "builtin" | "external-allowed" | "external-forbidden" | "relative" | "alias";
+type SpecifierKind =
+  | "builtin"
+  | "external-allowed"
+  | "external-adapter-only"
+  | "external-forbidden"
+  | "relative"
+  | "alias";
 
 function classifySpecifier(specifier: string): SpecifierKind {
   if (specifier.startsWith("node:")) return "builtin";
@@ -133,6 +162,7 @@ function classifySpecifier(specifier: string): SpecifierKind {
     : specifier.split("/")[0] ?? "";
   if (BUILTIN_MODULES.has(base)) return "builtin";
   if (ALLOWED_EXTERNAL_PACKAGES.has(base) || base === "bun") return "external-allowed";
+  if (ADAPTER_ALLOWED_EXTERNAL_PACKAGES.has(base)) return "external-adapter-only";
   return "external-forbidden";
 }
 
@@ -141,7 +171,12 @@ interface ResolvedTarget {
   readonly dir: string;
 }
 interface UnresolvedTarget {
-  readonly kind: "builtin" | "external-allowed" | "external-forbidden" | "unresolved";
+  readonly kind:
+    | "builtin"
+    | "external-allowed"
+    | "external-adapter-only"
+    | "external-forbidden"
+    | "unresolved";
 }
 type Target = ResolvedTarget | UnresolvedTarget;
 
@@ -200,6 +235,16 @@ function checkRule(
   if (importer.tier === "bootstrap") return null;
   if ("kind" in target) {
     if (target.kind === "builtin" || target.kind === "external-allowed") return null;
+    if (target.kind === "external-adapter-only") {
+      // Provider packages (pg, ioredis, ...) are permitted ONLY in the
+      // adapter tier. Every other tier (core/domain/infrastructure/
+      // neutral) importing a provider package is a violation of frozen
+      // Architecture v1.0 §14 (provider-specific SDK/types do not cross
+      // into core domain modules) and §2/§18 (external providers are
+      // integrated through `/adapters`).
+      if (importer.tier === "adapter") return null;
+      return "external-provider-package-not-allowed-outside-adapter";
+    }
     if (target.kind === "external-forbidden") return "external-package-not-allowed";
     return "unresolved-import";
   }

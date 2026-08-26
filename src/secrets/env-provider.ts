@@ -33,6 +33,20 @@ export function createEnvSecretProvider(
       }
       return value;
     },
+    getSecretSync(key: string): string {
+      // Synchronous resolution for the composition root (bootstrap),
+      // which needs the connection string at construction time to wire
+      // a real provider adapter. The env-backed store is a synchronous
+      // map read, so this is trivially correct here. A future
+      // remote-backed SecretProvider (e.g. Vault) that cannot resolve
+      // synchronously would throw SecretNotFoundError, which the
+      // composition root wraps in a ProviderConfigurationError.
+      const value = source[key];
+      if (value === undefined || value === "") {
+        throw new SecretNotFoundError(key);
+      }
+      return value;
+    },
     describe: () =>
       catalog.map((d) => ({
         ...d,

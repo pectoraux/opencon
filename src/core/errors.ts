@@ -198,6 +198,76 @@ export class InvariantError extends OpenConError {
 }
 
 /**
+ * Raised at the composition root when a required provider's configuration
+ * cannot be resolved through the {@link SecretProvider} for a configured
+ * (production/staging) deployment.
+ *
+ * Classification: `validation` — NEVER retryable. The frozen architecture
+ * places external provider integrations (PostgreSQL, Redis) behind
+ * `/adapters` and requires that their connection material be resolved
+ * through the {@link SecretProvider} at the bootstrap boundary. A
+ * configured production/staging deployment MUST NOT silently fall back
+ * to a file/in-memory test double when the real provider's configuration
+ * is missing — the boundary fails fast so an operator can remediate
+ * rather than discover data loss later.
+ *
+ * Work order ref: NET-W003 §4.1 (PostgreSQL authoritative persistence),
+ * §4.2 (Redis non-authoritative coordination) — architect re-review on
+ * PR #6 (composition-root provider selection): missing required provider
+ * configuration must fail fast rather than silently selecting a shim.
+ */
+export class ProviderConfigurationError extends OpenConError {
+  public constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+    cause?: unknown,
+  ) {
+    super({
+      code: "PROVIDER_CONFIGURATION",
+      classification: "validation",
+      message,
+      retryable: false,
+      cause,
+      context,
+    });
+  }
+}
+
+/**
+ * Raised when the authoritative persistence boundary detects that its
+ * durable committed state is corrupt (e.g. a file-backed authority test
+ * double finds a malformed committed snapshot on recovery).
+ *
+ * Classification: `invariant` — NEVER retryable. An authority boundary
+ * MUST NOT silently convert storage corruption into an empty store
+ * (that would turn corruption into data loss). The operator must
+ * restore from backup / investigate; surfacing an explicit error is
+ * the safe recovery posture.
+ *
+ * Work order ref: NET-W003 §4.1 (PostgreSQL authoritative persistence),
+ * §4.5 (recovery restores only committed state) — architect re-review
+ * on PR #6: corruption of the committed snapshot must be surfaced as an
+ * explicit recovery/storage error rather than converting the
+ * authoritative state to empty.
+ */
+export class StorageCorruptionError extends OpenConError {
+  public constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+    cause?: unknown,
+  ) {
+    super({
+      code: "STORAGE_CORRUPTION",
+      classification: "invariant",
+      message,
+      retryable: false,
+      cause,
+      context,
+    });
+  }
+}
+
+/**
  * Classify an arbitrary thrown value into a serializable error record.
  * Used by the logger and worker boundary to normalize unknown failures.
  */

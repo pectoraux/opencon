@@ -1,21 +1,24 @@
 /**
  * Object-storage boundary — declared public interface (port).
  *
- * Architecture ref: spec/architecture.md §18 (Module ownership).
- * Authority: large/immutable artifact storage referenced from PostgreSQL.
+ * Architecture ref: spec/architecture.md §18, §19 (object storage holds
+ * large/immutable artifacts referenced from PostgreSQL). Authority:
+ * durable large/immutable artifact references (in PostgreSQL authority);
+ * artifact bytes (in object storage).
  *
- * NET-W001 ships the boundary and contract ONLY. Concrete domain
- * behaviour is deferred to NET-W003. This port is
- * intentionally a contract surface, not an implementation; no
- * economically/material state is created here (work order §5).
+ * NET-W001 shipped the boundary and the in-memory ObjectStore contract.
+ * NET-W003 adds the durable object store (file-backed test double) and
+ * the ObjectReferenceRepository (authority-backed durable references).
+ * No domain/economic behavior is created here (NET-W003 §5 non-goals).
  */
 
 export interface ObjectStoragePort {
   /** Stable boundary identifier for diagnostics and registry. */
   readonly boundary: "object-storage";
   /**
-   * Boundary readiness. Always "skeleton" until NET-W003
-   * ships concrete behaviour.
+   * Boundary readiness. NET-W003 promotes this boundary from
+   * "skeleton" to "concrete" — durable object storage + durable
+   * references are implemented behind the same ports.
    */
-  readonly readiness: "skeleton";
+  readonly readiness: "concrete";
 }

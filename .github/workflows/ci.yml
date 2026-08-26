@@ -1,17 +1,30 @@
-# OpenCon CI — NET-W001 architecture enforcement.
+# OpenCon CI — architecture enforcement + real-provider integration.
 #
-# Work order ref: NET-W001 §4.8 (Architecture enforcement):
-#   "The checks may be simple and deterministic in this work item;
-#    they must be enforceable in CI."
+# Work order ref: NET-W001 §4.8 (Architecture enforcement),
+# NET-W003 §8 (verification) + architect re-review on PR #6:
+#   "Add integration tests that exercise the real PostgreSQL
+#    implementation ... and the real Redis implementation ...
+#    CI may make these integration tests conditional on
+#    provisioned service availability, but the repository must
+#    contain the real integration path and a reproducible local
+#    invocation. Prefer CI service containers where practical."
 #
-# This workflow runs the reproducible verification pipeline
-# (`bun run verify` = typecheck + arch:check + tests) on every push
-# and every pull request targeting `main`, so the architecture/
-# dependency checks are enforced before merge.
-#
-# The architecture check (`bun run arch:check`) is an explicit,
-# separate step so a dependency-direction / adapter-isolation
-# violation fails CI independently of the test suite (AC-02, AC-07).
+# Two jobs:
+#   verify       — the canonical architecture/dependency gate:
+#                  typecheck + arch:check + the full unit suite
+#                  (integration tests SKIP here: no services are
+#                  provisioned, so PG_TEST_DATABASE_URL /
+#                  REDIS_TEST_URL are unset and the conditional
+#                  test.skip kicks in). This is the gate that
+#                  proves frozen-architecture compliance on every
+#                  push and PR.
+#   integration  — exercises the REAL PostgreSQL + Redis adapters
+#                  (the `pg` and `ioredis` drivers behind
+#                  /adapters) against real service containers.
+#                  Proves commit/restart/rollback/recovery,
+#                  SET NX PX locks + Lua release + TTL, and the
+#                  cross-adapter non-authority invariant
+#                  (architecture-lock §16).
 
 name: CI
 
@@ -30,7 +43,7 @@ concurrency:
 
 jobs:
   verify:
-    name: verify (typecheck + arch:check + tests)
+    name: verify (typecheck + arch:check + unit tests)
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -53,7 +66,70 @@ jobs:
 
       - name: Architecture check (dependency direction + adapter isolation)
         # NET-W001 §4.8 — enforceable in CI. Exits 1 on any violation.
+        # NET-W003 re-review: this is the gate that proves provider
+        # packages (pg, ioredis) are imported ONLY in the adapter tier
+        # and never leak into domain/infrastructure code.
         run: bun run arch:check
 
-      - name: Test suite
+      - name: Unit test suite (integration tests skip — no services)
+        # Integration tests under tests/integration/ skip when
+        # PG_TEST_DATABASE_URL / REDIS_TEST_URL are unset, so this
+        # job stays green without provisioned services.
         run: bun test
+
+  integration:
+    name: integration (real PostgreSQL + Redis adapters)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Don't block on the architecture gate — these prove the real
+    # adapters, which the arch:check already permits in the adapter
+    # tier. Both jobs run on every PR.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: opencon
+          POSTGRES_PASSWORD: opencon
+          POSTGRES_DB: opencon_test
+        ports:
+          - 5432:5432
+        # Wait until PostgreSQL accepts connections before the job
+        # starts the integration tests.
+        options: >-
+          --health-cmd "pg_isready -U opencon -d opencon_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PG_TEST_DATABASE_URL: postgres://opencon:opencon@localhost:5432/opencon_test
+      REDIS_TEST_URL: redis://localhost:6379
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Real PostgreSQL + Redis adapter integration tests
+        # Exercises the real `pg` and `ioredis` adapters behind
+        # /adapters against the provisioned service containers.
+        run: bun test tests/integration/
