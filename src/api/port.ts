@@ -556,6 +556,107 @@ export interface ApiCreateMeasuredOutcomeInput {
   readonly observationIds?: readonly string[];
 }
 
+// -- NET-W007 reputation views/inputs ----------------------------------
+
+/** The public view of a reputation scoring policy version. */
+export interface ApiReputationPolicyView {
+  readonly id: string;
+  readonly policyId: string;
+  readonly version: number;
+  readonly organizationScopeId: string;
+  readonly description: string | null;
+  readonly rules: readonly Record<string, unknown>[];
+  readonly createdBy: string;
+  readonly createdAt: string;
+}
+
+/** Inputs to create a scoring policy version (NET-W007 §3.3). */
+export interface ApiCreateReputationPolicyInput {
+  readonly organizationScopeId: string;
+  readonly policyId: string;
+  readonly version: number;
+  readonly description?: string;
+  readonly rules: readonly Record<string, unknown>[];
+}
+
+/** The public view of a reputation input. */
+export interface ApiReputationInputView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string;
+  readonly dimension: string;
+  readonly basis: string;
+  readonly sources: readonly Record<string, unknown>[];
+  readonly description: string | null;
+  readonly occurredAt: string;
+  readonly recordedAt: string;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to record a reputation input (NET-W007 §3.2). */
+export interface ApiRecordReputationInputInput {
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string;
+  readonly dimension: string;
+  readonly sources: readonly Record<string, unknown>[];
+  readonly description?: string;
+  readonly occurredAt: string;
+  readonly idempotencyKey: string;
+}
+
+/** The public view of one dimension score. */
+export interface ApiReputationDimensionScoreView {
+  readonly dimension: string;
+  readonly score: number;
+  readonly inputCount: number;
+  readonly verifiedInputCount: number;
+  readonly indicatedInputCount: number;
+  readonly decayedVerifiedWeight: number;
+  readonly decayedIndicatedWeight: number;
+  readonly capped: boolean;
+}
+
+/** The public view of a computed reputation score set (preview). */
+export interface ApiReputationScoresView {
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string;
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly referenceAt: string;
+  readonly scores: readonly ApiReputationDimensionScoreView[];
+  readonly inputIds: readonly string[];
+  readonly digest: string;
+}
+
+/** Inputs to compute scores / record a snapshot (NET-W007 §3.4/§3.5). */
+export interface ApiReputationComputationInput {
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string;
+  readonly policyId: string;
+  readonly version?: number;
+  readonly referenceAt: string;
+}
+
+/** Inputs to record a snapshot (adds the required idempotency key). */
+export interface ApiRecordReputationSnapshotInput extends ApiReputationComputationInput {
+  readonly idempotencyKey: string;
+}
+
+/** The public view of a reputation snapshot. */
+export interface ApiReputationSnapshotView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string;
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly referenceAt: string;
+  readonly computedAt: string;
+  readonly scores: readonly ApiReputationDimensionScoreView[];
+  readonly inputIds: readonly string[];
+  readonly digest: string;
+  readonly idempotencyKey: string;
+}
+
 /**
  * ApiCommands — the protected mutation surface the API server consumes
  * (after the {@link ApiAuth} guard has authorized the request). The
@@ -900,6 +1001,81 @@ export interface ApiCommands {
     actorPersonId: string,
     measurementId: string,
   ): Promise<ApiMeasuredOutcomeDetailView>;
+
+  // -- NET-W007 reputation commands -------------------------------------
+
+  /** Create a scoring-policy version (protected mutation). */
+  createReputationPolicy(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateReputationPolicyInput,
+  ): Promise<ApiReputationPolicyView>;
+
+  /** Fetch a scoring-policy version by record id (public read). */
+  getReputationPolicy(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiReputationPolicyView | null>;
+
+  /** List a policy lineage's versions (public read). */
+  listReputationPolicyVersions(
+    execution: ExecutionContext,
+    policyId: string,
+    organizationScopeId?: string,
+  ): Promise<readonly ApiReputationPolicyView[]>;
+
+  /** Record a reputation input (protected mutation). */
+  recordReputationInput(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiRecordReputationInputInput,
+  ): Promise<{ input: ApiReputationInputView; created: boolean }>;
+
+  /** Fetch a reputation input (public read). */
+  getReputationInput(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiReputationInputView | null>;
+
+  /** List a subject's reputation inputs (public read). */
+  listReputationInputs(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    subjectPersonId: string,
+  ): Promise<readonly ApiReputationInputView[]>;
+
+  /** Compute scores without persisting (deterministic preview, public read). */
+  computeReputationScores(
+    execution: ExecutionContext,
+    input: ApiReputationComputationInput,
+  ): Promise<ApiReputationScoresView>;
+
+  /** Record a reputation snapshot (protected mutation). */
+  recordReputationSnapshot(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiRecordReputationSnapshotInput,
+  ): Promise<{ snapshot: ApiReputationSnapshotView; created: boolean }>;
+
+  /** Fetch a reputation snapshot (public read). */
+  getReputationSnapshot(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiReputationSnapshotView | null>;
+
+  /** List a subject's snapshot history (public read). */
+  getReputationSnapshotHistory(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    subjectPersonId: string,
+  ): Promise<readonly ApiReputationSnapshotView[]>;
+
+  /** Fetch a subject's latest snapshot (public read). */
+  getLatestReputationSnapshot(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    subjectPersonId: string,
+  ): Promise<ApiReputationSnapshotView | null>;
 }
 
 export type { ExecutionContext };

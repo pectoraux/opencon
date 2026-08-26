@@ -2,21 +2,60 @@
 
 **Tier:** domain
 **Authority:** reputation computation and provenance
-**Architecture ref:** `spec/architecture.md` §18 (Module ownership)
-**Concrete behaviour:** deferred to NET-W007
+**Architecture ref:** `spec/architecture.md` §4, §11, §18, §19; `spec/architecture-lock.md` §3, §4, §12, §14
+**Work order:** `spec/work-orders/NET-W007.md`
 
-## Scope in NET-W001
+## Scope (NET-W007)
 
-This boundary is established as an explicit module with a documented
-public interface (see `port.ts`) and a skeletal `Module` registration
-(`module.ts`). **No domain logic is implemented in NET-W001** per the
-work order explicit non-goals (§5). The boundary exists so that:
+Reputation is a **derived trust signal**, never an economic authority:
 
-- the architecture enforcement check can verify dependency direction;
-- future work items have a stable home for their contracts and rules;
-- the module registry reports the boundary as initialized at startup.
+- **Multidimensional dimensions** — the frozen eight (helpfulness,
+  content quality, creator performance, inventory quality,
+  measurement reliability, commerce reliability, fraud resistance,
+  fulfillment reliability). Dimensions are independent: a dimension
+  score derives only from that dimension's inputs.
+- **Evidence-backed inputs** — immutable, append-only records that
+  each reference ≥1 upstream record (evidence, Proof-of-Value,
+  measured outcome, contribution) resolved through neutral lookups.
+  The `verified`/`indicated` basis is DERIVED, never caller-asserted.
+- **Versioned deterministic scoring policies** — immutable policy
+  records with exactly one rule per dimension; identical inputs +
+  policy + referenceAt always reproduce identical scores.
+- **Deterministic time decay** — explicit reference timestamps; no
+  wall clock anywhere in the engine.
+- **Snapshots + history** — immutable, append-only, reconstructable
+  from `(inputIds, policyVersion, referenceAt)`; every score change
+  is auditable (AUD-004).
+
+## The key rule
+
+Advertising spend, deposits, wealth, Participation Credits and raw
+activity volume can never directly increase reputation: the input
+contract has no field for any of them and every input requires
+verified upstream references. Inputs backed only by model-assessed or
+self-reported evidence are `indicated` basis — reduced weight and
+strictly capped below a fully verified score.
+
+Reputation issues no credits, settles no cash, prices no advertising,
+allocates no benefits, and mutates no other domain. It cannot be
+spent.
+
+## Files
+
+- `port.ts` — entities, repositories, neutral lookups, service contracts.
+- `scoring.ts` — the PURE deterministic scoring + decay engine.
+- `policy-service.ts` — versioned policy creation (monotonic, atomic, audited).
+- `input-service.ts` — evidence-backed input recording (source gate,
+  derived basis).
+- `snapshot-service.ts` — deterministic computation + snapshot recording.
+- `authority-policy-repository.ts` /
+  `authority-input-repository.ts` /
+  `authority-snapshot-repository.ts` — PostgreSQL-authoritative
+  persistence through the NET-W003 authority boundary.
 
 ## Dependencies
 
-None beyond the shared `core` contracts. Cross-domain access will
-occur through declared interfaces (added in later work items).
+Core contracts only. Upstream domains (identity, evidence, outcomes,
+contributions) are consumed through the structural lookup interfaces
+declared in `port.ts`; the bootstrap composition root wires the
+adapters.

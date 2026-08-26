@@ -79,13 +79,25 @@ const NET_W005_DOMAINS = ["evidence"];
 // pricing (NET-W006 work order §5 non-goals).
 const NET_W006_DOMAINS = ["outcomes"];
 
-// Domains still deferred past NET-W006 (must remain skeletons).
+// Domains implemented in NET-W007 (no longer skeletons). The
+// reputation domain introduces the REPUTATION ENGINE (multidimensional
+// dimensions with independent scores, evidence-backed inputs with
+// DERIVED verified/indicated basis, immutable versioned deterministic
+// scoring policies, pure deterministic time decay, append-only
+// reconstructable snapshots/history). It introduces NO economically
+// material behaviour: reputation is a derived trust signal — no credit
+// issuance, no settlement, no pricing, no benefit allocation, and
+// reputation cannot be spent (NET-W007 work order §5 non-goals).
+const NET_W007_DOMAINS = ["reputation"];
+
+// Domains still deferred past NET-W007 (must remain skeletons).
 const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
   (d) =>
     !NET_W002_DOMAINS.includes(d) &&
     !NET_W004_DOMAINS.includes(d) &&
     !NET_W005_DOMAINS.includes(d) &&
-    !NET_W006_DOMAINS.includes(d),
+    !NET_W006_DOMAINS.includes(d) &&
+    !NET_W007_DOMAINS.includes(d),
 );
 
 // Patterns that would indicate economically/material domain logic,
@@ -200,6 +212,25 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
       // experiments/incrementality, baselines, maturation lifecycle).
       expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
       expect(moduleExport.describe?.() ?? "").toMatch(/NET-W006/);
+    }
+  });
+
+  test("NET-W007 domain modules are non-skeletal (tier domain, no 'skeleton' marker, reference NET-W007)", async () => {
+    for (const dir of NET_W007_DOMAINS) {
+      const modulePath = join(SRC, dir, "module.ts");
+      expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
+      const mod = await import(`../../src/${dir}/module.ts`);
+      const moduleExport = Object.values(mod)[0] as {
+        name: string;
+        tier: string;
+        describe?: () => string;
+      };
+      expect(moduleExport.tier).toBe("domain");
+      // NET-W007 modules are no longer skeletons — they carry the
+      // reputation engine (dimensions, inputs, versioned policies,
+      // deterministic decay, snapshots/history).
+      expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
+      expect(moduleExport.describe?.() ?? "").toMatch(/NET-W007/);
     }
   });
 

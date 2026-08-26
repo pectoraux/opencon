@@ -166,6 +166,29 @@ import type {
   MeasurementProviderAdapter,
 } from "../measurement/port.ts";
 import { echoMeasurementProvider } from "../measurement/providers/echo-measurement-provider.ts";
+// NET-W007 reputation boundary: the multidimensional reputation engine
+// — evidence-backed inputs (basis DERIVED from upstream records
+// through neutral lookups), immutable versioned deterministic scoring
+// policies, pure deterministic scoring + time decay (explicit
+// referenceAt, no wall clock), and append-only reconstructable
+// snapshots/history. Reputation is a derived trust signal: NOT
+// purchasable (no spend/wealth/credit/raw-activity channel) and
+// separate from the economic ledger.
+import { createAuthorityReputationPolicyRepository } from "../reputation/authority-policy-repository.ts";
+import { createReputationPolicyService } from "../reputation/policy-service.ts";
+import { createAuthorityReputationInputRepository } from "../reputation/authority-input-repository.ts";
+import { createReputationInputService } from "../reputation/input-service.ts";
+import { createAuthorityReputationSnapshotRepository } from "../reputation/authority-snapshot-repository.ts";
+import { createReputationSnapshotService } from "../reputation/snapshot-service.ts";
+import type {
+  ComputeReputationScoresInput,
+  CreateReputationScoringPolicyInput,
+  RecordReputationInputInput,
+  RecordReputationSnapshotInput,
+  ReputationInputService,
+  ReputationPolicyService,
+  ReputationSnapshotService,
+} from "../reputation/port.ts";
 
 // Boundary module registrations (composition root imports all).
 import { identityModule } from "../identity/module.ts";
@@ -278,6 +301,10 @@ export interface Runtime {
   readonly measuredOutcomeService: MeasuredOutcomeService;
   /** The wired provider-neutral measurement adapters (diagnostics). */
   readonly measurementProviders: readonly MeasurementProviderAdapter[];
+  // NET-W007 domain services (exposed for integration/security tests).
+  readonly reputationPolicyService: ReputationPolicyService;
+  readonly reputationInputService: ReputationInputService;
+  readonly reputationSnapshotService: ReputationSnapshotService;
   // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
   readonly idempotency: IdempotencyStore;
   initialize(): Promise<readonly { name: string; initialized: boolean }[]>;
@@ -769,6 +796,97 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     logger: logger.forModule("outcomes"),
   });
 
+  // -- NET-W007 reputation domain wiring ------------------------------
+  // Reputation is a DERIVED trust signal (architecture §11: not
+  // purchasable; every major change traceable to evidence). Upstream
+  // record resolution arrives as thin adapters over the ALREADY-WIRED
+  // repositories of the owning domains (identity/evidence/outcomes/
+  // contributions) — the same dependency-inversion pattern as the
+  // NET-W005/W006 lookups; the reputation domain imports core only.
+  const reputationSubjectLookup = {
+    async exists(personId: string) {
+      return identityRepo.exists(personId);
+    },
+  };
+  const reputationEvidenceLookup = {
+    async resolve(id: string) {
+      const evidence = await evidenceRepo.findById(id);
+      return evidence
+        ? {
+            organizationScopeId: evidence.organizationScopeId,
+            sourceType: evidence.provenance.sourceType,
+          }
+        : null;
+    },
+  };
+  const reputationProofOfValueLookup = {
+    async resolve(id: string) {
+      const pov = await proofOfValueRepo.findById(id);
+      return pov
+        ? { organizationScopeId: pov.organizationScopeId, state: pov.state }
+        : null;
+    },
+  };
+  const reputationMeasuredOutcomeLookup = {
+    async resolve(id: string) {
+      const measurement = await measuredOutcomeRepo.findById(id);
+      return measurement
+        ? {
+            organizationScopeId: measurement.organizationScopeId,
+            state: measurement.state,
+          }
+        : null;
+    },
+  };
+  const reputationContributionLookup = {
+    async resolve(id: string) {
+      const contribution = await contributionRepo.findById(id);
+      return contribution
+        ? {
+            organizationScopeId: contribution.organizationScopeId,
+            state: contribution.state,
+          }
+        : null;
+    },
+  };
+  const reputationPolicyRepo = createAuthorityReputationPolicyRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("reputation").debug(m, f) },
+  });
+  const reputationInputRepo = createAuthorityReputationInputRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("reputation").debug(m, f) },
+  });
+  const reputationSnapshotRepo = createAuthorityReputationSnapshotRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("reputation").debug(m, f) },
+  });
+  const reputationPolicyService = createReputationPolicyService({
+    repository: reputationPolicyRepo,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("reputation"),
+  });
+  const reputationInputService = createReputationInputService({
+    repository: reputationInputRepo,
+    subjectLookup: reputationSubjectLookup,
+    evidenceLookup: reputationEvidenceLookup,
+    proofOfValueLookup: reputationProofOfValueLookup,
+    measuredOutcomeLookup: reputationMeasuredOutcomeLookup,
+    contributionLookup: reputationContributionLookup,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("reputation"),
+  });
+  const reputationSnapshotService = createReputationSnapshotService({
+    policyRepository: reputationPolicyRepo,
+    inputRepository: reputationInputRepo,
+    snapshotRepository: reputationSnapshotRepo,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("reputation"),
+  });
+
   // API auth + commands adapter (dependency inversion: the API server
   // consumes ApiAuth/ApiCommands; we bridge to the real domain services).
   const apiAuth: ApiAuth = {
@@ -851,6 +969,83 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       version: measurement.version,
       createdAt: measurement.createdAt,
       updatedAt: measurement.updatedAt,
+    };
+  }
+
+  // NET-W007 view helpers (domain entity → API view).
+  function toReputationPolicyView(
+    policy: import("../reputation/port.ts").ReputationScoringPolicy,
+  ) {
+    return {
+      id: policy.id,
+      policyId: policy.policyId,
+      version: policy.version,
+      organizationScopeId: policy.organizationScopeId,
+      description: policy.description,
+      rules: policy.rules as unknown as readonly Record<string, unknown>[],
+      createdBy: policy.createdBy,
+      createdAt: policy.createdAt,
+    };
+  }
+  function toReputationInputView(
+    input: import("../reputation/port.ts").ReputationInput,
+  ) {
+    return {
+      id: input.id,
+      organizationScopeId: input.organizationScopeId,
+      subjectPersonId: input.subjectPersonId,
+      dimension: input.dimension,
+      basis: input.basis,
+      sources: input.sources as unknown as readonly Record<string, unknown>[],
+      description: input.description,
+      occurredAt: input.occurredAt,
+      recordedAt: input.recordedAt,
+      idempotencyKey: input.idempotencyKey,
+    };
+  }
+  function toReputationScoreView(
+    score: import("../reputation/port.ts").ReputationDimensionScore,
+  ) {
+    return {
+      dimension: score.dimension,
+      score: score.score,
+      inputCount: score.inputCount,
+      verifiedInputCount: score.verifiedInputCount,
+      indicatedInputCount: score.indicatedInputCount,
+      decayedVerifiedWeight: score.decayedVerifiedWeight,
+      decayedIndicatedWeight: score.decayedIndicatedWeight,
+      capped: score.capped,
+    };
+  }
+  function toReputationScoresView(
+    result: import("../reputation/port.ts").ComputeReputationScoresResult,
+  ) {
+    return {
+      organizationScopeId: result.organizationScopeId,
+      subjectPersonId: result.subjectPersonId,
+      policyId: result.policyId,
+      policyVersion: result.policyVersion,
+      referenceAt: result.referenceAt,
+      scores: result.scores.map(toReputationScoreView),
+      inputIds: result.inputIds,
+      digest: result.digest,
+    };
+  }
+  function toReputationSnapshotView(
+    snapshot: import("../reputation/port.ts").ReputationSnapshot,
+  ) {
+    return {
+      id: snapshot.id,
+      organizationScopeId: snapshot.organizationScopeId,
+      subjectPersonId: snapshot.subjectPersonId,
+      policyId: snapshot.policyId,
+      policyVersion: snapshot.policyVersion,
+      referenceAt: snapshot.referenceAt,
+      computedAt: snapshot.computedAt,
+      scores: snapshot.scores.map(toReputationScoreView),
+      inputIds: snapshot.inputIds,
+      digest: snapshot.digest,
+      idempotencyKey: snapshot.idempotencyKey,
     };
   }
 
@@ -1637,6 +1832,115 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         rollup: measurement.rollup as unknown as Record<string, unknown> | null,
       };
     },
+    // -- NET-W007 reputation commands -----------------------------------
+    async createReputationPolicy(execution, actorPersonId, input) {
+      const policy = await reputationPolicyService.createPolicyVersion(execution, {
+        organizationScopeId: input.organizationScopeId,
+        policyId: input.policyId,
+        version: input.version,
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        rules: input.rules as unknown as CreateReputationScoringPolicyInput["rules"],
+      });
+      return toReputationPolicyView(policy);
+    },
+    async getReputationPolicy(execution, id) {
+      try {
+        const policy = await reputationPolicyService.getPolicy(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toReputationPolicyView(policy);
+      } catch {
+        return null;
+      }
+    },
+    async listReputationPolicyVersions(execution, policyId, organizationScopeId) {
+      const versions = await reputationPolicyService.listPolicyVersions(
+        getExecutionContext() ?? execution,
+        policyId,
+        organizationScopeId,
+      );
+      return versions.map(toReputationPolicyView);
+    },
+    async recordReputationInput(execution, _actorPersonId, input) {
+      const result = await reputationInputService.recordInput(execution, {
+        organizationScopeId: input.organizationScopeId,
+        subjectPersonId: input.subjectPersonId,
+        dimension: input.dimension,
+        sources: input.sources as unknown as RecordReputationInputInput["sources"],
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        occurredAt: input.occurredAt,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return { input: toReputationInputView(result.input), created: result.created };
+    },
+    async getReputationInput(execution, id) {
+      try {
+        const found = await reputationInputService.getInput(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toReputationInputView(found);
+      } catch {
+        return null;
+      }
+    },
+    async listReputationInputs(execution, organizationScopeId, subjectPersonId) {
+      const inputs = await reputationInputService.listInputs(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        subjectPersonId,
+      );
+      return inputs.map(toReputationInputView);
+    },
+    async computeReputationScores(execution, input) {
+      const result = await reputationSnapshotService.computeScores(execution, {
+        organizationScopeId: input.organizationScopeId,
+        subjectPersonId: input.subjectPersonId,
+        policyId: input.policyId,
+        ...(input.version !== undefined ? { version: input.version } : {}),
+        referenceAt: input.referenceAt,
+      });
+      return toReputationScoresView(result);
+    },
+    async recordReputationSnapshot(execution, _actorPersonId, input) {
+      const result = await reputationSnapshotService.recordSnapshot(execution, {
+        organizationScopeId: input.organizationScopeId,
+        subjectPersonId: input.subjectPersonId,
+        policyId: input.policyId,
+        ...(input.version !== undefined ? { version: input.version } : {}),
+        referenceAt: input.referenceAt,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return { snapshot: toReputationSnapshotView(result.snapshot), created: result.created };
+    },
+    async getReputationSnapshot(execution, id) {
+      try {
+        const snapshot = await reputationSnapshotService.getSnapshot(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toReputationSnapshotView(snapshot);
+      } catch {
+        return null;
+      }
+    },
+    async getReputationSnapshotHistory(execution, organizationScopeId, subjectPersonId) {
+      const history = await reputationSnapshotService.getSnapshotHistory(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        subjectPersonId,
+      );
+      return history.map(toReputationSnapshotView);
+    },
+    async getLatestReputationSnapshot(execution, organizationScopeId, subjectPersonId) {
+      const latest = await reputationSnapshotService.getLatestSnapshot(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        subjectPersonId,
+      );
+      return latest ? toReputationSnapshotView(latest) : null;
+    },
   };
 
   const registry = createModuleRegistry(snapshot, logger);
@@ -1743,6 +2047,10 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     baselineService,
     measuredOutcomeService,
     measurementProviders,
+    // NET-W007 domain services.
+    reputationPolicyService,
+    reputationInputService,
+    reputationSnapshotService,
     // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
     idempotency,
     async initialize() {
