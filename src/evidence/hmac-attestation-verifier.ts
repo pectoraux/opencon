@@ -21,6 +21,19 @@ import type { AttestationSigner, AttestationVerifier } from "./port.ts";
 
 export const HMAC_ATTESTATION_ALGORITHM = "hmac-sha256" as const;
 
+/**
+ * The WELL-KNOWN development/test fallback key. This literal is committed
+ * to the repository — it is public knowledge and therefore NOT a secret.
+ *
+ * The composition root (src/bootstrap/attestation-signing.ts) permits it
+ * ONLY in `development` / `test` environments. A configured
+ * `production` / `staging` deployment that resolves this value (or no
+ * value at all) for ATTESTATION_SIGNING_KEY fails startup with a
+ * ProviderConfigurationError — attestation signing FAILS CLOSED outside
+ * test/dev (architect review on PR #10).
+ */
+export const DEV_INSECURE_ATTESTATION_KEY = "dev-insecure-attestation-key" as const;
+
 export interface HmacAttestationSignerOptions {
   /** The HMAC key. Configure via the secret/config boundary in production. */
   readonly key: string;

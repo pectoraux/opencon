@@ -411,6 +411,12 @@ describe("NET-W003 composition-root provider selection — end-to-end runtime wi
 
   test("createRuntime(production, secrets present) exposes the REAL adapter classes on the Runtime", async () => {
     const { createRuntime } = await import("../../src/bootstrap/runtime.ts");
+    // NOTE (NET-W005 remediation): a production runtime additionally
+    // requires the attestation signing configuration (see
+    // tests/bootstrap/attestation-signing.test.ts — without it the
+    // runtime FAILS CLOSED). This test's purpose is the provider
+    // selection, so the attestation key is provided alongside the
+    // provider secrets.
     const runtime = createRuntime({
       env: {
         APP_ENV: "production",
@@ -418,6 +424,7 @@ describe("NET-W003 composition-root provider selection — end-to-end runtime wi
         DATABASE_URL: SYNTHETIC_PG_URL,
         REDIS_URL: SYNTHETIC_REDIS_URL,
         OBJECT_STORAGE_BUCKET: "TESTFIXTURE-bucket",
+        ATTESTATION_SIGNING_KEY: "TESTFIXTURE-production-attestation-key",
       },
       port: 0,
     });

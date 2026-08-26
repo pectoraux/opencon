@@ -155,7 +155,12 @@ remains the sole lifecycle mutator):
   record.
 - `EVALUATING → VERIFIED` requires a recorded aggregation, at least
   one MEASURED or ATTESTED evidence record (never model-assessed or
-  self-reported alone), and at least one attached attestation.
+  self-reported alone), and at least one attached attestation that
+  verifies CRYPTOGRAPHICALLY against the current stored commitment
+  digests (the injected verifier-neutral AttestationVerifier must
+  return `valid: true` for at least one attached attestation — the
+  mere existence of an attestation record is not sufficient;
+  architect review on PR #10).
 
 No economic value is created by this lifecycle (see §5).
 
@@ -185,7 +190,12 @@ No economic value is created by this lifecycle (see §5).
    (architecture-lock §4).
 8. Attestation signing/verification is verifier-neutral (injected
    structural interfaces); no provider-specific crypto crosses the
-   domain boundary.
+   domain boundary. Production attestation signing FAILS CLOSED at
+   the composition root: a configured production/staging deployment
+   requires the ATTESTATION_SIGNING_KEY secret (resolved through the
+   SecretProvider) or an explicitly configured signer/verifier
+   adapter pair — never the well-known development key (architect
+   review on PR #10).
 9. Outcome claims are provider-neutral: no campaign-, platform-, or
    provider-specific semantics; unknown outcome types are rejected
    with a stable error code.

@@ -27,10 +27,14 @@ export const ConfigSchema = z.object({
   REDIS_URL: z.string().optional(),
   OBJECT_STORAGE_BUCKET: z.string().optional(),
   // NET-W005: key for the default HMAC attestation signer/verifier
-  // (src/evidence/hmac-attestation-verifier.ts). Optional — a dev
-  // fallback is used when unset, with a warning in non-test envs.
-  // Production deployments should configure a strong key (or swap the
-  // signer for a real verifier adapter at the composition root).
+  // (src/evidence/hmac-attestation-verifier.ts). Classified secret.
+  // FAIL CLOSED (architect review on PR #10): in production/staging the
+  // composition root (src/bootstrap/attestation-signing.ts) REQUIRES
+  // either this secret — resolved through the SecretProvider — or an
+  // explicitly configured production signer/verifier adapter pair;
+  // otherwise startup fails with ProviderConfigurationError. The
+  // well-known dev default is permitted only in development (warned)
+  // and test (silent).
   ATTESTATION_SIGNING_KEY: z.string().optional(),
 
   // Observability

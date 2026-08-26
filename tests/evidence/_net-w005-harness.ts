@@ -21,7 +21,12 @@ import {
   CONTRIBUTION_TRANSITION_TABLE,
   PROOF_OF_VALUE_TRANSITION_TABLE,
 } from "../../src/workflows/transition-table.ts";
-import type { Evidence, ProofOfValue } from "../../src/evidence/port.ts";
+import type {
+  AttestationSigner,
+  AttestationVerifier,
+  Evidence,
+  ProofOfValue,
+} from "../../src/evidence/port.ts";
 
 export interface NetW005Harness {
   readonly runtime: Runtime;
@@ -37,11 +42,26 @@ export interface NetW005Harness {
   teardown(): Promise<void>;
 }
 
-export async function createNetW005Harness(): Promise<NetW005Harness> {
+export interface NetW005HarnessOptions {
+  /**
+   * Explicit attestation signer/verifier adapters wired through the
+   * composition root (exercises the "explicit-adapters" selection
+   * mode). When omitted the dev/test default applies (test env).
+   */
+  readonly attestation?: {
+    readonly signer?: AttestationSigner;
+    readonly verifier?: AttestationVerifier;
+  };
+}
+
+export async function createNetW005Harness(
+  opts: NetW005HarnessOptions = {},
+): Promise<NetW005Harness> {
   const runtime = createRuntime({
     forceEnv: "test",
     env: { APP_ENV: "test", LOG_LEVEL: "warn" },
     port: 0,
+    ...(opts.attestation ? { attestation: opts.attestation } : {}),
   });
   await runtime.initialize();
   await runtime.api.start();

@@ -89,6 +89,35 @@ export interface AttestationServiceDeps {
   readonly logger: Logger;
 }
 
+/**
+ * Resolve the covered evidence id → commitment-digest pairs from the
+ * CURRENT STORED evidence records — the exact input the canonical
+ * digest input is rebuilt from at verification time. Missing evidence
+ * records contribute a null digest (the covered set cannot be
+ * reconstructed; verification fails on the mismatched input). NEVER
+ * touches plaintext: sensitive records carry none, and only the stored
+ * commitment digest participates.
+ *
+ * Shared by the attestation service's verification path AND the
+ * Proof-of-Value service's EVALUATING → VERIFIED precondition (both
+ * rebuild the canonical input from the SAME stored commitments —
+ * one source of truth for the digest resolution).
+ */
+export async function resolveStoredCommitmentDigests(
+  evidenceIds: readonly string[],
+  evidenceRepository: Pick<EvidenceRepository, "findById">,
+): Promise<readonly { evidenceId: string; digest: string | null }[]> {
+  const covered: { evidenceId: string; digest: string | null }[] = [];
+  for (const evidenceId of evidenceIds) {
+    const evidence = await evidenceRepository.findById(evidenceId);
+    covered.push({
+      evidenceId,
+      digest: evidence?.commitment?.digest ?? null,
+    });
+  }
+  return covered;
+}
+
 export function createAttestationService(deps: AttestationServiceDeps): AttestationService {
   const {
     repository,
@@ -232,16 +261,10 @@ export function createAttestationService(deps: AttestationServiceDeps): Attestat
       }
       // Rebuild the canonical digest input from the STORED evidence
       // commitments — NO plaintext disclosure anywhere on this path.
-      const covered: { evidenceId: string; digest: string | null }[] = [];
-      for (const evidenceId of attestation.evidenceIds) {
-        const evidence = await evidenceRepository.findById(evidenceId);
-        // Missing evidence records invalidate the attestation (the
-        // covered set cannot be reconstructed).
-        covered.push({
-          evidenceId,
-          digest: evidence?.commitment?.digest ?? null,
-        });
-      }
+      const covered = await resolveStoredCommitmentDigests(
+        attestation.evidenceIds,
+        evidenceRepository,
+      );
       const canonicalInput = buildAttestationDigestInput(
         attestation.statement,
         attestation.verifierId,

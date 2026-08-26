@@ -17,8 +17,9 @@
  * Division of responsibility (work order §4 invariant 5):
  *  - THIS service: domain preconditions (evidence presence, evidence
  *    set frozen at EVALUATING, aggregation recorded, high-grade
- *    evidence, attestations) + domain mutations (attach evidence,
- *    aggregate, attach attestation — audited atomically).
+ *    evidence, CRYPTOGRAPHICALLY VERIFIED attestations) + domain
+ *    mutations (attach evidence, aggregate, attach attestation —
+ *    audited atomically).
  *  - /workflows WorkflowService: EVERY lifecycle state change
  *    (authorization, transition legality, idempotency, optimistic
  *    concurrency, audit lineage with the authoritative transaction id).
@@ -45,8 +46,13 @@ import type { Logger } from "../core/logger.ts";
 import type { TransitionRequest, TransitionResult } from "../core/workflow.ts";
 import { policyActionFor } from "../core/workflow.ts";
 import { aggregateEvidence, hasHighSupportEvidence } from "./aggregation.ts";
+import {
+  buildAttestationDigestInput,
+  resolveStoredCommitmentDigests,
+} from "./attestation-service.ts";
 import type {
   AttestationRepository,
+  AttestationVerifier,
   CreateProofOfValueInput,
   EvidenceRepository,
   OutcomeClaimRepository,
@@ -81,6 +87,15 @@ export interface ProofOfValueServiceDeps {
   readonly evidenceRepository: EvidenceRepository;
   readonly outcomeClaimRepository: OutcomeClaimRepository;
   readonly attestationRepository: AttestationRepository;
+  /**
+   * Verifier-neutral attestation verifier (injected by the composition
+   * root — the SAME instance the attestation service uses). REQUIRED
+   * for the EVALUATING → VERIFIED precondition: at least one attached
+   * attestation must verify CRYPTOGRAPHICALLY against the current
+   * stored commitment digests (architect review on PR #10 — the mere
+   * existence of an attestation record proves nothing).
+   */
+  readonly attestationVerifier: AttestationVerifier;
   /** Validates the PoV subject exists + resolves its org scope. */
   readonly subjectLookup: SubjectLookup;
   /** The /workflows authority (injected by the composition root). */
@@ -98,6 +113,7 @@ export function createProofOfValueService(
     evidenceRepository,
     outcomeClaimRepository,
     attestationRepository,
+    attestationVerifier,
     subjectLookup,
     workflow,
     authority,
@@ -553,7 +569,10 @@ export function createProofOfValueService(
       //   1. a recorded aggregation (the evaluation actually ran);
       //   2. ≥1 MEASURED or ATTESTED evidence (never model-assessed or
       //      self-reported alone);
-      //   3. ≥1 attached attestation.
+      //   3. ≥1 attached attestation that verifies CRYPTOGRAPHICALLY
+      //      against the CURRENT STORED commitment digests (architect
+      //      review on PR #10: an attestation RECORD's existence proves
+      //      nothing — its signature must actually validate).
       const proof = await requireProof(input.proofId);
       if (proof.state === "EVALUATING") {
         if (proof.aggregation === null) {
@@ -586,6 +605,56 @@ export function createProofOfValueService(
             message:
               "the proof of value cannot be verified on model-assessed or self-reported evidence alone — at least one MEASURED or ATTESTED evidence record is required (architecture-lock §4)",
             context: { proofId: input.proofId, evidenceCount: records.length },
+          });
+        }
+        // Cryptographic attestation verification: rebuild the canonical
+        // digest input for each attached attestation from the CURRENT
+        // stored commitment digests (resolveStoredCommitmentDigests —
+        // the same single source of truth the attestation service's
+        // verification path uses) and delegate to the injected
+        // verifier-neutral AttestationVerifier. At least one attached
+        // attestation must return valid: true. NO plaintext disclosure
+        // anywhere on this path (the input is rebuilt from commitment
+        // digests only). Tampering with a statement, a signature, or an
+        // underlying commitment invalidates the rebuilt input → the
+        // transition is blocked (fail closed).
+        const failures: { attestationId: string; reason: string }[] = [];
+        let hasValidAttestation = false;
+        for (const attestationId of proof.attestationIds) {
+          const attestation = await attestationRepository.findById(attestationId);
+          if (!attestation) {
+            failures.push({
+              attestationId,
+              reason: "attestation record not found",
+            });
+            continue;
+          }
+          const covered = await resolveStoredCommitmentDigests(
+            attestation.evidenceIds,
+            evidenceRepository,
+          );
+          const canonicalInput = buildAttestationDigestInput(
+            attestation.statement,
+            attestation.verifierId,
+            covered,
+          );
+          const decision = await attestationVerifier.verify(canonicalInput, {
+            algorithm: attestation.algorithm,
+            signature: attestation.signature,
+          });
+          if (decision.valid) {
+            hasValidAttestation = true;
+            break; // at least one valid attestation suffices
+          }
+          failures.push({ attestationId, reason: decision.reason });
+        }
+        if (!hasValidAttestation) {
+          throw new OpenConError({
+            code: "PROOF_OF_VALUE_VALIDATION",
+            classification: "validation",
+            message:
+              "the proof of value cannot be verified — none of the attached attestations verifies cryptographically against the current stored commitments",
+            context: { proofId: input.proofId, failures },
           });
         }
       }

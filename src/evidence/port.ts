@@ -573,7 +573,11 @@ export interface ProofOfValueService {
   /**
    * EVALUATING → VERIFIED (terminal). Requires: recorded aggregation +
    * ≥1 MEASURED or ATTESTED evidence (never model/self-assessed alone —
-   * architecture-lock §4) + ≥1 attached attestation.
+   * architecture-lock §4) + ≥1 attached attestation that verifies
+   * CRYPTOGRAPHICALLY against the current stored commitment digests
+   * (the injected verifier-neutral AttestationVerifier is consulted;
+   * the mere existence of an attestation record is NOT sufficient —
+   * architect review on PR #10).
    */
   verify(
     execution: ExecutionContext,

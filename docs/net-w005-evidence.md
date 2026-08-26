@@ -97,12 +97,23 @@ COMMITMENT DIGESTS via a canonical input
 evidenceId:digest pairs). Signing/verification are delegated to the
 verifier-neutral `AttestationSigner`/`AttestationVerifier` structural
 interfaces; the wired default is the clearly-marked HMAC-SHA256
-dev/test implementation (`hmac-attestation-verifier.ts`, key from
-`ATTESTATION_SIGNING_KEY`; production verifiers arrive as adapters).
+development/test implementation (`hmac-attestation-verifier.ts`).
+Signing-key selection FAILS CLOSED at the composition root
+(`src/bootstrap/attestation-signing.ts`, remediation of the architect
+review on PR #10): production/staging require either the
+`ATTESTATION_SIGNING_KEY` secret — resolved through the SecretProvider
+— or an explicitly configured signer/verifier adapter pair, otherwise
+startup fails with `ProviderConfigurationError`; the well-known
+development literal is confined to development (warned) and test
+(silent).
 Verification rebuilds the canonical input from the STORED commitments —
 NO plaintext disclosure anywhere on the verification path. Tampering
 with the statement, the covered set, or the underlying commitments
-invalidates the rebuilt input.
+invalidates the rebuilt input. The SAME rebuilding + verification path
+is consulted by the PoV service's EVALUATING → VERIFIED precondition
+(§2.9): at least one attached attestation must verify CRYPTOGRAPHICALLY
+against the current stored commitment digests — the mere existence of
+an attestation record proves nothing (architect review on PR #10).
 
 ### 2.8 Aggregation (§3.7, EVID-004)
 
@@ -125,8 +136,14 @@ evidence set, a recorded aggregation, and attestations. Its lifecycle
 `PROOF_OF_VALUE_TRANSITION_TABLE` — the SAME machinery as
 opportunities/contributions (authorization, idempotency, optimistic
 concurrency, atomic audit). The evidence domain service validates
-preconditions and REQUESTS transitions (never mutates state). Full
-matrix: `docs/net-w005-pov-transition-matrix.md`.
+preconditions and REQUESTS transitions (never mutates state). The
+EVALUATING → VERIFIED precondition requires ≥1 attached attestation
+that verifies CRYPTOGRAPHICALLY against the current stored commitment
+digests (the injected verifier-neutral `AttestationVerifier` is
+consulted via the same `resolveStoredCommitmentDigests` +
+`buildAttestationDigestInput` path as the attestation service's own
+verification — remediation of the architect review on PR #10).
+Full matrix: `docs/net-w005-pov-transition-matrix.md`.
 
 ### 2.10 Atomicity
 
@@ -211,13 +228,21 @@ rule table + weights + high-support predicate).
 ### AC-05 — Commitments and attestations prove integrity
 
 **Changed files:** `src/evidence/commitments.ts` (NEW),
-`src/evidence/attestation-service.ts` (NEW — canonical input builder),
+`src/evidence/attestation-service.ts` (NEW — canonical input builder +
+the shared `resolveStoredCommitmentDigests` helper),
 `src/evidence/authority-attestation-repository.ts` (NEW),
 `src/evidence/hmac-attestation-verifier.ts` (NEW — dev/test default
-behind the verifier-neutral interfaces), `src/config/schema.ts`
-(MODIFIED — ATTESTATION_SIGNING_KEY, classified secret).
+behind the verifier-neutral interfaces + the exported
+`DEV_INSECURE_ATTESTATION_KEY` constant), `src/config/schema.ts`
+(MODIFIED — ATTESTATION_SIGNING_KEY, classified secret),
+`src/bootstrap/attestation-signing.ts` (NEW — PR #10 remediation:
+fail-closed composition-root signing selection),
+`src/bootstrap/runtime.ts` (MODIFIED — wires the selection; exposes the
+selected mode).
 
-**Test evidence:** `tests/evidence/net-w005-ac-05-commitments-attestations.test.ts` (12 tests):
+**Test evidence:** `tests/evidence/net-w005-ac-05-commitments-attestations.test.ts` (12 tests)
++ `tests/bootstrap/attestation-signing.test.ts` (17 tests — the PR #10
+remediation fail-closed selection suite):
 - commitment roundtrip sha256 + sha512 (deterministic, verify);
 - tampered plaintext fails; tampered digest fails (length-safe);
 - salted commitments participate correctly;
@@ -229,7 +254,14 @@ behind the verifier-neutral interfaces), `src/config/schema.ts`
 - attestation validation (empty coverage, unknown evidence, cross-org evidence rejected);
 - creation audited;
 - canonical input deterministic + order-insensitive;
-- API verification endpoint (public, no plaintext).
+- API verification endpoint (public, no plaintext);
+- PR #10 remediation — production/staging WITHOUT the secret and
+  without explicit adapters FAILS STARTUP (ProviderConfigurationError);
+  the well-known dev literal is rejected as a production key; the key
+  is resolved THROUGH the SecretProvider (spy); explicit adapter PAIRS
+  satisfy production while PARTIAL wiring is rejected in every env;
+  development/test keep the dev default (warned in development only);
+  end-to-end createRuntime(production) enforces all of it.
 
 ### AC-06 — Deterministic, idempotent, authorized, auditable PoV lifecycle
 
@@ -240,10 +272,13 @@ PROOF_OF_VALUE_TRANSITION_TABLE), `src/workflows/port.ts` (MODIFIED —
 proofOfValueRepository dep), `src/workflows/workflow-service.ts`
 (MODIFIED — routing),
 `src/evidence/authority-proof-of-value-repository.ts` (NEW),
-`src/evidence/proof-of-value-service.ts` (NEW),
+`src/evidence/proof-of-value-service.ts` (NEW — now injecting the
+verifier-neutral AttestationVerifier for the VERIFIED precondition),
 `src/bootstrap/runtime.ts` (MODIFIED — wiring + SubjectLookup adapter).
 
-**Test evidence:** `tests/evidence/net-w005-ac-06-pov-lifecycle.test.ts` (11 tests):
+**Test evidence:** `tests/evidence/net-w005-ac-06-pov-lifecycle.test.ts` (11 tests)
++ `tests/evidence/net-w005-remediation-attestation-verification.test.ts`
+(7 tests — the PR #10 remediation cryptographic-verification suite):
 - the table enumerates EXACTLY the 8 legal transitions (§3.8);
 - exhaustive matrix: every legal pair legal + every other pair rejected (ILLEGAL_TRANSITION / TERMINAL_STATE); terminal states have no outgoing; DRAFT's targets exact; opportunity/contribution tables unaffected;
 - DRAFT→REJECTED intentionally illegal;
@@ -255,7 +290,17 @@ proofOfValueRepository dep), `src/workflows/workflow-service.ts`
 - evidence set freezes at EVALUATING;
 - the PoV service never mutates lifecycle state (port + runtime);
 - cross-org transition denied (tenant scoping);
-- transition audit carries the AUTHORITATIVE transactionId (not the execution id).
+- transition audit carries the AUTHORITATIVE transactionId (not the execution id);
+- PR #10 remediation — a TAMPERED attestation signature BLOCKS VERIFIED
+  (fail closed; honest REJECTED still available); a TAMPERED underlying
+  commitment BLOCKS VERIFIED; ≥1 valid attestation among the attached
+  set suffices; ALL invalid → blocked with per-attestation failure
+  reasons in the error context; an injected verifier that rejects
+  everything blocks VERIFIED although the attestation record exists
+  (existence alone proves nothing); the verifier IS called with the
+  canonical input rebuilt from the current STORED commitment digests
+  (spy — and the plaintext never appears in it); the genuine-attestation
+  happy path still verifies.
 
 ### AC-07 — Failure/replay/concurrency atomicity
 
@@ -353,7 +398,42 @@ push/PR (verify + integration with real PostgreSQL/Redis service
 containers). No CI changes are required — the NET-W005 tests use the
 file-backed PostgresAuthorityShim and the wired HMAC dev default.
 
-## 9. Definition of done (work order §9)
+## 9. PR #10 remediation (architect review)
+
+Two changes requested on the NET-W005 review, both implemented:
+
+1. **Production attestation signing fails closed.** The previous
+   runtime wiring permitted the `dev-insecure-attestation-key`
+   fallback outside test environments — and, because it read a field
+   the configuration snapshot never carried, the fallback was
+   effectively UNCONDITIONAL (even a configured
+   `ATTESTATION_SIGNING_KEY` was ignored). The key is now resolved
+   through the SecretProvider by `src/bootstrap/attestation-signing.ts`
+   (the NET-W003 provider-selection pattern): production/staging
+   require the secret OR an explicitly configured signer/verifier
+   adapter pair (partial wiring rejected in every environment), the
+   well-known dev literal is rejected as a production key, and startup
+   fails with `ProviderConfigurationError` otherwise. The dev default
+   survives only in development (warned) and test (silent); the
+   selected mode is exposed as `runtime.attestationSigning.mode`.
+2. **PoV verification verifies an attestation cryptographically.**
+   `ProofOfValueService.verify()` previously required only
+   `attestationIds.length > 0`. Before EVALUATING → VERIFIED it now
+   rebuilds the canonical digest input for each attached attestation
+   from the CURRENT stored commitment digests (`resolveStoredCommitmentDigests`
+   — the same single source of truth as the attestation service's own
+   verification path) and requires ≥1 attached attestation to return
+   `valid: true` from the injected verifier-neutral
+   `AttestationVerifier`. Tampering with a statement, signature, or
+   underlying commitment blocks the transition (fail closed, with
+   per-attestation failure reasons in the error context); no plaintext
+   disclosure anywhere on the path.
+
+Both fixes preserve the verifier-neutral boundary: the evidence domain
+still receives only the structural interfaces; the concrete signer/
+verifier selection remains a composition-root concern.
+
+## 10. Definition of done (work order §9)
 
 1. ✅ EVID-001..006 and OUT-001 (vocabulary) implemented.
 2. ✅ Every material claim references persisted evidence with traceable lineage (AUD-002).
@@ -362,4 +442,4 @@ file-backed PostgresAuthorityShim and the wired HMAC dev default.
 5. ✅ Sensitive evidence commits + attestations verify without plaintext disclosure.
 6. ✅ PoV lifecycle deterministic, idempotent, authorized, auditable through /workflows.
 7. ✅ Architecture/out-of-scope regression passes with frozen specs unchanged.
-8. ⏳ One implementation PR bound to frozen Architecture v1.0 and this work item (this PR; awaiting architect review).
+8. ⏳ One implementation PR bound to frozen Architecture v1.0 and this work item (PR #10; the two architect-requested remediations are implemented — awaiting re-review).

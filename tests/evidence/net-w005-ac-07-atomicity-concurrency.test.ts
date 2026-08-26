@@ -374,6 +374,13 @@ describe("NET-W005-AC-07 failure/replay/concurrency", () => {
         findById: async () => null,
         exists: async () => false,
       },
+      // Stub verifier (these tests exercise beginMeasuring/creation,
+      // not the EVALUATING → VERIFIED attestation precondition).
+      attestationVerifier: {
+        async verify() {
+          return { valid: true, reason: "stub" };
+        },
+      },
       subjectLookup: {
         async getOrganizationScope() {
           return harness.organizationScopeId;
@@ -458,6 +465,13 @@ describe("NET-W005-AC-07 failure/replay/concurrency", () => {
         },
         findById: async () => null,
         exists: async () => false,
+      },
+      // Stub verifier (this test exercises creation atomicity, not the
+      // EVALUATING → VERIFIED attestation precondition).
+      attestationVerifier: {
+        async verify() {
+          return { valid: true, reason: "stub" };
+        },
       },
       subjectLookup: {
         async getOrganizationScope() {

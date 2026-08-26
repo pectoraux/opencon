@@ -101,11 +101,18 @@ import { createAuthorityOutcomeClaimRepository } from "../evidence/authority-out
 import { createOutcomeClaimService } from "../evidence/outcome-claim-service.ts";
 import { createAuthorityAttestationRepository } from "../evidence/authority-attestation-repository.ts";
 import { createAttestationService } from "../evidence/attestation-service.ts";
-import { createHmacAttestationSignerVerifier } from "../evidence/hmac-attestation-verifier.ts";
 import { createAuthorityProofOfValueRepository } from "../evidence/authority-proof-of-value-repository.ts";
 import { createProofOfValueService } from "../evidence/proof-of-value-service.ts";
+// NET-W005 remediation (architect review on PR #10): attestation
+// signing selection is a composition-root concern that FAILS CLOSED —
+// production/staging require a configured ATTESTATION_SIGNING_KEY
+// secret or an explicit production signer/verifier adapter pair; the
+// well-known dev default is permitted only in development/test.
+import { selectAttestationSigning, type AttestationSigningMode } from "./attestation-signing.ts";
 import type {
   AttestationService,
+  AttestationSigner,
+  AttestationVerifier,
   CreateEvidenceInput,
   CreateOutcomeClaimInput,
   EvidenceService,
@@ -172,6 +179,14 @@ export interface Runtime {
   readonly postgresAuthority: PostgresAuthority;
   readonly coordinationService: CoordinationService;
   readonly providerSelection: ProviderSelection;
+  /**
+   * NET-W005 remediation: which attestation signing implementation was
+   * selected by the composition root. Production/staging boot only
+   * with "explicit-adapters" or "configured-secret" — the insecure
+   * "dev-default" is structurally confined to development/test
+   * (selection throws otherwise). Diagnostics only; no key material.
+   */
+  readonly attestationSigning: { readonly mode: AttestationSigningMode };
   readonly workerLoop: {
     registerHandler(handler: JobHandler): void;
     start(): void;
@@ -223,6 +238,18 @@ export interface CreateRuntimeOptions {
   readonly forceEnv?: "development" | "test" | "staging" | "production";
   readonly failOnMissingRequiredSecrets?: boolean;
   readonly port?: number;
+  /**
+   * NET-W005 remediation: explicitly configured attestation signer/
+   * verifier adapters (e.g. a production Ed25519 signing service).
+   * When provided as a PAIR they take precedence over the
+   * ATTESTATION_SIGNING_KEY secret in every environment. Partial
+   * wiring is rejected (fail closed). Production/staging require
+   * EITHER this pair OR the configured secret — never the dev default.
+   */
+  readonly attestation?: {
+    readonly signer?: AttestationSigner;
+    readonly verifier?: AttestationVerifier;
+  };
 }
 
 export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
@@ -458,26 +485,26 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     authority: postgresAuthority,
     logger: { debug: (m, f) => logger.forModule("evidence").debug(m, f) },
   });
-  const attestationSignerKey =
-    (snapshot as { readonly attestationSigningKey?: string }).attestationSigningKey ??
-    "dev-insecure-attestation-key";
-  if (
-    snapshot.environment !== "test" &&
-    !(snapshot as { readonly attestationSigningKey?: string }).attestationSigningKey
-  ) {
-    logger.warn("attestation.signing_key_fallback", {
-      message:
-        "ATTESTATION_SIGNING_KEY is not configured — using the insecure development default (configure a strong key or swap the signer adapter in production)",
-    });
-  }
-  const hmacSignerVerifier = createHmacAttestationSignerVerifier({
-    key: attestationSignerKey,
+  // NET-W005 remediation (architect review on PR #10): FAIL CLOSED.
+  // The previous wiring permitted the dev-insecure fallback outside
+  // test environments — and because it read a field the configuration
+  // snapshot never carried, the fallback was effectively unconditional
+  // (even a configured ATTESTATION_SIGNING_KEY was ignored). The key is
+  // now resolved through the SecretProvider (the only boundary that
+  // returns secret material), and a configured production/staging
+  // deployment without either the secret or an explicit signer/
+  // verifier adapter pair fails startup with ProviderConfigurationError.
+  const attestationSigning = selectAttestationSigning({
+    environment: snapshot.environment,
+    secretProvider,
+    logger,
+    attestation: opts.attestation,
   });
   const attestationService = createAttestationService({
     repository: attestationRepo,
     evidenceRepository: evidenceRepo,
-    signer: hmacSignerVerifier,
-    verifier: hmacSignerVerifier,
+    signer: attestationSigning.signer,
+    verifier: attestationSigning.verifier,
     authority: postgresAuthority,
     auditWriter,
     logger: logger.forModule("evidence"),
@@ -513,6 +540,11 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     evidenceRepository: evidenceRepo,
     outcomeClaimRepository: outcomeClaimRepo,
     attestationRepository: attestationRepo,
+    // NET-W005 remediation: the SAME verifier selected above — PoV
+    // verification (EVALUATING → VERIFIED) now cryptographically
+    // verifies at least one attached attestation against the current
+    // stored commitment digests before the transition may execute.
+    attestationVerifier: attestationSigning.verifier,
     subjectLookup: povSubjectLookup,
     workflow: {
       // Delegate to the SAME workflow service instance (the /workflows
@@ -1083,6 +1115,7 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     postgresAuthority,
     coordinationService,
     providerSelection,
+    attestationSigning: { mode: attestationSigning.mode },
     queue,
     workerLoop,
     registry,
