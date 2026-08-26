@@ -20,7 +20,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { randomUUID } from "node:crypto";
-import { createExecutionContext, runWithExecutionContextAsync } from "../core/execution-context.ts";
+import { createExecutionContext, deriveExecutionContext, runWithExecutionContextAsync } from "../core/execution-context.ts";
 import { classifyError } from "../core/errors.ts";
 import type { Logger } from "../core/logger.ts";
 import type { ConfigSnapshot } from "../core/config.ts";
@@ -71,13 +71,19 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       (req.headers["x-correlation-id"] as string | undefined) ?? randomUUID();
     const causationId =
       (req.headers["x-causation-id"] as string | undefined) ?? null;
-    const actorId =
-      (req.headers["x-actor-id"] as string | undefined) ?? null;
 
+    // NET-W002 remediation (PR #4 architect review): the request-scope
+    // ExecutionContext actor MUST NOT be derived from a caller-controlled
+    // header. The `X-Actor-Id` header is untrusted input and could spoof
+    // the actor recorded in audit lineage. The authoritative actor for a
+    // protected mutation is the server-resolved authenticated principal
+    // (`personId` produced by ApiAuth.resolvePrincipal), set on a derived
+    // child context inside guardMutation() AFTER authentication succeeds.
+    // For the unauthenticated request scope the actor is null.
     const ctx = createExecutionContext({
       correlationId,
       causationId,
-      actor: actorId ? { id: actorId, kind: "service" } : null,
+      actor: null,
     });
 
     await runWithExecutionContextAsync(ctx, async () => {
@@ -119,50 +125,68 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
   // + provider kind via headers (deterministic in-memory resolver for tests;
   // production would use a real auth adapter). Client-asserted claims are
   // carried in the X-Client-Claims header and are NEVER trusted for
-  // authorization (§4.5, API-AC-02) — they are only logged/audited.
+  // authorization (§4.5, API-AC-02). They are carried forward ONLY so the
+  // AuthorizationService can record a safe fingerprint when a forged claim
+  // is rejected — raw claim values are NEVER emitted into logs/audit
+  // (PR #4 remediation: see AuthorizationService.safeClaimsFingerprint).
+  function extractClientClaims(req: IncomingMessage): Record<string, unknown> | undefined {
+    const claimsHeader = req.headers["x-client-claims"] as string | undefined;
+    if (!claimsHeader) return undefined;
+    try {
+      const parsed = JSON.parse(claimsHeader);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Malformed client-claims header — ignore (claims are never trusted).
+    }
+    return undefined;
+  }
+
   function extractAuthSubject(req: IncomingMessage): ApiAuthSubject | null {
     const subjectId = req.headers["x-auth-subject-id"] as string | undefined;
     if (!subjectId) return null;
     const providerKind =
       (req.headers["x-auth-provider-kind"] as string | undefined) ?? "internal";
-    let clientClaims: Record<string, unknown> | undefined;
-    const claimsHeader = req.headers["x-client-claims"] as string | undefined;
-    if (claimsHeader) {
-      try {
-        const parsed = JSON.parse(claimsHeader);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          clientClaims = parsed as Record<string, unknown>;
-        }
-      } catch {
-        // Malformed client-claims header — ignore (claims are never trusted).
-      }
-    }
+    const clientClaims = extractClientClaims(req);
     return { subjectId, providerKind, clientClaims };
   }
 
   // Resolve the canonical person id for the request, using the auth guard.
-  // Returns null when the subject is unauthenticated OR no auth guard is
-  // configured. Client claims are carried forward so the authorizer can
-  // log/audit forged claims when it rejects them.
+  // Returns null personId when the subject is unauthenticated OR no auth
+  // guard is configured. Client claims are ALWAYS carried forward
+  // (independently of authentication) so the authorizer can record a safe
+  // fingerprint of forged claims when it rejects them — even on the
+  // unauthenticated deny path (PR #4 remediation: do not silently drop
+  // inbound claims before they reach the safe-fingerprint boundary).
   async function resolveActorPersonId(
     req: IncomingMessage,
   ): Promise<{ personId: string | null; clientClaims?: Record<string, unknown> } | null> {
     if (!opts.auth) return null;
+    // Claims are extracted independently so they survive even when the
+    // subject is unauthenticated.
+    const clientClaims = extractClientClaims(req);
     const subject = extractAuthSubject(req);
-    if (!subject) return { personId: null };
+    if (!subject) return { personId: null, clientClaims };
     const resolved = await opts.auth.resolvePrincipal(subject);
-    return { personId: resolved.personId, clientClaims: subject.clientClaims as Record<string, unknown> | undefined };
+    return { personId: resolved.personId, clientClaims };
   }
 
   // Guard a protected mutation: resolve actor + authorize, return 403 on
-  // deny. Returns the resolved personId on allow.
+  // deny. On allow, returns the resolved personId AND a derived child
+  // ExecutionContext whose `actor` is the server-resolved authenticated
+  // principal (`personId`, kind "person") — NOT a caller-controlled header.
+  // The derived context is the authoritative execution scope passed to
+  // domain commands; audit records written by domain services therefore
+  // record the resolved principal as the actor, never a spoofed inbound
+  // value (PR #4 remediation: do not trust X-Actor-Id for audit actor).
   async function guardMutation(
     ctx: ExecutionContext,
     req: IncomingMessage,
     action: string,
     resource: string,
     res: ServerResponse,
-  ): Promise<string | null> {
+  ): Promise<{ personId: string; execution: ExecutionContext } | null> {
     if (!opts.auth || !opts.commands) {
       await send(res, 501, {
         error: "not_implemented",
@@ -180,7 +204,7 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       resource,
       clientClaims,
     });
-    if (decision.decision !== "allow") {
+    if (decision.decision !== "allow" || personId === null) {
       await send(res, 403, {
         error: "authorization",
         classification: "authorization",
@@ -191,7 +215,15 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       });
       return null;
     }
-    return personId;
+    // Authoritative actor: derive a child context whose actor is the
+    // server-resolved authenticated principal. This is the only place the
+    // request-scope actor is promoted from null to a real principal, and
+    // it is derived exclusively from ApiAuth.resolvePrincipal() — never
+    // from an inbound header.
+    const execution = deriveExecutionContext(ctx, {
+      actor: { id: personId, kind: "person" },
+    });
+    return { personId, execution };
   }
 
   async function route(
@@ -246,10 +278,13 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
     // scope claims are NEVER trusted (§4.5, API-AC-02).
 
     // POST /api/identities — create a canonical identity (protected: only
-    // an authorized principal may provision identities).
+    // an authorized principal may provision identities). The actor recorded
+    // in the audit lineage is the server-resolved authenticated principal
+    // (carried by `guarded.execution`), NEVER a caller-controlled header.
     if (path === "/api/identities" && method === "POST" && opts.commands) {
-      const actorId = await guardMutation(ctx, req, "identity.create", "*", res);
-      if (actorId === null) return true;
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "identity.create", "*", res);
+      if (!guarded) return true;
       const body = await readBody(req);
       const displayName =
         typeof body === "object" && body !== null && "displayName" in body
@@ -263,7 +298,9 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
         typeof body === "object" && body !== null && "providerKind" in body
           ? String((body as { providerKind?: unknown }).providerKind)
           : "internal";
-      const view = await opts.commands.createIdentity(ctx, { displayName, subjectId, providerKind });
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createIdentity(guarded.execution, { displayName, subjectId, providerKind }),
+      );
       await send(res, 201, view);
       return true;
     }
@@ -281,57 +318,75 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
-    // POST /api/organizations — create an organization (protected).
+    // POST /api/organizations — create an organization (protected). The
+    // audit actor is the resolved principal (carried by guarded.execution);
+    // the `actorPersonId` is also passed as the organization's creatorId
+    // for explicit provenance.
     if (path === "/api/organizations" && method === "POST" && opts.commands) {
-      const actorId = await guardMutation(ctx, req, "organization.create", "*", res);
-      if (actorId === null) return true;
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "organization.create", "*", res);
+      if (!guarded) return true;
       const body = await readBody(req);
       const name =
         typeof body === "object" && body !== null && "name" in body
           ? String((body as { name?: unknown }).name)
           : "";
-      const view = await opts.commands.createOrganization(ctx, actorId, { name });
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createOrganization(guarded.execution, guarded.personId, { name }),
+      );
       await send(res, 201, view);
       return true;
     }
 
     // POST /api/organizations/:id/memberships — grant a membership (protected:
-    // the actor must be authorized for the target organization).
+    // the actor must be authorized for the target organization). The audit
+    // actor is the resolved principal (carried by guarded.execution); the
+    // `actorPersonId` is also passed as the membership's grantedBy for
+    // explicit provenance.
     const grantMatch = path.match(/^\/api\/organizations\/([^/]+)\/memberships$/);
     if (grantMatch && method === "POST" && opts.commands) {
+      const commands = opts.commands;
       const organizationId = grantMatch[1]!;
-      const actorId = await guardMutation(
+      const guarded = await guardMutation(
         ctx,
         req,
         "organization.membership.grant",
         organizationId,
         res,
       );
-      if (actorId === null) return true;
+      if (!guarded) return true;
       const body = await readBody(req);
       const personId =
         typeof body === "object" && body !== null && "personId" in body
           ? String((body as { personId?: unknown }).personId)
           : "";
-      const result = await opts.commands.grantMembership(ctx, actorId, organizationId, { personId });
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.grantMembership(guarded.execution, guarded.personId, organizationId, { personId }),
+      );
       await send(res, result.created ? 201 : 200, result.membership);
       return true;
     }
 
-    // DELETE /api/organizations/:id/memberships/:membershipId — revoke (protected).
+    // DELETE /api/organizations/:id/memberships/:membershipId — revoke
+    // (protected). The audit actor is the resolved principal (carried by
+    // guarded.execution); the `actorPersonId` is also passed as the
+    // membership's revokedBy for explicit provenance.
     const revokeMatch = path.match(/^\/api\/organizations\/([^/]+)\/memberships\/([^/]+)$/);
     if (revokeMatch && method === "DELETE" && opts.commands) {
+      const commands = opts.commands;
       const organizationId = revokeMatch[1]!;
       const membershipId = revokeMatch[2]!;
-      const actorId = await guardMutation(
+      const guarded = await guardMutation(
         ctx,
         req,
         "organization.membership.revoke",
         organizationId,
         res,
       );
-      if (actorId === null) return true;
-      const result = await opts.commands.revokeMembership(ctx, actorId, membershipId);
+      if (!guarded) return true;
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.revokeMembership(guarded.execution, guarded.personId, membershipId),
+      );
       await send(res, 200, result.membership);
       return true;
     }

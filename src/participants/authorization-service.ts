@@ -66,6 +66,79 @@ export interface AuthorizationServiceDeps {
 const ALLOW = "allow" as const;
 const DENY = "deny" as const;
 
+/**
+ * Credential-shaped key fragment matcher. Any claim key whose name contains
+ * one of these fragments is treated as a credential-bearing key and is
+ * NEVER emitted to logs/audit — neither the key name NOR its value. The
+ * fragment set is deliberately broad (password, token, secret, api key,
+ * private key, credential) so a malicious or misbehaving client cannot
+ * smuggle credential material past the fingerprint boundary under a
+ * synonym (PR #4 remediation: do not log raw clientClaims).
+ */
+const CREDENTIAL_KEY_FRAGMENTS = [
+  "password",
+  "token",
+  "secret",
+  "api-key",
+  "apikey",
+  "private-key",
+  "privatekey",
+  "credential",
+] as const;
+
+const CREDENTIAL_KEY_RE = new RegExp(
+  CREDENTIAL_KEY_FRAGMENTS.map((f) => f.replace(/[-]/g, "[-_]?")).join("|"),
+  "i",
+);
+
+/**
+ * Maximum number of claim keys retained in the fingerprint. Prevents a
+ * client from flooding the log surface with thousands of keys (denial-of-
+ * observability). Truncated keys are reported as `<truncated>`.
+ */
+const MAX_CLIENT_CLAIM_KEYS = 16;
+
+/**
+ * Produce a privacy-safe fingerprint of the inbound client claims. The
+ * fingerprint exposes:
+ *  - `clientClaimsPresent` (boolean) — did the client send any claims;
+ *  - `clientClaimKeys` (string[]) — a bounded list of the top-level claim
+ *    key names, with credential-shaped key names redacted to `<redacted>`
+ *    so even the structural indicator that a credential was sent is
+ *    suppressed, and capped at MAX_CLIENT_CLAIM_KEYS entries;
+ *  - `clientClaimsCount` (number) — total top-level claim count (for
+ *    anomaly detection without exposing values).
+ *
+ * The fingerprint NEVER contains claim values. A credential-shaped key
+ * name is itself redacted (not even the key name is exposed) so that ops
+ * engineers reading the log cannot infer that a credential was carried.
+ * This is the privacy boundary required by PR #4 remediation item #2.
+ */
+export function safeClaimsFingerprint(
+  clientClaims: Readonly<Record<string, unknown>> | undefined,
+): {
+  readonly clientClaimsPresent: boolean;
+  readonly clientClaimKeys: readonly string[];
+  readonly clientClaimsCount: number;
+} {
+  if (!clientClaims || typeof clientClaims !== "object") {
+    return { clientClaimsPresent: false, clientClaimKeys: [], clientClaimsCount: 0 };
+  }
+  const allKeys = Object.keys(clientClaims);
+  const count = allKeys.length;
+  const visible = allKeys.slice(0, MAX_CLIENT_CLAIM_KEYS).map((k) =>
+    CREDENTIAL_KEY_RE.test(k) ? "<redacted>" : k,
+  );
+  if (count > MAX_CLIENT_CLAIM_KEYS) {
+    visible.push("<truncated>");
+  }
+  return {
+    clientClaimsPresent: true,
+    clientClaimKeys: visible,
+    clientClaimsCount: count,
+  };
+}
+
 export function createAuthorizationService(
   deps: AuthorizationServiceDeps,
 ): AuthorizationService {
@@ -145,22 +218,25 @@ export function createAuthorizationService(
 
     async authorize(request) {
       const principal = request.principal;
+      // Privacy boundary (PR #4 remediation): emit only a safe fingerprint
+      // of the inbound client claims — NEVER the raw claim object, which
+      // may contain tokens, passwords or other credential material.
+      const claimsFingerprint = safeClaimsFingerprint(request.clientClaims);
 
       // 1) Unauthenticated principal → deny (§4.5, API-AC-02).
       if (!principal.personId) {
         logger.warn("authorization.denied_unauthenticated", {
           action: request.action,
           resource: request.resource,
-          clientClaims: request.clientClaims,
+          ...claimsFingerprint,
         });
         return deny(request, "unauthenticated principal", null);
       }
 
-      // 2) Client claims are NEVER trusted. They are recorded for audit
-      //    only when a forged claim is rejected, but authorization
-      //    decisions are based exclusively on server-resolved state.
-      //    (No assertion on clientClaims here — they are simply ignored
-      //    for the decision. This is the core invariant of §4.5/API-AC-02.)
+      // 2) Client claims are NEVER trusted. They are NOT recorded in raw
+      //    form anywhere in logs/audit; only the safe fingerprint is emitted
+      //    when a forged claim is rejected. Authorization decisions are
+      //    based exclusively on server-resolved state. (§4.5, API-AC-02.)
 
       // 3) Evaluate policies in policy-order. Deny policies override
       //    allow policies. Deny-by-default if no allow policy matches.
@@ -184,7 +260,7 @@ export function createAuthorizationService(
           action: request.action,
           resource: request.resource,
           policyId: denyMatch.id,
-          clientClaims: request.clientClaims,
+          ...claimsFingerprint,
         });
         return deny(request, "explicit deny policy", denyMatch.id);
       }
@@ -204,7 +280,7 @@ export function createAuthorizationService(
         resource: request.resource,
         personId: principal.personId,
         participantId: principal.participantId,
-        clientClaims: request.clientClaims,
+        ...claimsFingerprint,
       });
       return deny(request, "no allow policy matched (deny-by-default)", null);
     },

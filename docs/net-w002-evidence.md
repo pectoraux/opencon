@@ -15,7 +15,7 @@ All evidence is reproducible from a clean repository checkout via
 | `bun install` | Install dependencies (zod) |
 | `bun run typecheck` | TypeScript strict typecheck |
 | `bun run arch:check` | Deterministic architecture/dependency check |
-| `bun test` | Full automated test suite (16 files, 96 tests) |
+| `bun test` | Full automated test suite (18 files, 112 tests) |
 | `bun run verify` | typecheck + arch:check + tests (canonical evidence command) |
 
 The same pipeline is enforced in CI by `.github/workflows/ci.yml`
@@ -28,12 +28,12 @@ the test suite both gate every push and PR targeting `main`.
 $ bun run verify
 $ tsc --noEmit                       # typecheck: PASS (exit 0)
 $ bun scripts/check-architecture.ts  # ✓ 136 files scanned, 0 violations (exit 0)
-$ bun test                           # 96 pass, 0 fail, 757 expect() calls, 16 files (exit 0)
+$ bun test                           # 112 pass, 0 fail, 839 expect() calls, 18 files (exit 0)
 ```
 
 Test breakdown:
 - NET-W001 suites (unchanged, still pass): 52 tests across 8 files
-- NET-W002 suites (new): 44 tests across 8 files
+- NET-W002 suites (original): 44 tests across 8 files
   - tests/identity/net-w002-ac-01-unified-identity.test.ts (2 tests)
   - tests/participants/net-w002-ac-02-participant-roles.test.ts (6 tests)
   - tests/api/net-w002-ac-03-server-side-authorization.test.ts (6 tests)
@@ -42,9 +42,11 @@ Test breakdown:
   - tests/identity/net-w002-ac-06-authentication-boundary.test.ts (7 tests)
   - tests/identity/net-w002-ac-07-privacy-boundary.test.ts (8 tests)
   - tests/audit/net-w002-ac-08-audit-lineage.test.ts (5 tests)
-- NET-W001-AC-08 regression updated (split into skeleton + NET-W002-non-
-  skeleton assertions; forbidden-pattern check now covers all 16 domains
-  including the 3 NET-W002 domains; 6 tests, still pass)
+- NET-W002 PR #4 remediation suites (new): 16 tests across 2 files
+  - tests/api/net-w002-remediation-actor-spoof.test.ts (6 tests)
+  - tests/api/net-w002-remediation-claims-leak.test.ts (10 tests)
+- NET-W001-AC-08 regression (split + forbidden-pattern widened to all 16
+  domains; 6 tests, still pass)
 
 ## 3. Changed-files summary mapped to acceptance criteria
 
@@ -198,3 +200,136 @@ checks intact for all 16 domains.
 
 Exactly one implementation PR is created for NET-W002 (see PR description
 for the required format).
+
+## 6. PR #4 architect remediation
+
+The architect requested CHANGES on PR #4 with two identity-boundary issues
+that must be corrected before merge:
+
+> 1. `X-Actor-Id` is currently caller-controlled and can spoof the actor
+>    recorded in audit context.
+> 2. Raw `X-Client-Claims` can flow into authorization logs and potentially
+>    expose credential material.
+
+Required evidence:
+> - regression tests proving a forged `X-Actor-Id` cannot change the
+>   authoritative audit actor;
+> - regression tests proving credential-shaped/client-claim values do not
+>   appear in captured logs;
+> - `bun run verify` and CI green after remediation.
+
+### 6.1 Remediation #1 — do not trust `X-Actor-Id` for audit actor
+
+**Root cause:** `src/api/server.ts` built the request-scope
+`ExecutionContext.actor` directly from the caller-controlled
+`x-actor-id` header. Downstream services used `context.actor?.id` to
+write audit lineage, so a forged header value would be recorded as the
+audit actor for protected mutations.
+
+**Fix (src/api/server.ts):**
+- Removed the `x-actor-id` header read entirely. The request-scope
+  `ExecutionContext` now carries `actor: null` (the request itself has
+  not been authenticated yet — no caller-controlled actor is trusted).
+- `guardMutation()` derives a child `ExecutionContext` via
+  `deriveExecutionContext(ctx, { actor: { id: personId, kind: "person" } })`
+  AFTER `ApiAuth.resolvePrincipal()` returns the canonical `personId`
+  and `ApiAuth.authorize()` returns `allow`. This derived context is the
+  authoritative execution scope for the protected mutation.
+- Each protected command invocation is wrapped in
+  `runWithExecutionContextAsync(guarded.execution, ...)` so BOTH audit
+  records (via the `context` parameter) AND log lines (via AsyncLocalStorage)
+  carry the server-resolved principal as the actor — never a header.
+- The `guardMutation` deny condition was also hardened:
+  `decision.decision !== "allow" || personId === null` — a wildcard allow
+  policy can never authorize an unauthenticated principal.
+
+**Regression evidence (tests/api/net-w002-remediation-actor-spoof.test.ts, 6 tests):**
+- POST /api/identities with forged `X-Actor-Id` → audit actor for
+  `identity.person_created` is the resolved `personId`, NOT the spoofed
+  value; the spoofed id does not appear anywhere in the audit record JSON.
+- POST /api/organizations with forged `X-Actor-Id` → audit actor for
+  `organization.created` is the resolved `personId`.
+- POST /api/organizations/:id/memberships with forged `X-Actor-Id` →
+  audit actor for `organization.membership_granted` is the resolved `personId`.
+- DELETE /api/organizations/:id/memberships/:membershipId with forged
+  `X-Actor-Id` → audit actor for `organization.membership_revoked` is the
+  resolved `personId`.
+- A denied protected mutation writes NO audit record at all (no spoofed
+  actor can appear in audit when the mutation never executes).
+- Static contract: the API server source no longer reads
+  `req.headers["x-actor-id"]`; the authoritative actor is derived
+  exclusively from `personId` inside `guardMutation()`.
+
+### 6.2 Remediation #2 — do not log raw `clientClaims`
+
+**Root cause:** `src/participants/authorization-service.ts` logged
+`clientClaims: request.clientClaims` (the raw claim object) on all three
+deny paths (`denied_unauthenticated`, `denied_policy`, `denied_default`).
+`X-Client-Claims` is untrusted external input and may contain tokens,
+passwords, or other credential material — emitting it raw into logs
+violates the privacy/secret boundary.
+
+**Fix (src/participants/authorization-service.ts):**
+- Added `safeClaimsFingerprint(clientClaims)` exported helper that
+  produces ONLY:
+  - `clientClaimsPresent` (boolean) — did the client send any claims;
+  - `clientClaimKeys` (string[]) — a bounded list of top-level claim key
+    names, capped at `MAX_CLIENT_CLAIM_KEYS = 16`, with credential-shaped
+    key names (matching `password|token|secret|api[-_]?key|private[-_]?key|
+    credential`) redacted to `<redacted>` — so even the structural
+    indicator that a credential was carried is suppressed;
+  - `clientClaimsCount` (number) — total top-level claim count for anomaly
+    detection without exposing values.
+- The fingerprint NEVER contains claim values. A credential-shaped key
+  name is itself redacted.
+- All three deny-path log calls now spread `...claimsFingerprint` instead
+  of `clientClaims: request.clientClaims`.
+- `src/api/server.ts`: `extractClientClaims()` is now a standalone function
+  and `resolveActorPersonId()` always carries claims forward — even on the
+  unauthenticated path — so the safe fingerprint is recorded when forged
+  claims are rejected (previously claims were dropped when no subject id
+  was present, losing anomaly signal).
+
+**Regression evidence (tests/api/net-w002-remediation-claims-leak.test.ts, 10 tests):**
+- Unit contract (5 tests): absent claims → `clientClaimsPresent=false`;
+  non-credential claims → keys listed verbatim, no values; credential-
+  shaped keys redacted to `<redacted>`; keys capped at 16 with
+  `<truncated>` sentinel; fingerprint is shallow (no nested traversal,
+  no values ever exposed).
+- Deny path — deny-by-default (1 test): credential-shaped claim values
+  (`SECRET-TOKEN-VALUE-DO-NOT-LEAK`, `hunter2-password-do-not-leak`,
+  `ak-1234567890-do-not-leak`) sent in `X-Client-Claims` do not appear in
+  ANY captured log line; the `authorization.denied_default` entry carries
+  `clientClaimsPresent: true`, `clientClaimsCount: 4`, `clientClaimKeys:
+  ["role","<redacted>","<redacted>","<redacted>"]`; the raw `clientClaims`
+  field is absent.
+- Deny path — unauthenticated (1 test): even with no auth subject, the
+  claims fingerprint is recorded (proves the standalone-extraction fix);
+  credential values do not appear in any log line.
+- Deny path — explicit DENY policy (1 test): credential-shaped claim
+  values do not appear in any log line; the `denied_policy` entry carries
+  the safe fingerprint.
+- Allow path (1 test): even on the allow path, credential values sent in
+  `X-Client-Claims` do not appear in any log line; the `allowed_policy`
+  entry carries neither raw claims nor the fingerprint.
+- Static contract (1 test): the AuthorizationService source does not log
+  a raw `clientClaims` field; the `safeClaimsFingerprint` helper is
+  exported; all three deny-path log calls spread `...claimsFingerprint`.
+
+### 6.3 Remediation verification
+
+```
+$ bun run verify
+$ tsc --noEmit                       # typecheck: PASS (exit 0)
+$ bun scripts/check-architecture.ts  # ✓ 136 files scanned, 0 violations (exit 0)
+$ bun test                           # 112 pass, 0 fail, 839 expect() calls, 18 files (exit 0)
+```
+
+The frozen architecture (`spec/architecture.md`, `spec/architecture-lock.md`)
+is unchanged. The tier allow matrix still passes (domain services import
+only core + their own port; infrastructure never imports domain ports).
+No secrets or real credentials are committed — all credential values in
+the regression tests are deliberately synthetic strings
+(`SECRET-TOKEN-VALUE-DO-NOT-LEAK`, etc.) that exist solely to prove the
+privacy boundary rejects them. The NET-W001 foundation (deep immutability,
+append-only audit, secrets isolation, CI enforcement) is preserved.
