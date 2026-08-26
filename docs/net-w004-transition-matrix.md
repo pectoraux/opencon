@@ -173,10 +173,31 @@ audit record carries:
   cross-reference with the idempotency store.
 - `metadata.transitionId`: stable transition id (deterministic on replay).
 - `metadata.organizationScopeId`: the tenant/participant scope.
+- `metadata.transactionId`: the AUTHORITATIVE `AuthorityTransaction`
+  id that committed the mutation + idempotency record (stamped by the
+  transactional audit buffer; NOT the execution id).
 
-The audit record is committed atomically with the lifecycle mutation
-(work order §4.7) — both commit in the SAME authoritative transaction
-or both roll back.
+The audit record is atomic with the lifecycle mutation (work order
+§4.7) under the transaction-ordering contract (NET-W004-AC-07
+remediation v2): the transition appends the record to a transactional
+audit buffer BOUND to the same authoritative transaction as the
+mutation + the idempotency record. The buffer has no publish method of
+its own — publication is registered on the transaction's `afterCommit`
+hook and runs STRICTLY AFTER the durable commit succeeds; the
+`afterRollback` hook discards the buffer when the transaction settles
+without committing (explicit rollback OR failed commit):
+
+```
+tx.commit() succeeds → afterCommit → audit published (visible)
+tx.commit() fails    → afterRollback → audit discarded (invisible)
+tx.rollback()        → afterRollback → audit discarded (invisible)
+```
+
+A publication failure after a successful durable commit is retried;
+on exhaustion the unpublished event is RETAINED (it belongs to a
+COMMITTED transaction) for the explicit `retryPendingPublications()`
+recovery path — so recovery can never create "audit exists, mutation
+doesn't".
 
 ## 9. Out of scope (work order §5)
 

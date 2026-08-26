@@ -212,17 +212,23 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     collector: logSink,
   });
 
-  // NET-W004-AC-07 remediation: the runtime's audit writer is the
-  // TRANSACTIONAL audit writer wrapping the in-memory append-only
-  // writer. Non-transactional consumers (identity, organizations,
-  // participants, opportunities, contributions, workers) call
-  // append/query/count — the transactional writer delegates those
-  // directly to the underlying append-only writer (identical
-  // NET-W001/NET-W002 behaviour). The workflow authority calls
-  // forTransaction(tx) to obtain a transaction-scoped buffer so the
-  // lifecycle mutation + idempotency record + audit record commit
-  // atomically in the SAME AuthorityTransaction (rollback-on-audit-
-  // failure; no committed mutation without committed audit lineage).
+  // NET-W004-AC-07 remediation (transaction-ordering): the runtime's
+  // audit writer is the TRANSACTIONAL audit writer wrapping the
+  // in-memory append-only writer. Non-transactional consumers
+  // (identity, organizations, participants, opportunities,
+  // contributions, workers) call append/query/count — the
+  // transactional writer delegates those directly to the underlying
+  // append-only writer (identical NET-W001/NET-W002 behaviour). The
+  // workflow authority calls forTransaction(tx) to obtain a
+  // transaction-scoped buffer whose publication is registered on the
+  // transaction's afterCommit hook and whose discard is registered on
+  // afterRollback: the lifecycle mutation + idempotency record commit
+  // durably first, the audit record is published STRICTLY AFTER the
+  // commit succeeds, and it is discarded when the commit fails or the
+  // tx rolls back (no audit record can survive for a mutation that
+  // never committed). A post-commit publication failure is retried,
+  // then retained for the explicit retryPendingPublications()
+  // recovery path — the durable commit is never undone.
   const auditWriter = createTransactionalAuditWriter({
     underlying: createInMemoryAuditWriter({ logger: logger.child("audit") }),
     logger: { debug: (m, f) => logger.child("audit").debug(m, f) },

@@ -69,6 +69,7 @@ export interface PostgresAuthorityAdapterOptions {
   readonly logger?: {
     debug(message: string, fields?: Record<string, unknown>): void;
     warn?(message: string, fields?: Record<string, unknown>): void;
+    error?(message: string, fields?: Record<string, unknown>): void;
   };
 }
 
@@ -119,6 +120,17 @@ function toAuthorityRecord<T>(row: AuthorityRow): AuthorityRecord<T> {
  * provide genuine atomicity and isolation: writes inside this
  * transaction are buffered server-side and are NOT visible to other
  * transactions (or to outside readers) until COMMIT.
+ *
+ * NET-W004-AC-07 remediation (transaction-ordering): the transaction
+ * exposes afterCommit/afterRollback lifecycle hooks. afterCommit hooks
+ * (transactional audit publication) run STRICTLY AFTER the SQL COMMIT
+ * succeeded — transaction-scoped side effects can never become visible
+ * for a mutation that never committed. If the SQL COMMIT itself fails,
+ * PostgreSQL has already rolled the transaction back, so afterRollback
+ * hooks run to discard transaction-scoped side effects before the
+ * error surfaces. A hook failure never fails or undoes the already
+ * durable COMMIT: each hook owns its failure recovery; the adapter
+ * logs the hook error.
  */
 class PostgresAuthorityTransaction implements AuthorityTransaction {
   private letSettled = false;
@@ -126,12 +138,20 @@ class PostgresAuthorityTransaction implements AuthorityTransaction {
   private clientExecutionContext:
     | { executionId: string; correlationId: string; actorId: string | null }
     | null = null;
+  /** afterCommit hooks — run strictly AFTER the durable SQL COMMIT. */
+  private readonly commitHooks: Array<() => Promise<void>> = [];
+  /** afterRollback hooks — run when the tx settles WITHOUT a durable commit. */
+  private readonly rollbackHooks: Array<() => Promise<void>> = [];
 
   public constructor(
     transactionId: string,
     private readonly client: PoolClient,
     private readonly schema: string,
-    private readonly logger?: { debug(message: string, fields?: Record<string, unknown>): void },
+    private readonly logger?: {
+      debug(message: string, fields?: Record<string, unknown>): void;
+      warn?(message: string, fields?: Record<string, unknown>): void;
+      error?(message: string, fields?: Record<string, unknown>): void;
+    },
   ) {
     this.transactionId = transactionId;
   }
@@ -147,6 +167,59 @@ class PostgresAuthorityTransaction implements AuthorityTransaction {
       correlationId: ctx.correlationId,
       actorId: ctx.actor?.id ?? null,
     };
+  }
+
+  public afterCommit(hook: () => Promise<void>): void {
+    if (this.letSettled) {
+      throw new InvariantError(
+        `transaction ${this.transactionId} already settled; cannot register an afterCommit hook`,
+      );
+    }
+    this.commitHooks.push(hook);
+  }
+
+  public afterRollback(hook: () => Promise<void>): void {
+    if (this.letSettled) {
+      throw new InvariantError(
+        `transaction ${this.transactionId} already settled; cannot register an afterRollback hook`,
+      );
+    }
+    this.rollbackHooks.push(hook);
+  }
+
+  /** Run afterCommit hooks sequentially; log (never throw) on failure. */
+  private async runCommitHooks(): Promise<void> {
+    for (const hook of this.commitHooks) {
+      try {
+        await hook();
+      } catch (err) {
+        this.logHookError("afterCommit", err);
+      }
+    }
+  }
+
+  /** Run afterRollback hooks sequentially; log (never throw) on failure. */
+  private async runRollbackHooks(): Promise<void> {
+    for (const hook of this.rollbackHooks) {
+      try {
+        await hook();
+      } catch (err) {
+        this.logHookError("afterRollback", err);
+      }
+    }
+  }
+
+  private logHookError(phase: "afterCommit" | "afterRollback", err: unknown): void {
+    const fields = {
+      txId: this.transactionId,
+      phase,
+      error: err instanceof Error ? err.message : String(err),
+    };
+    if (this.logger?.error) {
+      this.logger.error("authority.tx_hook_failed", fields);
+    } else {
+      this.logger?.debug("authority.tx_hook_failed", fields);
+    }
   }
 
   public async get<T = unknown>(collection: string, key: string): Promise<AuthorityRecord<T> | null> {
@@ -230,18 +303,21 @@ class PostgresAuthorityTransaction implements AuthorityTransaction {
   public async commit(): Promise<void> {
     if (this.letSettled) return;
     this.letSettled = true;
+    // NET-W004-AC-07 remediation (transaction-ordering): the durable
+    // SQL COMMIT happens FIRST. Only after it succeeds do the
+    // afterCommit hooks run — transaction-scoped side effects
+    // (transactional audit publication) become visible STRICTLY AFTER
+    // the authoritative commit. If the SQL COMMIT fails, PostgreSQL
+    // has already rolled the transaction back: afterRollback hooks run
+    // so transaction-scoped side effects (buffered audit) are
+    // discarded — no audit record can survive for a mutation that
+    // never committed.
     try {
       await this.client.query("COMMIT");
-      // The user's transaction ended. Remove the in-flight marker
-      // (autocommit: this DELETE is its own tiny transaction, so it
-      // persists even if a later operation on this client fails).
-      await this.client.query(
-        `DELETE FROM ${fqTable(this.schema, INFLIGHT_TABLE)} WHERE tx_id = $1`,
-        [this.transactionId],
-      );
     } catch (err) {
-      // If COMMIT itself failed, PostgreSQL already rolled back. Try
-      // to clear the marker (it may still be present from begin()).
+      // COMMIT failed: PostgreSQL already rolled back. Best-effort
+      // cleanup of the in-flight marker, then discard tx-scoped side
+      // effects (buffered audit) via the afterRollback hooks.
       try {
         await this.client.query("ROLLBACK");
       } catch {
@@ -255,10 +331,30 @@ class PostgresAuthorityTransaction implements AuthorityTransaction {
       } catch {
         // ignore — recover() will report the orphaned marker on restart
       }
-      throw err;
-    } finally {
+      await this.runRollbackHooks();
       this.client.release();
+      throw err;
     }
+    // The durable COMMIT succeeded. The in-flight marker cleanup is
+    // POST-commit bookkeeping: its failure must NOT misreport the
+    // durable commit as failed (that could make a caller retry a
+    // committed mutation); recover() reports orphaned markers instead.
+    try {
+      await this.client.query(
+        `DELETE FROM ${fqTable(this.schema, INFLIGHT_TABLE)} WHERE tx_id = $1`,
+        [this.transactionId],
+      );
+    } catch (err) {
+      this.logger?.warn?.("authority.inflight_marker_cleanup_failed", {
+        txId: this.transactionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    this.client.release();
+    // Durable commit + bookkeeping done → publish tx-scoped side
+    // effects (transactional audit). Hook errors are logged by
+    // runCommitHooks and never fail the durable commit.
+    await this.runCommitHooks();
     this.logger?.debug("authority.tx_commit", { txId: this.transactionId });
   }
 
@@ -276,6 +372,9 @@ class PostgresAuthorityTransaction implements AuthorityTransaction {
     } finally {
       this.client.release();
     }
+    // Discard transaction-scoped side effects (buffered audit) —
+    // best-effort: hook errors are logged, never thrown.
+    await this.runRollbackHooks();
     this.logger?.debug("authority.tx_rollback", { txId: this.transactionId });
   }
 }
@@ -292,6 +391,7 @@ export class PostgresAuthorityAdapter implements PostgresAuthority {
   private readonly logger?: {
     debug(message: string, fields?: Record<string, unknown>): void;
     warn?(message: string, fields?: Record<string, unknown>): void;
+    error?(message: string, fields?: Record<string, unknown>): void;
   };
   private schemaReady = false;
 

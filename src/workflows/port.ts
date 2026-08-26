@@ -170,12 +170,15 @@ export interface WorkflowServiceDeps {
  *        stale writers);
  *     c. evaluates the transition legality (state machine);
  *     d. writes the updated subject (new state, version+1, lineage);
- *     e. buffers an audit record via the transactional audit buffer
- *        bound to the SAME tx, then flushes it. The audit write
- *        participates in the tx's atomicity — a buffer append/flush
- *        failure rolls back the mutation + the idempotency record
- *        (no committed mutation without committed audit lineage,
- *        NET-W004-AC-07).
+ *     e. appends an audit record to the transactional audit buffer
+ *        bound to the SAME tx. The record is BUFFERED (invisible);
+ *        it is published by the tx's `afterCommit` hook STRICTLY AFTER
+ *        the authoritative `tx.commit()` succeeds, and discarded by
+ *        `afterRollback` when the tx settles without committing —
+ *        lifecycle mutation + idempotency record + audit record commit
+ *        together or none does, and the audit can never become visible
+ *        for a mutation that never committed (NET-W004-AC-07
+ *        transaction-ordering remediation).
  *  6. Returns a stable {@link TransitionResult} with execution/
  *     correlation/causation lineage + the authoritative `transactionId`.
  *

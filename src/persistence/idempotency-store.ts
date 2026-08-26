@@ -26,6 +26,24 @@
  *    commits; concurrent overlap is resolved by the authority's
  *    transactional isolation.
  *
+ * NET-W004-AC-07 remediation (transaction-ordering, architect
+ * re-review on PR #8): the commit below is the AUTHORITATIVE settle
+ * point of the whole apply. `fn` appends its transactional audit
+ * record through a buffer BOUND to this transaction's lifecycle
+ * (registered on `tx.afterCommit`/`tx.afterRollback`), so the audit
+ * publication happens strictly AFTER `tx.commit()` below makes the
+ * lifecycle mutation + the completed idempotency record durable —
+ * and is discarded if the commit fails (the catch below rolls the
+ * transaction back, firing the afterRollback hooks):
+ *
+ * ```text
+ * fn() → mutation + idempotency record buffered + audit buffered
+ * writeWithinTx(completed) → idempotency record completed
+ * tx.commit()  ├─ ok    → afterCommit → audit published
+ *              └─ fail  → afterRollback → audit discarded, nothing
+ *                         committed (mutation + idempotency absent)
+ * ```
+ *
  * The contract is proven by the integration test in
  * tests/persistence/net-w003-ac-06-idempotency-concurrency.test.ts.
  */
@@ -185,9 +203,12 @@ export function createPostgresIdempotencyStore(opts: IdempotencyStoreOptions): I
           // so the workflow service can mutate lifecycle state AND
           // append a transactional audit record within the SAME
           // authoritative tx as the idempotency record (true atomicity).
-          // The recordId is exposed so the audit lineage references the
-          // EXACT idempotency record (not the tx id) — NET-W004-AC-07
-          // correct idempotency-record lineage.
+          // The audit record is APPEND-ONLY here (buffered, invisible);
+          // it is published by the tx's afterCommit hook strictly after
+          // tx.commit() below succeeds (NET-W004-AC-07 transaction-
+          // ordering remediation). The recordId is exposed so the audit
+          // lineage references the EXACT idempotency record (not the
+          // tx id) — NET-W004-AC-07 correct idempotency-record lineage.
           const applyCtx: IdempotentApplyContext = {
             execution,
             transaction: tx,
@@ -213,7 +234,14 @@ export function createPostgresIdempotencyStore(opts: IdempotencyStoreOptions): I
             throw err;
           }
 
-          // Store the completed result + settle the tx.
+          // Store the completed result + settle the tx. This commit is
+          // the authoritative settle point: the lifecycle mutation +
+          // the completed idempotency record become durable together,
+          // and the buffered audit record is published by the tx's
+          // afterCommit hook STRICTLY AFTER this commit succeeds. If
+          // this commit throws, the catch below rolls the tx back —
+          // the afterRollback hooks discard the buffered audit, so
+          // nothing (mutation, idempotency record, audit) survives.
           const completed: IdempotencyRecord = {
             key,
             status: STATUS_COMPLETE,

@@ -86,25 +86,35 @@ export class AuditMutationError extends Error {
 
 /**
  * A transactional audit buffer — an AuditWriter whose appends are
- * buffered until the bound authoritative transaction commits (then
- * flushed to the underlying append-only writer) or rolls back (then
- * discarded). This is the contract the workflow authority uses so an
- * audit record for a material lifecycle mutation is committed
- * atomically with the mutation + the idempotency record (NET-W004 §4.7
- * + NET-W003 §4.8 atomicity: audit + mutation commit together, or both
- * roll back).
+ * buffered and published ONLY after the bound authoritative transaction
+ * durably commits. This is the contract the workflow authority uses so
+ * an audit record for a material lifecycle mutation is never visible
+ * for a mutation that never committed (NET-W004 §4.7 + NET-W003 §4.8
+ * atomicity: audit + mutation commit together, or none does).
  *
- * `commit` flushes the buffered events to the underlying writer; a
- * failure here MUST surface to the caller so the bound transaction
- * rolls back (no committed mutation without committed audit lineage).
- * `rollback` discards the buffered events (the mutation rolled back).
+ * NET-W004-AC-07 remediation (transaction-ordering, architect re-review
+ * on PR #8): the buffer has NO publish/flush method of its own. Binding
+ * a buffer to a transaction (`TransactionalAuditWriter.forTransaction`)
+ * registers the buffer's publication on the transaction's
+ * `afterCommit` hook and its discard on the `afterRollback` hook, so:
+ *
+ * ```text
+ * tx.commit() succeeds  → afterCommit → buffer published (audit visible)
+ * tx.commit() fails     → afterRollback → buffer discarded (invisible)
+ * tx.rollback()         → afterRollback → buffer discarded (invisible)
+ * ```
+ *
+ * There is deliberately NO way to publish the buffer from inside the
+ * transaction (before `commit()`): doing so could leave a visible audit
+ * record for a mutation that was rolled back when the authoritative
+ * commit subsequently failed.
  */
 export interface TransactionalAuditBuffer extends AuditWriter {
-  /** Flush the buffered events to the underlying writer. Throws on failure. */
-  commit(): Promise<void>;
-  /** Discard the buffered events (the bound transaction rolled back). */
-  rollback(): Promise<void>;
-  /** Buffered event count (for tests). */
+  /**
+   * Buffered event count (for tests). Buffered events are NOT visible
+   * through `query`/`count` — they delegate to the underlying committed
+   * audit log — until the bound transaction commits.
+   */
   pendingCount(): number;
 }
 
@@ -123,21 +133,51 @@ export interface TransactionalAuditBuffer extends AuditWriter {
  *
  * Inside an authoritative transaction, the caller obtains a buffer via
  * `forTransaction(tx)` and appends audit records through it. The
- * records are committed atomically with the transaction (flush on
- * commit, discard on rollback). The buffer's `transactionId` lineage
- * is `tx.transactionId` — the authoritative transaction id, NOT the
+ * records are published STRICTLY AFTER the transaction's durable
+ * commit (via the transaction's `afterCommit` lifecycle hook) and
+ * discarded when the transaction settles without committing (via
+ * `afterRollback`). The buffer's `transactionId` lineage is
+ * `tx.transactionId` — the authoritative transaction id, NOT the
  * execution id (correct audit lineage: NET-W004-AC-07).
+ *
+ * Publication failure recovery (explicit recovery path, NET-W004-AC-07
+ * remediation): if the underlying append-only writer fails while the
+ * buffer is being published after a successful commit, the publication
+ * is retried; when retries are exhausted the UNPUBLISHED events are
+ * RETAINED (never discarded, never partially lost) in a pending
+ * publication queue for an explicit `retryPendingPublications()`
+ * recovery call. The durable commit is never undone — the recovery
+ * path can therefore never create "audit exists, mutation doesn't"
+ * (retained events always belong to a COMMITTED transaction); it
+ * converges the audit trail toward the committed state.
  */
 export interface TransactionalAuditWriter extends AuditWriter {
   /**
    * Begin a transactional audit buffer bound to an authoritative
    * transaction. Audit events appended via the returned writer are
-   * buffered until `commit` (flushed to the underlying writer) or
-   * `rollback` (discarded).
+   * buffered — invisible through `query`/`count` — until the bound
+   * transaction durably commits (the buffer registers its publication
+   * on the transaction's `afterCommit` hook and its discard on the
+   * transaction's `afterRollback` hook).
    *
-   * The buffer records `tx.transactionId` in each flushed event's
+   * The buffer records `tx.transactionId` in each published event's
    * metadata so the audit record can be traced back to its durable
-   * transaction.
+   * transaction. Binding to an already-settled transaction is an
+   * invariant violation.
    */
   forTransaction(tx: AuthorityTransaction): TransactionalAuditBuffer;
+  /**
+   * Retry the retained pending audit publications (events whose
+   * post-commit publication failed and was retained). Returns the
+   * number of events published by this call and the number still
+   * remaining (unrecovered). This is the explicit recovery path for
+   * audit publication failures — safe to call repeatedly.
+   */
+  retryPendingPublications(): Promise<{ readonly published: number; readonly remaining: number }>;
+  /**
+   * Number of audit events retained awaiting publication recovery
+   * (for monitoring/tests). Zero means every committed transaction's
+   * audit has been published.
+   */
+  pendingPublicationCount(): number;
 }

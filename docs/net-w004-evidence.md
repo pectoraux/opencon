@@ -15,7 +15,7 @@
 |--------------------------------------|------------------------------------------------------------|---------------------------------------|
 | `bun run typecheck`                  | TypeScript strict-mode typecheck                           | PASS                                  |
 | `bun run arch:check`                 | Architecture import-scanner (tier allow matrix)           | PASS — 162 files, 0 violations        |
-| `bun test`                           | Run all unit/integration tests (skips real PG/Redis)       | PASS — 245 pass / 15 skip / 0 fail    |
+| `bun test`                           | Run all unit/integration tests (skips real PG/Redis)       | PASS — 260 pass / 15 skip / 0 fail    |
 | `bun run verify`                     | typecheck + arch:check + tests                             | exit 0                                |
 
 (Counts as of this PR; the NET-W001..003 regression suites continue to pass alongside the new NET-W004 suites.)
@@ -145,50 +145,93 @@ causation identifiers, actor/subject/resource lineage, and an append-
 oriented audit record that is committed atomically with the authoritative
 state mutation.
 
-**REMEDIATION (architect re-review on PR #8):** the workflow's audit
-writes now go through the **transactional audit writer** — not the
-ordinary in-memory direct writer. The lifecycle mutation, the idempotency
-record, and the audit record all commit via the SAME `AuthorityTransaction`:
+**REMEDIATION v1 (first architect re-review on PR #8):** the workflow's
+audit writes were re-wired through the **transactional audit writer**
+(obtained via `forTransaction(tx)`), replacing the ordinary in-memory
+direct writer.
+
+**REMEDIATION v2 — transaction ordering (second architect re-review on
+PR #8, CURRENT):** remediation v1 still flushed the buffer from INSIDE
+`performTransition()` — BEFORE the idempotency store's `tx.commit()`. If
+that authoritative commit then failed, the mutation and idempotency
+record rolled back but the audit record was ALREADY published — a
+phantom "audit exists, mutation doesn't" state violating the
+all-or-nothing requirement. The corrected design:
 
 ```
-lifecycle mutation   (repo.saveWithinTx — buffered in the authority tx)
-+ idempotency record (idempotency store — buffered in the authority tx)
-+ audit record       (auditWriter.forTransaction(tx) buffer, flushed
-                      before the tx commits; flush failure throws so the
-                      tx rolls back)
+applyIdempotent()
+    ↓ create authoritative tx
+    ↓ create audit buffer bound to tx (forTransaction)
+      → registers tx.afterCommit(publish) + tx.afterRollback(discard)
+    ↓ perform mutation + audit append   (both buffered, invisible)
+    ↓ write completed idempotency record
+    ↓ tx.commit()
+        ├── durable commit ok    → afterCommit → publish audit buffer
+        └── durable commit fails → afterRollback → discard audit buffer
 ```
 
-Rollback-on-audit-failure is proven by a fault-injection test: when the
-underlying audit writer fails, the transition is rejected AND the subject
-remains unmutated (DRAFT, version 0), no idempotency record is committed,
-and no audit records exist — no committed mutation without committed
-audit lineage.
+The buffer has **no publish method of its own** — there is structurally
+no way to publish audit from inside the transaction. The ONLY path to
+the underlying append-only writer is the transaction's `afterCommit`
+hook, which every `AuthorityTransaction` implementation runs STRICTLY
+AFTER its durable commit (commit-ordering contract added to
+`src/core/postgres-authority.ts`). The four ordering invariants:
 
-Correct `transactionId` lineage: the audit record's
-`metadata.transactionId` and the returned `TransitionResult.transactionId`
-are the AUTHORITATIVE `AuthorityTransaction.transactionId` — NOT the
-execution id (previously the workflow returned `executionId` as the tx
-reference). The idempotency-record lineage in the audit metadata now
-references the REAL idempotency record id (`IdempotentApplyContext.recordId`)
-which equals `IdempotentResult.recordId` — previously the tx id was
-incorrectly used.
+```
+TX COMMIT succeeds → audit becomes visible
+TX COMMIT fails    → audit remains invisible
+TX rolls back      → audit remains invisible
+audit publication failure → retry → retain → explicit
+                            retryPendingPublications() recovery (the
+                            durable commit is never undone; retained
+                            events belong to a COMMITTED tx, so recovery
+                            can never create "audit exists, mutation doesn't")
+```
+
+Rollback-on-audit-failure within the open transaction is preserved: a
+failure in `performTransition` (illegal transition, denied
+authorization, stale writer, repository failure) rolls the whole tx
+back and the `afterRollback` hook discards the buffered audit.
+
+Publication-failure recovery (explicit path, required by the architect
+decision): publication happens after the durable commit, so a failure
+cannot roll the mutation back. The publication is retried with linear
+backoff; on exhaustion the UNPUBLISHED events are RETAINED in a
+pending-publication queue (keyed by the committed transaction id) for
+an explicit `retryPendingPublications()` recovery call. Retained events
+always belong to a COMMITTED transaction, so recovery converges the
+audit trail toward the committed state — it can never publish anything
+for a rolled-back transaction.
+
+Correct `transactionId` lineage (from remediation v1, unchanged): the
+audit record's `metadata.transactionId` and the returned
+`TransitionResult.transactionId` are the AUTHORITATIVE
+`AuthorityTransaction.transactionId` — NOT the execution id. The
+idempotency-record lineage references the REAL idempotency record id
+(`IdempotentApplyContext.recordId`) which equals
+`IdempotentResult.recordId`.
 
 **Changed files (implementation):**
-- `src/core/audit.ts` (MODIFIED, remediation) — the `TransactionalAuditWriter` + `TransactionalAuditBuffer` contracts are promoted to core so the workflows domain can consume them as provider-neutral type-only imports (domain→core is allowed by the tier allow matrix). The concrete implementation stays in the audit infrastructure boundary.
-- `src/audit/transactional-audit-writer.ts` (MODIFIED, remediation) — imports the contracts from core; `createTransactionalAuditWriter` remains the concrete infrastructure factory. The buffer's `commit()` flush failure surfaces to the caller so the bound authoritative tx rolls back.
-- `src/workflows/workflow-service.ts` (MODIFIED, remediation) — `performTransition` obtains `auditWriter.forTransaction(tx)` (a transaction-scoped buffer bound to the SAME AuthorityTransaction as the lifecycle mutation + the idempotency record), appends the audit record through the buffer, and flushes it BEFORE the idempotency store commits the tx. An append or flush failure throws so the idempotency store rolls back the WHOLE tx (mutation + idempotency record + audit record all discarded). The returned `transactionId` is `tx.transactionId` (the authoritative tx id).
-- `src/core/idempotency.ts` (MODIFIED, remediation, additive) — `IdempotentApplyContext` now also exposes `recordId: string` (the idempotency record's stable id, generated before the callback runs) so the audit lineage references the exact record that deduplicated the mutation.
-- `src/persistence/idempotency-store.ts` (MODIFIED, remediation) — populates `recordId` on the apply context.
-- `src/workflows/port.ts` (MODIFIED, remediation) — `WorkflowServiceDeps.auditWriter` is the `TransactionalAuditWriter` core contract (bootstrap wires the concrete implementation).
-- `src/bootstrap/runtime.ts` (MODIFIED, remediation) — the runtime's audit writer is `createTransactionalAuditWriter({ underlying: createInMemoryAuditWriter(...) })`. Non-transactional consumers (identity/organizations/participants/opportunities/contributions/workers) call append/query/count which delegate directly to the underlying append-only writer (identical NET-W001/NET-W002 behaviour); the workflow authority calls `forTransaction(tx)` for atomic audit lineage.
+- `src/core/postgres-authority.ts` (MODIFIED, remediation v2, additive) — the `AuthorityTransaction` contract gains `afterCommit(hook)` / `afterRollback(hook)` lifecycle hooks with a documented commit-ordering contract: durable commit first, then afterCommit hooks; a failed durable commit runs afterRollback hooks; a hook failure never fails or undoes the durable commit (each hook owns its recovery; errors surface through the logger, not through `commit()` throwing after a successful durable commit).
+- `src/core/audit.ts` (MODIFIED, remediation v2) — the `TransactionalAuditBuffer` contract NO LONGER exposes `commit()`/`rollback()` (there is deliberately no way to publish from inside the transaction); the `TransactionalAuditWriter` contract gains `retryPendingPublications()` + `pendingPublicationCount()` (the explicit publication-failure recovery path).
+- `src/audit/transactional-audit-writer.ts` (MODIFIED, remediation v2) — `forTransaction(tx)` binds the buffer via `tx.afterCommit(publish)` + `tx.afterRollback(discard)`; publication retries with linear backoff and RETAINS exhausted events (with the committed tx id) in a pending queue drained by `retryPendingPublications()`; `query`/`count` delegate to the underlying committed log (buffered events are invisible); the buffer rejects appends after the tx settles and binding to a settled tx is an invariant violation.
+- `src/persistence/postgres-authority-shim.ts` (MODIFIED, remediation v2) — `ShimTransaction` implements the hooks: durable `applyCommit` first, then afterCommit hooks; a failed durable commit runs afterRollback hooks before rethrowing; explicit rollback runs afterRollback hooks; hook errors are logged (never thrown — the settled tx stands).
+- `src/adapters/postgres/postgres-authority-adapter.ts` (MODIFIED, remediation v2) — the REAL PostgreSQL transaction implements the same ordering: SQL `COMMIT` first; on failure, best-effort `ROLLBACK` + marker cleanup, then afterRollback hooks, then rethrow. On success, the in-flight marker DELETE is POST-commit bookkeeping whose failure is warned (never misreports a durable commit as failed — recover() reports orphaned markers), then afterCommit hooks run strictly after the durable commit.
+- `src/workflows/workflow-service.ts` (MODIFIED, remediation v2) — `performTransition` ONLY APPENDS to the transactional buffer; the `auditBuffer.commit()` early-publish call is REMOVED (the remediated defect). Publication/discard is driven exclusively by the transaction's lifecycle hooks registered at `forTransaction(tx)`.
+- `src/persistence/idempotency-store.ts` (MODIFIED, remediation v2) — documents that its `tx.commit()` is the authoritative settle point: afterCommit publishes the buffered audit strictly after the commit; the catch path's rollback fires afterRollback (discard) when the commit fails. (Also populates `recordId` on the apply context, from remediation v1.)
+- `src/workflows/port.ts` (MODIFIED, remediation v2) — the concurrency-model contract text updated: step e appends (buffers) the audit record; publication is strictly post-commit via the tx's `afterCommit` hook.
+- `src/bootstrap/runtime.ts` (MODIFIED, remediation v2) — the runtime's audit writer is `createTransactionalAuditWriter({ underlying: createInMemoryAuditWriter(...) })`; non-transactional consumers call append/query/count which delegate directly to the underlying append-only writer (identical NET-W001/NET-W002 behaviour); the workflow authority calls `forTransaction(tx)` for ordered post-commit audit publication.
+- `src/core/idempotency.ts` (MODIFIED, remediation v1, additive) — `IdempotentApplyContext` exposes `recordId: string` (the idempotency record's stable id) so the audit lineage references the exact record that deduplicated the mutation.
 - `src/core/workflow.ts` (NEW) — `TransitionResult` carries `executionId`/`correlationId`/`causationId`/`transactionId`/`auditEventName`/`transitionId`/`recordId`.
 
-**Test evidence:** `tests/workflows/net-w004-ac-07-audit-lineage.test.ts` (7 tests):
+**Test evidence:** `tests/workflows/net-w004-ac-07-audit-lineage.test.ts` (9 tests):
 - a transition result carries execution/correlation/causation identifiers + the AUTHORITATIVE transaction id (distinct from the execution id);
-- an audit record is appended atomically with the lifecycle mutation (single commit) — the audit metadata's `transactionId` equals the authoritative tx id (not the execution id), and the `idempotencyRecordId` equals the REAL idempotency record id (verified against `idempotency.get(key).recordId`);
-- a rolled-back transition does NOT append an audit record (atomicity: audit + mutation commit together or both roll back);
-- REMEDIATION: rollback-on-audit-failure — a faulty audit writer (append throws) makes the transition fail AND the subject remain unmutated (DRAFT v0), no idempotency record is committed, no audit records exist, and a retry with the same key executes again (the whole apply rolled back atomically);
-- REMEDIATION: the runtime's audit writer IS the transactional audit writer (bootstrap wiring) — `forTransaction(tx)` buffers appends (not visible via query/count until the buffer commits) and stamps the authoritative `tx.transactionId` lineage;
+- an audit record is published atomically with the lifecycle mutation — published only after the durable commit, with the audit metadata's `transactionId` equal to the authoritative tx id (not the execution id) and the `idempotencyRecordId` equal to the REAL idempotency record id (verified against `idempotency.get(key).recordId`);
+- a rolled-back transition does NOT publish an audit record (mid-transaction failure → afterRollback discards the buffered audit);
+- REMEDIATION v2 ORDERING: a spy timeline proves `durable-commit` STRICTLY PRECEDES `audit-publish` (the publication is registered on the tx's afterCommit hook and can never precede the durable commit);
+- REGRESSION (architect-required): the authoritative tx commit itself FAILS after the workflow has successfully appended its audit event (fault-injected `CommitFailingTransaction`; the buffer-append spy proves the audit event WAS buffered before the commit attempt) → lifecycle state unchanged (DRAFT, v0), idempotency record absent (both under the real authority and the failing one), audit record absent (publication spy: zero publications; nothing retained for recovery), and a retry with the same idempotency key executes again (proving the failed attempt committed NOTHING);
+- REMEDIATION v2 PUBLICATION FAILURE RECOVERY: an underlying audit-writer failure AFTER a successful durable commit does not undo the commit — the mutation + idempotency record ARE committed, the event is RETAINED (`pendingPublicationCount()` = 1), and the explicit `retryPendingPublications()` recovery publishes it with the COMMITTED transaction's lineage (exactly one audit record after recovery);
+- REMEDIATION (bootstrap wiring): the runtime's audit writer IS the transactional audit writer — `forTransaction(tx)` buffers appends (invisible via query/count while the tx is open), the buffer exposes NO `commit` method (structural proof there is no in-tx publish path), `tx.commit()` publishes, `tx.rollback()` discards, the buffer rejects appends after the tx settles, and binding to a settled tx throws;
 - audit records are append-only and immutable (deeply frozen — NET-W001-AC-06 preserved);
 - the audit record carries actor/subject/resource lineage for both opportunity and contribution transitions (with the same authoritative tx lineage).
 
@@ -221,7 +264,7 @@ behavior is introduced.
 $ bun run verify
 $ bun run typecheck   # PASS
 $ bun run arch:check  # PASS — 162 files, 0 violations
-$ bun test             # 258 pass / 15 skip / 0 fail (remediation: +2 AC-07 tests)
+$ bun test             # 260 pass / 15 skip / 0 fail (remediation v2: +2 AC-07 tests — 9 total)
 ```
 
 The 15 skips are the real PostgreSQL + Redis integration tests from
@@ -261,10 +304,15 @@ the downstream semantics.
   lifecycle), §18 (module ownership: `/workflows` is the SOLE lifecycle
   authority), §19 (authority rules).
 - The provider-neutral contracts (PostgresAuthority, AuthorityTransaction,
-  IdempotencyStore, CoordinationService) are unchanged core contracts
-  declared in NET-W003. The NET-W004 domains consume them as type-only
-  imports; the concrete drivers (pg, ioredis) remain in the adapter tier
-  only (architecture §14, §18).
+  IdempotencyStore, CoordinationService) are the core contracts declared
+  in NET-W003, consumed by the NET-W004 domains as type-only imports;
+  the concrete drivers (pg, ioredis) remain in the adapter tier only
+  (architecture §14, §18). REMEDIATION v2 NOTE: the `AuthorityTransaction`
+  contract was extended ADDITIVELY with `afterCommit`/`afterRollback`
+  lifecycle hooks (a commit-ordering contract, not a new authority);
+  both implementations (PostgresAuthorityShim test double + the real
+  PostgreSQL adapter) honour it. The frozen spec files themselves are
+  unchanged.
 
 ## 6. NET-W001..003 regression confirmation
 
