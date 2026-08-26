@@ -82,6 +82,10 @@ class ShimTransaction implements AuthorityTransaction {
   private readonly writes: Map<string, BufferedWrite> = new Map();
   private letSettled = false;
   public readonly transactionId: string;
+  /** afterCommit hooks — run strictly AFTER the durable commit (NET-W004-AC-07). */
+  private readonly commitHooks: Array<() => Promise<void>> = [];
+  /** afterRollback hooks — run when the tx settles WITHOUT a durable commit. */
+  private readonly rollbackHooks: Array<() => Promise<void>> = [];
 
   public constructor(
     transactionId: string,
@@ -152,10 +156,74 @@ class ShimTransaction implements AuthorityTransaction {
     return existed;
   }
 
+  public afterCommit(hook: () => Promise<void>): void {
+    if (this.letSettled) {
+      throw new InvariantError(
+        `transaction ${this.transactionId} already settled; cannot register an afterCommit hook`,
+      );
+    }
+    this.commitHooks.push(hook);
+  }
+
+  public afterRollback(hook: () => Promise<void>): void {
+    if (this.letSettled) {
+      throw new InvariantError(
+        `transaction ${this.transactionId} already settled; cannot register an afterRollback hook`,
+      );
+    }
+    this.rollbackHooks.push(hook);
+  }
+
+  /**
+   * Run the afterCommit hooks sequentially. A hook failure NEVER fails
+   * the (already durable) commit: each hook owns its failure recovery
+   * (e.g. the transactional audit writer retries publication, then
+   * retains the unpublished events for an explicit recovery path); the
+   * authority only logs the hook error.
+   */
+  private async runCommitHooks(): Promise<void> {
+    for (const hook of this.commitHooks) {
+      try {
+        await hook();
+      } catch (err) {
+        this.authority.logHookError("afterCommit", this.transactionId, err);
+      }
+    }
+  }
+
+  /**
+   * Run the afterRollback hooks sequentially (best-effort: the tx
+   * already failed; hook errors are logged and swallowed so cleanup of
+   * other hooks still runs).
+   */
+  private async runRollbackHooks(): Promise<void> {
+    for (const hook of this.rollbackHooks) {
+      try {
+        await hook();
+      } catch (err) {
+        this.authority.logHookError("afterRollback", this.transactionId, err);
+      }
+    }
+  }
+
   public async commit(): Promise<void> {
     if (this.letSettled) return;
     this.letSettled = true;
-    await this.authority.applyCommit(this.transactionId, this.writes);
+    // NET-W004-AC-07 remediation (transaction-ordering): the durable
+    // commit happens FIRST. Only after it succeeds do the afterCommit
+    // hooks run — transaction-scoped side effects (transactional audit
+    // publication) therefore become visible STRICTLY AFTER the
+    // authoritative commit. If the durable commit FAILS, the tx settles
+    // as rolled back: afterRollback hooks run so transaction-scoped
+    // side effects (buffered audit) are discarded — no audit record can
+    // survive for a mutation that never committed.
+    try {
+      await this.authority.applyCommit(this.transactionId, this.writes);
+    } catch (err) {
+      await this.runRollbackHooks();
+      throw err;
+    }
+    await this.runCommitHooks();
   }
 
   public async rollback(): Promise<void> {
@@ -164,13 +232,19 @@ class ShimTransaction implements AuthorityTransaction {
     // Discard buffered writes — nothing was persisted to committed state.
     this.writes.clear();
     await this.authority.applyRollback(this.transactionId);
+    // Discard transaction-scoped side effects (buffered audit) too.
+    await this.runRollbackHooks();
   }
 }
 
 export interface PostgresAuthorityShimOptions {
   /** Directory for the durable snapshot + in-flight log. Must exist or be creatable. */
   readonly dir: string;
-  readonly logger?: { debug(message: string, fields?: Record<string, unknown>): void };
+  readonly logger?: {
+    debug(message: string, fields?: Record<string, unknown>): void;
+    warn?(message: string, fields?: Record<string, unknown>): void;
+    error?(message: string, fields?: Record<string, unknown>): void;
+  };
 }
 
 export class PostgresAuthorityShim implements PostgresAuthority {
@@ -178,7 +252,11 @@ export class PostgresAuthorityShim implements PostgresAuthority {
   private readonly revisions = new Map<string, Map<string, number>>();
   private readonly activeTxIds = new Set<string>();
   private readonly dir: string;
-  private readonly logger?: { debug(message: string, fields?: Record<string, unknown>): void };
+  private readonly logger?: {
+    debug(message: string, fields?: Record<string, unknown>): void;
+    warn?(message: string, fields?: Record<string, unknown>): void;
+    error?(message: string, fields?: Record<string, unknown>): void;
+  };
   private loaded = false;
 
   public constructor(opts: PostgresAuthorityShimOptions) {
@@ -214,6 +292,18 @@ export class PostgresAuthorityShim implements PostgresAuthority {
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
     this.loaded = true;
+    // Ensure the persistence dir exists before reading/writing. The
+    // dev/test provider-selection.ts sets the shim dir to a unique
+    // subdirectory under the OS tmp dir, which may not exist yet on
+    // first use. Without this mkdir, the first `fs.writeFile(tmp, ...)`
+    // fails with ENOENT because the parent dir is missing.
+    try {
+      await fs.mkdir(this.dir, { recursive: true });
+    } catch {
+      // If mkdir fails (e.g. permission), the subsequent load/read calls
+      // will surface the appropriate error. Don't mask the real failure
+      // here with a misleading "could not create dir" error.
+    }
     await this.loadCommitted();
     await this.loadInflight();
   }
@@ -456,5 +546,27 @@ export class PostgresAuthorityShim implements PostgresAuthority {
   /** Test accessor: count of interrupted (active) tx ids in memory. */
   _activeTransactionCount(): number {
     return this.activeTxIds.size;
+  }
+
+  /**
+   * Log a transaction lifecycle hook failure (NET-W004-AC-07): a hook
+   * error never fails or undoes the (already settled) transaction, so
+   * it MUST be surfaced through the logger instead. Surfaced as a
+   * public method so {@link ShimTransaction} can delegate here without
+   * reaching into private state.
+   */
+  public logHookError(phase: "afterCommit" | "afterRollback", txId: string, err: unknown): void {
+    const fields = {
+      txId,
+      phase,
+      error: err instanceof Error ? err.message : String(err),
+    };
+    // Prefer the structured error level; fall back to debug so test
+    // doubles without an error sink still record something.
+    if (this.logger?.error) {
+      this.logger.error("authority.tx_hook_failed", fields);
+    } else {
+      this.logger?.debug("authority.tx_hook_failed", fields);
+    }
   }
 }

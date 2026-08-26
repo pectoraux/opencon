@@ -62,6 +62,40 @@ export interface AuthorityRecord<T = unknown> {
  * A transaction on the authoritative store. Work done inside the
  * transaction is NOT visible outside it until `commit`. `rollback`
  * discards all uncommitted work. Either commits atomically or not at all.
+ *
+ * NET-W004-AC-07 remediation (transaction-ordering, architect re-review
+ * on PR #8): transactions expose LIFECYCLE HOOKS so transaction-scoped
+ * side effects — transactional audit publication — can NEVER become
+ * visible before the authoritative commit succeeds:
+ *
+ *  - `afterCommit` hooks run STRICTLY AFTER the durable commit
+ *    succeeded (they are the only code path allowed to publish
+ *    transaction-scoped side effects such as the transactional audit
+ *    buffer).
+ *  - `afterRollback` hooks run when the transaction settles WITHOUT a
+ *    successful durable commit — an explicit `rollback()` OR a
+ *    `commit()` whose durable phase failed (the store then treats the
+ *    transaction as rolled back: nothing was committed).
+ *
+ * Commit ordering contract (all implementations MUST honour it):
+ *
+ * ```text
+ * tx.commit()
+ *   ├── durable commit fails  → run afterRollback hooks → throw
+ *   └── durable commit ok     → run afterCommit hooks (sequentially)
+ * ```
+ *
+ * A failure inside an `afterCommit` hook NEVER fails or undoes the
+ * already-durable commit: the authoritative commit is the source of
+ * truth, and each hook owns its failure recovery (e.g. the
+ * transactional audit writer retries publication, then retains the
+ * unpublished events for an explicit recovery path). Implementations
+ * surface hook errors through their logger, not through `commit()`
+ * throwing after a successful durable commit — throwing would misreport
+ * a committed transaction as failed and invite double mutations.
+ *
+ * `afterRollback` hook errors are swallowed (logged): the transaction
+ * already failed; cleanup is best-effort.
  */
 export interface AuthorityTransaction {
   /** Collection-scoped read (sees uncommitted writes in this tx). */
@@ -76,6 +110,30 @@ export interface AuthorityTransaction {
   commit(): Promise<void>;
   /** Roll back the transaction. Idempotent. */
   rollback(): Promise<void>;
+  /**
+   * Register a hook that runs AFTER this transaction durably commits.
+   * Hooks run in registration order, strictly after the durable commit.
+   * This is the ONLY sanctioned place to publish transaction-scoped
+   * side effects (transactional audit publication) — publishing from
+   * inside the transaction (before `commit()`) can leave visible side
+   * effects for a mutation that never committed.
+   *
+   * A hook failure never fails or undoes the durable commit; each hook
+   * owns its failure recovery. Registering on a settled transaction is
+   * an invariant violation (the hook could never run).
+   */
+  afterCommit(hook: () => Promise<void>): void;
+  /**
+   * Register a hook that runs when this transaction settles WITHOUT a
+   * successful durable commit — an explicit `rollback()` or a failed
+   * `commit()`. Hooks discard transaction-scoped side effects (e.g.
+   * discard the transactional audit buffer so no audit record survives
+   * for a mutation that never committed). Hook errors are swallowed
+   * (logged): cleanup after a failed transaction is best-effort.
+   *
+   * Registering on a settled transaction is an invariant violation.
+   */
+  afterRollback(hook: () => Promise<void>): void;
   /** True once the transaction has been committed or rolled back. */
   readonly settled: boolean;
   /** Stable transaction id (for audit lineage). */

@@ -133,6 +133,100 @@ export interface ApiGrantMembershipInput {
   readonly personId: string;
 }
 
+// -- NET-W004 opportunity/contribution/transition views + inputs ----
+
+/** The public view of an opportunity (NET-W004 AC-01). */
+export interface ApiOpportunityView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly ownerId: string;
+  readonly opportunityType: string;
+  readonly title: string;
+  readonly state: string;
+  readonly version: number;
+  readonly createdAt: string;
+}
+
+/** The detailed opportunity view (includes brief + policy references). */
+export interface ApiOpportunityDetailView extends ApiOpportunityView {
+  readonly brief: Readonly<Record<string, unknown>>;
+  readonly eligibilityPolicyReference: string | null;
+  readonly contributionRequirements: Readonly<Record<string, unknown>>;
+  readonly evidenceReferencePlaceholders: readonly string[];
+  readonly updatedAt: string;
+}
+
+/** Inputs to create an opportunity via the API (NET-W004 AC-01). */
+export interface ApiCreateOpportunityInput {
+  readonly organizationScopeId: string;
+  readonly opportunityType: string;
+  readonly title: string;
+  readonly brief?: Readonly<Record<string, unknown>>;
+  readonly eligibilityPolicyReference?: string | null;
+  readonly contributionRequirements?: Readonly<Record<string, unknown>>;
+  readonly evidenceReferencePlaceholders?: readonly string[];
+}
+
+/** The public view of a contribution (NET-W004 AC-02). */
+export interface ApiContributionView {
+  readonly id: string;
+  readonly opportunityId: string;
+  readonly contributorId: string;
+  readonly organizationScopeId: string;
+  readonly contributionType: string;
+  readonly submission: Readonly<Record<string, unknown>>;
+  readonly state: string;
+  readonly version: number;
+  readonly createdAt: string;
+}
+
+/** The detailed contribution view. */
+export interface ApiContributionDetailView extends ApiContributionView {
+  readonly evidenceReferencePlaceholders: readonly string[];
+  readonly updatedAt: string;
+}
+
+/** Inputs to create a contribution via the API (NET-W004 AC-02). */
+export interface ApiCreateContributionInput {
+  readonly opportunityId: string;
+  readonly organizationScopeId: string;
+  readonly contributionType: string;
+  readonly submission?: Readonly<Record<string, unknown>>;
+  readonly evidenceReferencePlaceholders?: readonly string[];
+}
+
+/**
+ * Inputs to request an authorized lifecycle transition via the API
+ * (NET-W004 §3.4, §4.4). Material mutation operations must be idempotent
+ * where duplicate delivery/retry is possible and must return stable
+ * identifiers plus execution references.
+ */
+export interface ApiRequestTransitionInput {
+  readonly subjectId: string;
+  readonly subjectKind: "opportunity" | "contribution";
+  readonly targetState: string;
+  readonly expectedVersion: number;
+  readonly idempotencyKey: string;
+  readonly policyAction: string;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
+/** The result of an authorized lifecycle transition. */
+export interface ApiTransitionResultView {
+  readonly subjectId: string;
+  readonly subjectKind: string;
+  readonly state: string;
+  readonly version: number;
+  readonly executed: boolean;
+  readonly transitionId: string;
+  readonly recordId: string;
+  readonly auditEventName: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+  readonly transactionId: string;
+}
+
 /**
  * ApiCommands — the protected mutation surface the API server consumes
  * (after the {@link ApiAuth} guard has authorized the request). The
@@ -177,6 +271,46 @@ export interface ApiCommands {
     actorPersonId: string,
     membershipId: string,
   ): Promise<{ membership: ApiMembershipView; already: boolean }>;
+
+  // -- NET-W004 opportunity/contribution/transition commands ----
+
+  /** Create an opportunity (NET-W004 AC-01, protected mutation). */
+  createOpportunity(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateOpportunityInput,
+  ): Promise<ApiOpportunityView>;
+
+  /** Fetch the detailed view of an opportunity (NET-W004 AC-01). */
+  getOpportunity(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiOpportunityDetailView | null>;
+
+  /** Create a contribution (NET-W004 AC-02, protected mutation). */
+  createContribution(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateContributionInput,
+  ): Promise<ApiContributionView>;
+
+  /** Fetch the detailed view of a contribution (NET-W004 AC-02). */
+  getContribution(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiContributionDetailView | null>;
+
+  /**
+   * Request an authorized lifecycle transition (NET-W004 §3.4, §4.1 —
+   * the SOLE entry point for authoritative lifecycle mutation).
+   * Idempotent: repeating with the same idempotencyKey is a deterministic
+   * replay (NET-W004 §4.4).
+   */
+  requestTransition(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiRequestTransitionInput,
+  ): Promise<ApiTransitionResultView>;
 }
 
 export type { ExecutionContext };

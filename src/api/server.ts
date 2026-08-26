@@ -21,7 +21,7 @@ import {
 } from "node:http";
 import { randomUUID } from "node:crypto";
 import { createExecutionContext, deriveExecutionContext, runWithExecutionContextAsync } from "../core/execution-context.ts";
-import { classifyError } from "../core/errors.ts";
+import { classifyError, OpenConError } from "../core/errors.ts";
 import type { Logger } from "../core/logger.ts";
 import type { ConfigSnapshot } from "../core/config.ts";
 import type { HealthAggregator } from "../observability/health.ts";
@@ -391,7 +391,173 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // -- NET-W004 protected endpoints (§3.4, §4.5, §4.6) -------------
+    // Every protected mutation is guarded by guardMutation(): unauthenticated
+    // → 403; unauthorized → 403 (deny-by-default). The actor recorded in
+    // audit lineage is the server-resolved principal.
+
+    // POST /api/opportunities — create an opportunity (protected: the
+    // actor must be authorized for the target organization scope).
+    if (path === "/api/opportunities" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "opportunity.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseOpportunityInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createOpportunity(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/opportunities/:id — fetch an opportunity (public read; no
+    // auth required). Returns the detailed view.
+    if (path.startsWith("/api/opportunities/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/opportunities/".length);
+      const view = await opts.commands.getOpportunity(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `opportunity not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/contributions — create a contribution (protected). The
+    // actor must be authorized for the target organization scope (which
+    // must match the opportunity's scope — enforced by ContributionService).
+    if (path === "/api/contributions" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "contribution.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseContributionInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createContribution(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/contributions/:id — fetch a contribution (public read).
+    if (path.startsWith("/api/contributions/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/contributions/".length);
+      const view = await opts.commands.getContribution(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `contribution not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/workflows/transitions — request an authorized lifecycle
+    // transition (the SOLE entry point for authoritative lifecycle
+    // mutation, NET-W004 §4.1). The actor must be authorized for the
+    // subject's organization scope.
+    if (path === "/api/workflows/transitions" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "workflow.transition", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseTransitionInput(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.requestTransition(guarded.execution, guarded.personId, input),
+      );
+      await send(res, result.executed ? 201 : 200, result);
+      return true;
+    }
+
     return false;
+  }
+
+  // Parse opportunity input from a request body. Throws a validation
+  // OpenConError when fields are missing or have the wrong shape.
+  function parseOpportunityInput(body: unknown): import("./port.ts").ApiCreateOpportunityInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const organizationScopeId = strField(obj, "organizationScopeId");
+    const opportunityType = strField(obj, "opportunityType");
+    const title = strField(obj, "title");
+    return {
+      organizationScopeId,
+      opportunityType,
+      title,
+      brief: obj.brief && typeof obj.brief === "object" ? obj.brief as Readonly<Record<string, unknown>> : undefined,
+      eligibilityPolicyReference: typeof obj.eligibilityPolicyReference === "string" ? obj.eligibilityPolicyReference : (obj.eligibilityPolicyReference ?? null) as string | null,
+      contributionRequirements: obj.contributionRequirements && typeof obj.contributionRequirements === "object" ? obj.contributionRequirements as Readonly<Record<string, unknown>> : undefined,
+      evidenceReferencePlaceholders: Array.isArray(obj.evidenceReferencePlaceholders) ? (obj.evidenceReferencePlaceholders as string[]) : undefined,
+    };
+  }
+
+  function parseContributionInput(body: unknown): import("./port.ts").ApiCreateContributionInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    return {
+      opportunityId: strField(obj, "opportunityId"),
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      contributionType: strField(obj, "contributionType"),
+      submission: obj.submission && typeof obj.submission === "object" ? obj.submission as Readonly<Record<string, unknown>> : undefined,
+      evidenceReferencePlaceholders: Array.isArray(obj.evidenceReferencePlaceholders) ? (obj.evidenceReferencePlaceholders as string[]) : undefined,
+    };
+  }
+
+  function parseTransitionInput(body: unknown): import("./port.ts").ApiRequestTransitionInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const subjectKind = obj.subjectKind;
+    if (subjectKind !== "opportunity" && subjectKind !== "contribution") {
+      throw apiValidationError(`subjectKind must be "opportunity" or "contribution" (got ${String(subjectKind)})`);
+    }
+    const targetState = strField(obj, "targetState");
+    const expectedVersion = numField(obj, "expectedVersion");
+    const idempotencyKey = strField(obj, "idempotencyKey");
+    const policyAction = strField(obj, "policyAction");
+    return {
+      subjectId: strField(obj, "subjectId"),
+      subjectKind,
+      targetState,
+      expectedVersion,
+      idempotencyKey,
+      policyAction,
+      metadata: obj.metadata && typeof obj.metadata === "object" ? obj.metadata as Readonly<Record<string, unknown>> : undefined,
+    };
+  }
+
+  function strField(obj: Record<string, unknown>, key: string): string {
+    const v = obj[key];
+    if (typeof v !== "string" || !v.trim()) {
+      throw apiValidationError(`field "${key}" must be a non-empty string`);
+    }
+    return v;
+  }
+
+  function numField(obj: Record<string, unknown>, key: string): number {
+    const v = obj[key];
+    if (typeof v !== "number" || !Number.isFinite(v)) {
+      throw apiValidationError(`field "${key}" must be a finite number`);
+    }
+    return v;
+  }
+
+  // A validation error for the request-body parsers. Uses the OpenConError
+  // base class so the API error handler's `classifyError` recognizes the
+  // `validation` classification and surfaces it as HTTP 400.
+  function apiValidationError(message: string, context?: Readonly<Record<string, unknown>>): OpenConError {
+    return new OpenConError({
+      code: "API_VALIDATION",
+      classification: "validation",
+      message,
+      retryable: false,
+      context,
+    });
   }
 
   function mapClassificationToStatus(classification: string): number {

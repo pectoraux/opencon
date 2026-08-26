@@ -45,9 +45,19 @@ const DOMAIN_DIRS = [
 // Domains implemented in NET-W002 (no longer skeletons).
 const NET_W002_DOMAINS = ["identity", "organizations", "participants"];
 
-// Domains still deferred past NET-W002 (must remain skeletons).
+// Domains implemented in NET-W004 (no longer skeletons). These three
+// domains introduce lifecycle/workflow behaviour (opportunity first-class
+// model, contribution first-class model, authoritative workflow service)
+// but they STILL introduce NO economically material domain logic (no
+// credit issuance, no settlement, no reputation mutation, no campaign
+// delivery, no benefit allocation, no evidence evaluation, no Proof-of-
+// Value). The forbidden-pattern check below applies to ALL 16 domains
+// including the NET-W004 three.
+const NET_W004_DOMAINS = ["opportunities", "contributions", "workflows"];
+
+// Domains still deferred past NET-W004 (must remain skeletons).
 const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
-  (d) => !NET_W002_DOMAINS.includes(d),
+  (d) => !NET_W002_DOMAINS.includes(d) && !NET_W004_DOMAINS.includes(d),
 );
 
 // Patterns that would indicate economically/material domain logic,
@@ -111,6 +121,26 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
       // (non-economic) identity/org/authz behaviour.
       expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
       expect(moduleExport.describe?.() ?? "").toMatch(/NET-W002/i);
+    }
+  });
+
+  test("NET-W004 domain modules are non-skeletal (tier domain, no 'skeleton' marker, reference NET-W004)", async () => {
+    for (const dir of NET_W004_DOMAINS) {
+      const modulePath = join(SRC, dir, "module.ts");
+      expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
+      const mod = await import(`../../src/${dir}/module.ts`);
+      const moduleExport = Object.values(mod)[0] as {
+        name: string;
+        tier: string;
+        describe?: () => string;
+      };
+      expect(moduleExport.tier).toBe("domain");
+      // NET-W004 modules are no longer skeletons — they carry the
+      // Opportunity/Contribution first-class models + the authoritative
+      // WorkflowService (transition table + state machine + idempotent
+      // authorized transitions + audit lineage).
+      expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
+      expect(moduleExport.describe?.() ?? "").toMatch(/NET-W004/i);
     }
   });
 

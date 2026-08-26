@@ -16,6 +16,14 @@ import { loadConfig } from "../config/provider.ts";
 import { createLogger, type LogEntrySink } from "../observability/logger.ts";
 import { HealthAggregator } from "../observability/health.ts";
 import { createInMemoryAuditWriter } from "../audit/audit-writer.ts";
+// NET-W004-AC-07 remediation: the runtime's audit writer is the
+// TRANSACTIONAL audit writer. The workflow service obtains a
+// transaction-scoped buffer via forTransaction(tx) so the audit record
+// commits atomically with the lifecycle mutation + the idempotency
+// record (same AuthorityTransaction). The concrete implementation is
+// wired HERE (composition root) — domain tiers consume only the core
+// contract (src/core/audit.ts TransactionalAuditWriter).
+import { createTransactionalAuditWriter } from "../audit/transactional-audit-writer.ts";
 import { createInMemoryObjectStore } from "../object-storage/in-memory-store.ts";
 import { createEnvSecretProvider, buildSecretCatalog } from "../secrets/env-provider.ts";
 import { createInMemoryJobQueue } from "../queues/in-memory-queue.ts";
@@ -30,7 +38,7 @@ import {
 } from "../core/execution-context.ts";
 import type { ConfigurationProvider } from "../core/config.ts";
 import type { Logger } from "../core/logger.ts";
-import type { AuditWriter } from "../core/audit.ts";
+import type { TransactionalAuditWriter } from "../core/audit.ts";
 import type { ObjectStore } from "../core/object-store.ts";
 import type { SecretProvider } from "../core/secrets.ts";
 import type { JobQueue } from "../core/queue.ts";
@@ -66,6 +74,21 @@ import type { PolicyService } from "../participants/policy-service.ts";
 // required provider configuration is missing). In development/test it
 // selects the clearly-marked test/dev doubles.
 import { selectProviders } from "./provider-selection.ts";
+// NET-W003 IdempotencyStore (PostgresAuthority-backed; exactly-once-per-key).
+import { createPostgresIdempotencyStore } from "../persistence/idempotency-store.ts";
+import type { IdempotencyStore } from "../core/idempotency.ts";
+// NET-W004 domain wiring (composition root imports concrete in-memory
+// implementations for wiring — the only place permitted to do so).
+import { createAuthorityOpportunityRepository } from "../opportunities/authority-opportunity-repository.ts";
+import { createOpportunityService } from "../opportunities/opportunity-service.ts";
+import { createAuthorityContributionRepository } from "../contributions/authority-contribution-repository.ts";
+import { createContributionService } from "../contributions/contribution-service.ts";
+import { createWorkflowService } from "../workflows/workflow-service.ts";
+import { createLifecycleRepository } from "../workflows/lifecycle-repository.ts";
+import type { OpportunityService } from "../opportunities/port.ts";
+import type { ContributionService, OpportunityLookup } from "../contributions/port.ts";
+import type { WorkflowService, TransitionAuthorizer } from "../workflows/port.ts";
+import type { TransitionRequest, TransitionResult } from "../core/workflow.ts";
 
 // Boundary module registrations (composition root imports all).
 import { identityModule } from "../identity/module.ts";
@@ -103,7 +126,14 @@ import { ledgerModule } from "../ledger/module.ts";
 export interface Runtime {
   readonly config: ConfigurationProvider;
   readonly logger: Logger;
-  readonly auditWriter: AuditWriter;
+  /**
+   * The runtime's audit writer. NET-W004-AC-07 remediation: this is the
+   * TRANSACTIONAL audit writer (createTransactionalAuditWriter wrapping
+   * the in-memory append-only writer). It is assignable to AuditWriter
+   * for non-transactional consumers; the workflow service uses
+   * forTransaction(tx) for atomic audit lineage.
+   */
+  readonly auditWriter: TransactionalAuditWriter;
   readonly objectStore: ObjectStore;
   readonly secretProvider: SecretProvider;
   readonly queue: JobQueue;
@@ -145,6 +175,12 @@ export interface Runtime {
   readonly policyService: PolicyService;
   readonly apiAuth: ApiAuth;
   readonly apiCommands: ApiCommands;
+  // NET-W004 domain services (exposed for integration/security tests).
+  readonly opportunityService: OpportunityService;
+  readonly contributionService: ContributionService;
+  readonly workflowService: WorkflowService;
+  // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
+  readonly idempotency: IdempotencyStore;
   initialize(): Promise<readonly { name: string; initialized: boolean }[]>;
   shutdown(): Promise<void>;
   /** Enqueue a representative non-domain ECHO job (AC-03/AC-05 demo). */
@@ -176,7 +212,27 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     collector: logSink,
   });
 
-  const auditWriter = createInMemoryAuditWriter({ logger: logger.child("audit") });
+  // NET-W004-AC-07 remediation (transaction-ordering): the runtime's
+  // audit writer is the TRANSACTIONAL audit writer wrapping the
+  // in-memory append-only writer. Non-transactional consumers
+  // (identity, organizations, participants, opportunities,
+  // contributions, workers) call append/query/count — the
+  // transactional writer delegates those directly to the underlying
+  // append-only writer (identical NET-W001/NET-W002 behaviour). The
+  // workflow authority calls forTransaction(tx) to obtain a
+  // transaction-scoped buffer whose publication is registered on the
+  // transaction's afterCommit hook and whose discard is registered on
+  // afterRollback: the lifecycle mutation + idempotency record commit
+  // durably first, the audit record is published STRICTLY AFTER the
+  // commit succeeds, and it is discarded when the commit fails or the
+  // tx rolls back (no audit record can survive for a mutation that
+  // never committed). A post-commit publication failure is retried,
+  // then retained for the explicit retryPendingPublications()
+  // recovery path — the durable commit is never undone.
+  const auditWriter = createTransactionalAuditWriter({
+    underlying: createInMemoryAuditWriter({ logger: logger.child("audit") }),
+    logger: { debug: (m, f) => logger.child("audit").debug(m, f) },
+  });
   const objectStore = createInMemoryObjectStore();
   const secretProvider = createEnvSecretProvider({
     source: opts.env ?? process.env,
@@ -262,6 +318,91 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     policies: policyRepo,
     auditWriter,
     logger: logger.forModule("participants"),
+  });
+
+  // -- NET-W003 IdempotencyStore ------------------------------------
+  // PostgresAuthority-backed idempotency store. Used by the NET-W004
+  // WorkflowService for exactly-once-per-key material mutation. The
+  // store's idempotency records are durable (committed in the SAME
+  // authoritative tx as the lifecycle mutation + the audit record).
+  const idempotency = createPostgresIdempotencyStore({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("idempotency").debug(m, f) },
+  });
+
+  // -- NET-W004 domain wiring ---------------------------------------
+  // Opportunities boundary (PostgresAuthority-backed repository).
+  const opportunityRepo = createAuthorityOpportunityRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("opportunities").debug(m, f) },
+  });
+  const opportunityService = createOpportunityService({
+    repository: opportunityRepo,
+    auditWriter,
+    logger: logger.forModule("opportunities"),
+  });
+
+  // Contributions boundary (PostgresAuthority-backed repository).
+  const contributionRepo = createAuthorityContributionRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("contributions").debug(m, f) },
+  });
+  // OpportunityLookup structural adapter: the ContributionService needs
+  // to verify the opportunity exists + resolve its org scope, but the
+  // contributions domain cannot import the opportunities domain. Wire
+  // a thin adapter that delegates to the OpportunityRepository.
+  const opportunityLookup: OpportunityLookup = {
+    async getOrganizationScope(opportunityId) {
+      const opp = await opportunityRepo.findById(opportunityId);
+      return opp ? opp.organizationScopeId : null;
+    },
+    async exists(opportunityId) {
+      return opportunityRepo.exists(opportunityId);
+    },
+  };
+  const contributionService = createContributionService({
+    repository: contributionRepo,
+    opportunityLookup,
+    auditWriter,
+    logger: logger.forModule("contributions"),
+  });
+
+  // Workflows boundary (the SOLE lifecycle authority).
+  // The lifecycle repository adapters wrap the domain repositories so
+  // the WorkflowService (which operates on plain LifecycleSubject)
+  // can mutate lifecycle state uniformly. The adapter does read-modify-
+  // write: reads the current domain entity within the authoritative tx,
+  // merges the workflow service's lifecycle mutation onto it (preserving
+  // all domain-specific fields), and writes the merged result back.
+  // The TransitionAuthorizer adapter delegates to the existing deny-by-
+  // default AuthorizationService (NET-W002 §4.5). The subject's
+  // organizationScopeId is the resource checked against the actor's
+  // organization scope so cross-org transitions are denied.
+  const transitionAuthorizer: TransitionAuthorizer = {
+    async authorizeTransition(input) {
+      const resolved = await authorizationService.resolvePrincipal(
+        input.execution,
+        input.actorPersonId,
+      );
+      const decision = await authorizationService.authorize({
+        principal: resolved,
+        action: input.policyAction,
+        resource: input.subject.organizationScopeId,
+        clientClaims: undefined,
+      });
+      return {
+        decision: decision.decision,
+        reason: decision.reason,
+      };
+    },
+  };
+  const workflowService = createWorkflowService({
+    opportunityRepository: createLifecycleRepository(opportunityRepo),
+    contributionRepository: createLifecycleRepository(contributionRepo),
+    authorizer: transitionAuthorizer,
+    auditWriter,
+    idempotency,
+    coordination: coordinationService,
   });
 
   // API auth + commands adapter (dependency inversion: the API server
@@ -359,6 +500,133 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         already: result.already,
       };
     },
+    // -- NET-W004 opportunity/contribution/transition commands -----------
+    async createOpportunity(execution, actorPersonId, input) {
+      const opp = await opportunityService.createOpportunity(execution, {
+        organizationScopeId: input.organizationScopeId,
+        ownerId: actorPersonId,
+        opportunityType: input.opportunityType,
+        title: input.title,
+        brief: input.brief,
+        eligibilityPolicyReference: input.eligibilityPolicyReference,
+        contributionRequirements: input.contributionRequirements,
+        evidenceReferencePlaceholders: input.evidenceReferencePlaceholders,
+      });
+      return {
+        id: opp.id,
+        organizationScopeId: opp.organizationScopeId,
+        ownerId: opp.ownerId,
+        opportunityType: opp.opportunityType,
+        title: opp.title,
+        state: opp.state,
+        version: opp.version,
+        createdAt: opp.createdAt,
+      };
+    },
+    async getOpportunity(execution, id) {
+      try {
+        const opp = await opportunityService.getOpportunity(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return {
+          id: opp.id,
+          organizationScopeId: opp.organizationScopeId,
+          ownerId: opp.ownerId,
+          opportunityType: opp.opportunityType,
+          title: opp.title,
+          brief: opp.brief,
+          eligibilityPolicyReference: opp.eligibilityPolicyReference,
+          contributionRequirements: opp.contributionRequirements,
+          evidenceReferencePlaceholders: opp.evidenceReferencePlaceholders,
+          state: opp.state,
+          version: opp.version,
+          createdAt: opp.createdAt,
+          updatedAt: opp.updatedAt,
+        };
+      } catch {
+        return null;
+      }
+    },
+    async createContribution(execution, actorPersonId, input) {
+      const c = await contributionService.createContribution(execution, {
+        opportunityId: input.opportunityId,
+        contributorId: actorPersonId,
+        organizationScopeId: input.organizationScopeId,
+        contributionType: input.contributionType,
+        submission: input.submission,
+        evidenceReferencePlaceholders: input.evidenceReferencePlaceholders,
+      });
+      return {
+        id: c.id,
+        opportunityId: c.opportunityId,
+        contributorId: c.contributorId,
+        organizationScopeId: c.organizationScopeId,
+        contributionType: c.contributionType,
+        submission: c.submission,
+        state: c.state,
+        version: c.version,
+        createdAt: c.createdAt,
+      };
+    },
+    async getContribution(execution, id) {
+      try {
+        const c = await contributionService.getContribution(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return {
+          id: c.id,
+          opportunityId: c.opportunityId,
+          contributorId: c.contributorId,
+          organizationScopeId: c.organizationScopeId,
+          contributionType: c.contributionType,
+          submission: c.submission,
+          evidenceReferencePlaceholders: c.evidenceReferencePlaceholders,
+          state: c.state,
+          version: c.version,
+          createdAt: c.createdAt,
+          updatedAt: c.updatedAt,
+        };
+      } catch {
+        return null;
+      }
+    },
+    async requestTransition(execution, actorPersonId, input) {
+      // Build the TransitionRequest from the API input. The workflow
+      // service does the authorization + idempotency + audit. The
+      // actorPersonId is the server-resolved principal (the API guard
+      // has already authenticated and authorized the caller — see
+      // guardMutation in api/server.ts).
+      const request: TransitionRequest = {
+        subjectId: input.subjectId,
+        subjectKind: input.subjectKind,
+        targetState: input.targetState as TransitionRequest["targetState"],
+        expectedVersion: input.expectedVersion,
+        idempotencyKey: input.idempotencyKey,
+        actorPersonId,
+        policyAction: input.policyAction,
+        metadata: input.metadata,
+      };
+      const result: TransitionResult = await workflowService.requestTransition(
+        request,
+        execution,
+      );
+      return {
+        subjectId: result.subject.id,
+        subjectKind: result.subject.kind,
+        state: result.subject.state,
+        version: result.subject.version,
+        executed: result.executed,
+        transitionId: result.transitionId,
+        recordId: result.recordId,
+        auditEventName: result.auditEventName,
+        executionId: result.executionId,
+        correlationId: result.correlationId,
+        causationId: result.causationId,
+        transactionId: result.transactionId,
+      };
+    },
   };
 
   const registry = createModuleRegistry(snapshot, logger);
@@ -447,6 +715,12 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     policyService,
     apiAuth,
     apiCommands,
+    // NET-W004 domain services.
+    opportunityService,
+    contributionService,
+    workflowService,
+    // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
+    idempotency,
     async initialize() {
       const states = await registry.initializeAll();
       return states.map((s) => ({ name: s.name, initialized: s.initialized }));

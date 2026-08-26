@@ -28,3 +28,9 @@ export * from "./postgres-authority.ts";
 export * from "./coordination.ts";
 export * from "./idempotency.ts";
 export * from "./trace.ts";
+// NET-W004 shared lifecycle vocabulary (canonical + exceptional states,
+// LifecycleSubject, TransitionRequest/Result, IllegalTransitionError,
+// ConcurrentTransitionError). Domain tiers import this to declare their
+// lifecycle subject shape; the transition table + state machine live in
+// the workflows boundary (the SOLE lifecycle authority).
+export * from "./workflow.ts";
