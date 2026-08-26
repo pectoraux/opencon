@@ -40,11 +40,15 @@ const NET_W004_DOMAINS = ["opportunities", "contributions", "workflows"];
 
 // Domains deferred past NET-W004 (must remain skeletons).
 // NET-W005 UPDATE: "evidence" is now implemented (NET-W005) and is no
-// longer deferred; the remaining domains stay skeletal until their
+// longer deferred.
+// NET-W006 UPDATE: "outcomes" is now implemented (NET-W006 — outcome
+// observations, attribution, experiments/incrementality,
+// counterfactual baselines, measured-outcome maturation) and is no
+// longer deferred. The remaining domains stay skeletal until their
 // work items.
 const DEFERRED_DOMAINS = [
   "campaigns", "inventory", "creators", "demand", "benefits",
-  "reputation", "outcomes", "settlement", "disputes",
+  "reputation", "settlement", "disputes",
 ];
 
 async function listTsFiles(dir: string, out: string[] = []): Promise<string[]> {

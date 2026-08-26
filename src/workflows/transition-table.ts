@@ -1,7 +1,8 @@
 /**
  * Transition table — the canonical, exhaustive legal-transition matrix
- * for the Opportunity/Contribution lifecycle (NET-W004 §3.3, §8) and the
- * Proof-of-Value lifecycle (NET-W005 §3.8).
+ * for the Opportunity/Contribution lifecycle (NET-W004 §3.3, §8), the
+ * Proof-of-Value lifecycle (NET-W005 §3.8), and the measured-outcome
+ * maturation lifecycle (NET-W006 §3.5).
  *
  * Work order ref: §3.3 Workflow authority:
  *   DRAFT → READY → ASSIGNED → IN_PROGRESS → SUBMITTED → MEASURING
@@ -354,6 +355,72 @@ export const PROOF_OF_VALUE_TRANSITION_TABLE: readonly TransitionRule[] = [
 ];
 
 /**
+ * The exhaustive transition table for measured-outcome objects
+ * (NET-W006 §3.5). The measured outcome reuses the canonical state
+ * vocabulary with MATURATION semantics:
+ *
+ *   DRAFT      — measurement created (pending); observations /
+ *                attributions / baselines / incrementality attachable
+ *   MEASURING  — maturation window open; attachments still legal
+ *                (delayed outcomes arrive during maturation)
+ *   VERIFIED   — FINALIZED (terminal): the explicit, auditable
+ *                terminal state of the measurement. Attachments are
+ *                frozen. Later domains (Proof-of-Value, settlement)
+ *                reference the finalized measurement.
+ *   CANCELLED  — exceptional terminal (owner withdrew).
+ *
+ * Finalization can NEVER be silent: there is intentionally NO
+ * DRAFT → VERIFIED edge — every measurement passes through the
+ * maturation state, and MEASURING → VERIFIED is an explicit,
+ * authorized, idempotent, audited workflow transition gated by the
+ * outcomes domain service (recorded rollup + maturation strategy
+ * gate: fixed_window requires the window to have elapsed;
+ * event_driven requires an auditable maturationEvent reference).
+ *
+ * No BLOCKED/FRAUD_REVIEW/DISPUTED states for the measured outcome:
+ * fraud/dispute semantics are NET-W009..010 non-goals (NET-W006 §5).
+ * No REJECTED state: a measurement that cannot mature is CANCELLED;
+ * rejection is an evaluation outcome owned by the Proof-of-Value
+ * lifecycle (NET-W005 §3.8), not a measurement fact.
+ */
+export const OUTCOME_MEASUREMENT_TRANSITION_TABLE: readonly TransitionRule[] = [
+  {
+    from: "DRAFT",
+    to: "MEASURING",
+    policyAction: policyActionFor("outcome_measurement", "DRAFT", "MEASURING"),
+    auditEventName: auditEventFor("outcome_measurement", "DRAFT", "MEASURING"),
+  },
+  {
+    from: "MEASURING",
+    to: "VERIFIED",
+    policyAction: policyActionFor("outcome_measurement", "MEASURING", "VERIFIED"),
+    auditEventName: auditEventFor("outcome_measurement", "MEASURING", "VERIFIED"),
+    // Requires a recorded deterministic rollup + the maturation gate
+    // (fixed_window elapsed / event_driven maturationEvent) —
+    // validated by the outcomes domain service before the transition
+    // is requested (work order §3.5/§3.6).
+    requiresEvidenceReference: true,
+  },
+  {
+    from: "DRAFT",
+    to: "CANCELLED",
+    policyAction: policyActionFor("outcome_measurement", "DRAFT", "CANCELLED"),
+    auditEventName: auditEventFor("outcome_measurement", "DRAFT", "CANCELLED"),
+  },
+  {
+    from: "MEASURING",
+    to: "CANCELLED",
+    policyAction: policyActionFor("outcome_measurement", "MEASURING", "CANCELLED"),
+    auditEventName: auditEventFor("outcome_measurement", "MEASURING", "CANCELLED"),
+  },
+  // VERIFIED / CANCELLED are terminal: the table intentionally
+  // contains no rule whose source is a terminal state. Note:
+  // DRAFT → VERIFIED is intentionally NOT legal — finalization always
+  // passes through the maturation state (cannot silently become
+  // final; work order §3.5).
+];
+
+/**
  * Look up the transition table for a subject kind.
  */
 export function transitionTableFor(
@@ -361,7 +428,8 @@ export function transitionTableFor(
 ): readonly TransitionRule[] {
   if (subjectKind === "opportunity") return OPPORTUNITY_TRANSITION_TABLE;
   if (subjectKind === "contribution") return CONTRIBUTION_TRANSITION_TABLE;
-  return PROOF_OF_VALUE_TRANSITION_TABLE;
+  if (subjectKind === "proof_of_value") return PROOF_OF_VALUE_TRANSITION_TABLE;
+  return OUTCOME_MEASUREMENT_TRANSITION_TABLE;
 }
 
 /**

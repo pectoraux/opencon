@@ -21,10 +21,15 @@ const REPO = join(import.meta.dir, "../..");
 const SRC = join(REPO, "src");
 
 describe("NET-W001-AC-07 adapter isolation", () => {
-  test("a domain module (outcomes) depends on the provider-neutral LlmPort", async () => {
+  test("a domain module (outcomes) depends on a provider-neutral adapter port", async () => {
     const content = await readFile(join(SRC, "outcomes/port.ts"), "utf8");
-    // The domain imports the NEUTRAL port only (not a concrete provider).
-    expect(content).toMatch(/from ["']\.\.\/llm\/port\.ts["']/);
+    // The domain imports the NEUTRAL measurement port only (not a
+    // concrete provider). NET-W006 replaced the NET-W001-era LlmPort
+    // placeholder dependency with the provider-neutral
+    // MeasurementProviderAdapter contract — the same isolation rule,
+    // now exercised by the real NET-W006 dependency.
+    expect(content).toMatch(/from ["']\.\.\/measurement\/port\.ts["']/);
+    expect(content).not.toMatch(/from ["']\.\.\/measurement\/providers\//);
     expect(content).not.toMatch(/from ["']\.\.\/llm\/providers\//);
   });
 
@@ -40,14 +45,35 @@ describe("NET-W001-AC-07 adapter isolation", () => {
   test("the outcomes domain can be parameterized with the neutral LlmPort", () => {
     // Compile-time + runtime proof: a domain port typed against the
     // neutral LlmPort accepts any provider-neutral implementation.
+    // (NET-W006: the outcomes boundary is now ready — its provider
+    // dependency is the neutral MeasurementProviderAdapter — but the
+    // LlmPort parameterization proof remains valid for later work
+    // items that inject AI assistance into measurement inputs.)
     const outcomesPort: OutcomesPort = {
       boundary: "outcomes",
-      readiness: "skeleton",
+      readiness: "ready",
+      auditEventTypes: {
+        outcomeObservationCreated: "outcome_observation.created",
+        outcomeObservationCorrected: "outcome_observation.corrected",
+        measurementExperimentCreated: "measurement_experiment.created",
+        measurementExperimentStarted: "measurement_experiment.started",
+        measurementExperimentCompleted: "measurement_experiment.completed",
+        measurementExperimentInvalidated: "measurement_experiment.invalidated",
+        attributionCreated: "attribution.created",
+        incrementalityObservationCreated: "incrementality_observation.created",
+        counterfactualBaselineCreated: "counterfactual_baseline.created",
+        measuredOutcomeCreated: "measured_outcome.created",
+        measuredOutcomeObservationAttached: "measured_outcome.observation_attached",
+        measuredOutcomeAttributionAttached: "measured_outcome.attribution_attached",
+        measuredOutcomeBaselineAttached: "measured_outcome.baseline_attached",
+        measuredOutcomeIncrementalityAttached: "measured_outcome.incrementality_attached",
+        measuredOutcomeRollupRecorded: "measured_outcome.rollup_recorded",
+      },
     };
     expect(outcomesPort.boundary).toBe("outcomes");
-    // The optional `llm?: LlmPort` field means a concrete provider MAY
-    // be injected, but the domain module never imports the concrete
-    // adapter — only the neutral interface. See the next test.
+    // A concrete provider MAY be injected through a neutral port, but
+    // the domain module never imports the concrete adapter — only the
+    // neutral interface. See the next test.
   });
 
   test("NO domain file imports a concrete provider (scanner-enforced)", async () => {

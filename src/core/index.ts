@@ -40,3 +40,11 @@ export * from "./workflow.ts";
 // EVID-006). The /evidence domain implements the behaviour; later work
 // items (/outcomes, /reputation, /settlement) consume the vocabulary.
 export * from "./evidence.ts";
+// NET-W006 shared measurement vocabulary (attribution modes OUT-002,
+// measurement provenance with REQUIRED method/version, maturation
+// strategies OUT-005, rollup strategies, experiment statuses OUT-003,
+// baseline kinds OUT-004, causal statuses). The /outcomes domain
+// implements the behaviour; the neutral /measurement port and later
+// work items (/reputation, /settlement, NET-W022 providers) consume
+// the vocabulary.
+export * from "./measurement.ts";

@@ -137,6 +137,12 @@ export interface TransitionAuthorizer {
  * CANCELLED, spec/work-orders/NET-W005.md §3.8) transitions through the
  * SAME workflow machinery (authorization, idempotency, optimistic
  * concurrency, audit lineage) as opportunities and contributions.
+ * NET-W006 adds the measured-outcome lifecycle repository: the
+ * measured-outcome maturation lifecycle (DRAFT → MEASURING → VERIFIED
+ * + CANCELLED, spec/work-orders/NET-W006.md §3.5) transitions through
+ * the SAME machinery — finalization is explicit, authorized,
+ * idempotent and auditable, and delayed outcomes can never silently
+ * become final.
  */
 export interface WorkflowServiceDeps {
   /** Opportunity lifecycle repository (used for opportunity transitions). */
@@ -145,6 +151,8 @@ export interface WorkflowServiceDeps {
   readonly contributionRepository: LifecycleRepository;
   /** Proof-of-Value lifecycle repository (used for proof_of_value transitions). */
   readonly proofOfValueRepository: LifecycleRepository;
+  /** Measured-outcome lifecycle repository (used for outcome_measurement transitions). */
+  readonly outcomeMeasurementRepository: LifecycleRepository;
   /** Server-side authorization (deny-by-default). */
   readonly authorizer: TransitionAuthorizer;
   /**
@@ -223,6 +231,8 @@ export interface WorkflowsPort {
   readonly auditEventNamespaces: {
     readonly opportunity: "opportunity.transition";
     readonly contribution: "contribution.transition";
+    readonly proofOfValue: "proof_of_value.transition";
+    readonly outcomeMeasurement: "outcome_measurement.transition";
   };
 }
 

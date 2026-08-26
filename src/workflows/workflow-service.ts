@@ -121,6 +121,7 @@ export function createWorkflowService(
     opportunityRepository,
     contributionRepository,
     proofOfValueRepository,
+    outcomeMeasurementRepository,
     authorizer,
     auditWriter,
     idempotency,
@@ -130,7 +131,8 @@ export function createWorkflowService(
   function repositoryFor(kind: LifecycleSubject["kind"]): LifecycleRepository {
     if (kind === "opportunity") return opportunityRepository;
     if (kind === "contribution") return contributionRepository;
-    return proofOfValueRepository;
+    if (kind === "proof_of_value") return proofOfValueRepository;
+    return outcomeMeasurementRepository;
   }
 
   /**

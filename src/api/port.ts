@@ -203,7 +203,11 @@ export interface ApiCreateContributionInput {
  */
 export interface ApiRequestTransitionInput {
   readonly subjectId: string;
-  readonly subjectKind: "opportunity" | "contribution" | "proof_of_value";
+  readonly subjectKind:
+    | "opportunity"
+    | "contribution"
+    | "proof_of_value"
+    | "outcome_measurement";
   readonly targetState: string;
   readonly expectedVersion: number;
   readonly idempotencyKey: string;
@@ -357,6 +361,199 @@ export interface ApiCreateProofOfValueInput {
   readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
   readonly outcomeClaimIds?: readonly string[];
   readonly evidenceIds?: readonly string[];
+}
+
+// -- NET-W006 outcomes/measurement views + inputs --------------------
+
+/** The public view of an outcome observation (NET-W006 AC-01). */
+export interface ApiOutcomeObservationView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly observerId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly outcomeType: string;
+  readonly outcomeClaimId: string | null;
+  readonly evidenceId: string | null;
+  readonly observedValue: { readonly value: number; readonly unit: string };
+  readonly confidence: Readonly<Record<string, unknown>>;
+  readonly provenance: Readonly<Record<string, unknown>>;
+  readonly correctsObservationId: string | null;
+  readonly providerAttributionMode: string | null;
+  readonly externalSubjectRef: string | null;
+  readonly createdAt: string;
+}
+
+/** Inputs to create an outcome observation via the API (§3.1). */
+export interface ApiCreateOutcomeObservationInput {
+  readonly organizationScopeId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly outcomeType: string;
+  readonly outcomeClaimId?: string;
+  readonly evidenceId?: string;
+  readonly observedValue: { readonly value: number; readonly unit: string };
+  readonly confidence: Readonly<Record<string, unknown>>;
+  readonly provenance: Readonly<Record<string, unknown>>;
+}
+
+/** The result of a provider ingestion pass (NET-W006 AC-07). */
+export interface ApiProviderIngestionResultView {
+  readonly providerId: string;
+  readonly createdObservations: readonly ApiOutcomeObservationView[];
+}
+
+/** The public view of a measurement experiment (NET-W006 AC-03). */
+export interface ApiMeasurementExperimentView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly ownerId: string;
+  readonly experimentType: string;
+  readonly hypothesis: string | null;
+  readonly status: string;
+  readonly startedAt: string | null;
+  readonly completedAt: string | null;
+  readonly invalidatedAt: string | null;
+  readonly invalidationReason: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly version: number;
+}
+
+/** Inputs to create a measurement experiment via the API (§3.3). */
+export interface ApiCreateMeasurementExperimentInput {
+  readonly organizationScopeId: string;
+  readonly experimentType: string;
+  readonly hypothesis?: string;
+}
+
+/** Inputs to an experiment status change via the API. */
+export interface ApiExperimentStatusChangeInput {
+  readonly expectedVersion: number;
+  readonly reason?: string;
+}
+
+/** The public view of an attribution record (NET-W006 AC-02). */
+export interface ApiAttributionView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly observationId: string;
+  readonly attributedSubject: { readonly subjectId: string; readonly subjectType: string };
+  readonly mode: string;
+  readonly attributionValue: { readonly value: number; readonly unit: string };
+  readonly confidence: Readonly<Record<string, unknown>>;
+  readonly provenance: Readonly<Record<string, unknown>>;
+  readonly deterministicLink: Readonly<Record<string, unknown>> | null;
+  readonly experimentId: string | null;
+  readonly evidenceIds: readonly string[];
+  readonly createdAt: string;
+}
+
+/** Inputs to create an attribution via the API (§3.2). */
+export interface ApiCreateAttributionInput {
+  readonly organizationScopeId: string;
+  readonly observationId: string;
+  readonly attributedSubject: { readonly subjectId: string; readonly subjectType: string };
+  readonly mode: string;
+  readonly attributionValue: { readonly value: number; readonly unit: string };
+  readonly confidence: Readonly<Record<string, unknown>>;
+  readonly provenance: Readonly<Record<string, unknown>>;
+  readonly deterministicLink?: { readonly linkType: string; readonly linkIdentifier: string };
+  readonly experimentId?: string;
+  readonly evidenceIds?: readonly string[];
+}
+
+/** The public view of an incrementality observation (NET-W006 AC-03). */
+export interface ApiIncrementalityObservationView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly ownerId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly outcomeType: string;
+  readonly lift: { readonly value: number; readonly unit: string };
+  readonly baselineValue: { readonly value: number; readonly unit: string };
+  readonly confidence: Readonly<Record<string, unknown>>;
+  readonly provenance: Readonly<Record<string, unknown>>;
+  readonly experimentId: string | null;
+  readonly causalStatus: string;
+  readonly evidenceIds: readonly string[];
+  readonly createdAt: string;
+}
+
+/** Inputs to create an incrementality observation via the API (§3.3). */
+export interface ApiCreateIncrementalityObservationInput {
+  readonly organizationScopeId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly outcomeType: string;
+  readonly lift: { readonly value: number; readonly unit: string };
+  readonly baselineValue: { readonly value: number; readonly unit: string };
+  readonly confidence: Readonly<Record<string, unknown>>;
+  readonly provenance: Readonly<Record<string, unknown>>;
+  readonly experimentId?: string;
+  readonly evidenceIds?: readonly string[];
+}
+
+/** The public view of a counterfactual/baseline (NET-W006 AC-04). */
+export interface ApiCounterfactualBaselineView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly ownerId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly outcomeType: string;
+  readonly baselineKind: string;
+  readonly baselineValue: { readonly value: number; readonly unit: string };
+  readonly comparisonValue: { readonly value: number; readonly unit: string } | null;
+  readonly confidence: Readonly<Record<string, unknown>>;
+  readonly provenance: Readonly<Record<string, unknown>>;
+  readonly evidenceIds: readonly string[];
+  readonly createdAt: string;
+}
+
+/** Inputs to create a counterfactual/baseline via the API (§3.4). */
+export interface ApiCreateCounterfactualBaselineInput {
+  readonly organizationScopeId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly outcomeType: string;
+  readonly baselineKind: string;
+  readonly baselineValue: { readonly value: number; readonly unit: string };
+  readonly comparisonValue?: { readonly value: number; readonly unit: string };
+  readonly confidence: Readonly<Record<string, unknown>>;
+  readonly provenance: Readonly<Record<string, unknown>>;
+  readonly evidenceIds?: readonly string[];
+}
+
+/** The public view of a measured outcome (NET-W006 AC-05). */
+export interface ApiMeasuredOutcomeView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly ownerId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly outcomeType: string;
+  readonly outcomeClaimId: string | null;
+  readonly observationIds: readonly string[];
+  readonly attributionIds: readonly string[];
+  readonly baselineIds: readonly string[];
+  readonly incrementalityIds: readonly string[];
+  readonly maturation: Readonly<Record<string, unknown>>;
+  readonly rollupStrategy: string;
+  readonly state: string;
+  readonly version: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** The detailed measured-outcome view (includes the rollup). */
+export interface ApiMeasuredOutcomeDetailView extends ApiMeasuredOutcomeView {
+  readonly rollup: Readonly<Record<string, unknown>> | null;
+}
+
+/** Inputs to create a measured outcome via the API (§3.5). */
+export interface ApiCreateMeasuredOutcomeInput {
+  readonly organizationScopeId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly outcomeType: string;
+  readonly outcomeClaimId?: string;
+  readonly maturation: Readonly<Record<string, unknown>>;
+  readonly rollupStrategy?: string;
+  readonly observationIds?: readonly string[];
 }
 
 /**
@@ -536,6 +733,173 @@ export interface ApiCommands {
     proofId: string,
     attestationId: string,
   ): Promise<ApiProofOfValueView>;
+
+  // -- NET-W006 outcomes/measurement commands --------------------
+
+  /** Create an outcome observation (NET-W006 AC-01, protected mutation). */
+  createOutcomeObservation(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateOutcomeObservationInput,
+  ): Promise<ApiOutcomeObservationView>;
+
+  /** Fetch an outcome observation (public read). */
+  getOutcomeObservation(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiOutcomeObservationView | null>;
+
+  /**
+   * Correct an observation (append-corrected; protected mutation).
+   * The correction targets the observation identified by the
+   * `observationId` path parameter; it inherits the target's subject
+   * reference + outcome type server-side.
+   */
+  correctOutcomeObservation(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    observationId: string,
+    input: ApiCreateOutcomeObservationInput,
+  ): Promise<ApiOutcomeObservationView>;
+
+  /** Ingest provider observations through the neutral adapter (AC-07). */
+  ingestProviderObservations(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: {
+      readonly organizationScopeId: string;
+      readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+      readonly since?: string;
+    },
+  ): Promise<ApiProviderIngestionResultView>;
+
+  /** Create a measurement experiment (NET-W006 AC-03, protected). */
+  createMeasurementExperiment(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateMeasurementExperimentInput,
+  ): Promise<ApiMeasurementExperimentView>;
+
+  /** Fetch a measurement experiment (public read). */
+  getMeasurementExperiment(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiMeasurementExperimentView | null>;
+
+  /** PLANNED → RUNNING (protected mutation). */
+  startMeasurementExperiment(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    experimentId: string,
+    input: ApiExperimentStatusChangeInput,
+  ): Promise<ApiMeasurementExperimentView>;
+
+  /** RUNNING → COMPLETED (protected mutation). */
+  completeMeasurementExperiment(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    experimentId: string,
+    input: ApiExperimentStatusChangeInput,
+  ): Promise<ApiMeasurementExperimentView>;
+
+  /** PLANNED|RUNNING → INVALIDATED (protected mutation). */
+  invalidateMeasurementExperiment(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    experimentId: string,
+    input: ApiExperimentStatusChangeInput,
+  ): Promise<ApiMeasurementExperimentView>;
+
+  /** Create an attribution record (NET-W006 AC-02, protected). */
+  createAttribution(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateAttributionInput,
+  ): Promise<ApiAttributionView>;
+
+  /** Fetch an attribution record (public read). */
+  getAttribution(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiAttributionView | null>;
+
+  /** Create an incrementality observation (AC-03, protected). */
+  createIncrementalityObservation(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateIncrementalityObservationInput,
+  ): Promise<ApiIncrementalityObservationView>;
+
+  /** Fetch an incrementality observation (public read). */
+  getIncrementalityObservation(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiIncrementalityObservationView | null>;
+
+  /** Create a counterfactual/baseline (NET-W006 AC-04, protected). */
+  createCounterfactualBaseline(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateCounterfactualBaselineInput,
+  ): Promise<ApiCounterfactualBaselineView>;
+
+  /** Fetch a counterfactual/baseline (public read). */
+  getCounterfactualBaseline(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiCounterfactualBaselineView | null>;
+
+  /** Create a measured outcome (NET-W006 AC-05, protected). */
+  createMeasuredOutcome(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateMeasuredOutcomeInput,
+  ): Promise<ApiMeasuredOutcomeView>;
+
+  /** Fetch the detailed view of a measured outcome (public read). */
+  getMeasuredOutcome(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiMeasuredOutcomeDetailView | null>;
+
+  /** Attach an observation to a measured outcome (protected). */
+  attachObservationToMeasurement(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    measurementId: string,
+    observationId: string,
+  ): Promise<ApiMeasuredOutcomeView>;
+
+  /** Attach an attribution to a measured outcome (protected). */
+  attachAttributionToMeasurement(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    measurementId: string,
+    attributionId: string,
+  ): Promise<ApiMeasuredOutcomeView>;
+
+  /** Attach a baseline to a measured outcome (protected). */
+  attachBaselineToMeasurement(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    measurementId: string,
+    baselineId: string,
+  ): Promise<ApiMeasuredOutcomeView>;
+
+  /** Attach an incrementality observation to a measured outcome (protected). */
+  attachIncrementalityToMeasurement(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    measurementId: string,
+    incrementalityId: string,
+  ): Promise<ApiMeasuredOutcomeView>;
+
+  /** Record the deterministic rollup on a measured outcome (protected). */
+  recordMeasurementRollup(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    measurementId: string,
+  ): Promise<ApiMeasuredOutcomeDetailView>;
 }
 
 export type { ExecutionContext };
