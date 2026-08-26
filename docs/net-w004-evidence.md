@@ -145,16 +145,52 @@ causation identifiers, actor/subject/resource lineage, and an append-
 oriented audit record that is committed atomically with the authoritative
 state mutation.
 
+**REMEDIATION (architect re-review on PR #8):** the workflow's audit
+writes now go through the **transactional audit writer** — not the
+ordinary in-memory direct writer. The lifecycle mutation, the idempotency
+record, and the audit record all commit via the SAME `AuthorityTransaction`:
+
+```
+lifecycle mutation   (repo.saveWithinTx — buffered in the authority tx)
++ idempotency record (idempotency store — buffered in the authority tx)
++ audit record       (auditWriter.forTransaction(tx) buffer, flushed
+                      before the tx commits; flush failure throws so the
+                      tx rolls back)
+```
+
+Rollback-on-audit-failure is proven by a fault-injection test: when the
+underlying audit writer fails, the transition is rejected AND the subject
+remains unmutated (DRAFT, version 0), no idempotency record is committed,
+and no audit records exist — no committed mutation without committed
+audit lineage.
+
+Correct `transactionId` lineage: the audit record's
+`metadata.transactionId` and the returned `TransitionResult.transactionId`
+are the AUTHORITATIVE `AuthorityTransaction.transactionId` — NOT the
+execution id (previously the workflow returned `executionId` as the tx
+reference). The idempotency-record lineage in the audit metadata now
+references the REAL idempotency record id (`IdempotentApplyContext.recordId`)
+which equals `IdempotentResult.recordId` — previously the tx id was
+incorrectly used.
+
 **Changed files (implementation):**
-- `src/workflows/workflow-service.ts` (NEW) — appends an audit record (with full lineage metadata) within the SAME authoritative tx as the lifecycle mutation. The audit record carries actor/subject/resourceType/resourceId/correlationId/executionId + metadata (fromState, toState, fromVersion, toVersion, policyAction, idempotencyKey, idempotencyRecordId, transitionId, organizationScopeId).
+- `src/core/audit.ts` (MODIFIED, remediation) — the `TransactionalAuditWriter` + `TransactionalAuditBuffer` contracts are promoted to core so the workflows domain can consume them as provider-neutral type-only imports (domain→core is allowed by the tier allow matrix). The concrete implementation stays in the audit infrastructure boundary.
+- `src/audit/transactional-audit-writer.ts` (MODIFIED, remediation) — imports the contracts from core; `createTransactionalAuditWriter` remains the concrete infrastructure factory. The buffer's `commit()` flush failure surfaces to the caller so the bound authoritative tx rolls back.
+- `src/workflows/workflow-service.ts` (MODIFIED, remediation) — `performTransition` obtains `auditWriter.forTransaction(tx)` (a transaction-scoped buffer bound to the SAME AuthorityTransaction as the lifecycle mutation + the idempotency record), appends the audit record through the buffer, and flushes it BEFORE the idempotency store commits the tx. An append or flush failure throws so the idempotency store rolls back the WHOLE tx (mutation + idempotency record + audit record all discarded). The returned `transactionId` is `tx.transactionId` (the authoritative tx id).
+- `src/core/idempotency.ts` (MODIFIED, remediation, additive) — `IdempotentApplyContext` now also exposes `recordId: string` (the idempotency record's stable id, generated before the callback runs) so the audit lineage references the exact record that deduplicated the mutation.
+- `src/persistence/idempotency-store.ts` (MODIFIED, remediation) — populates `recordId` on the apply context.
+- `src/workflows/port.ts` (MODIFIED, remediation) — `WorkflowServiceDeps.auditWriter` is the `TransactionalAuditWriter` core contract (bootstrap wires the concrete implementation).
+- `src/bootstrap/runtime.ts` (MODIFIED, remediation) — the runtime's audit writer is `createTransactionalAuditWriter({ underlying: createInMemoryAuditWriter(...) })`. Non-transactional consumers (identity/organizations/participants/opportunities/contributions/workers) call append/query/count which delegate directly to the underlying append-only writer (identical NET-W001/NET-W002 behaviour); the workflow authority calls `forTransaction(tx)` for atomic audit lineage.
 - `src/core/workflow.ts` (NEW) — `TransitionResult` carries `executionId`/`correlationId`/`causationId`/`transactionId`/`auditEventName`/`transitionId`/`recordId`.
 
-**Test evidence:** `tests/workflows/net-w004-ac-07-audit-lineage.test.ts` (5 tests):
-- a transition result carries execution/correlation/causation identifiers + transaction id;
-- an audit record is appended atomically with the lifecycle mutation (single commit);
+**Test evidence:** `tests/workflows/net-w004-ac-07-audit-lineage.test.ts` (7 tests):
+- a transition result carries execution/correlation/causation identifiers + the AUTHORITATIVE transaction id (distinct from the execution id);
+- an audit record is appended atomically with the lifecycle mutation (single commit) — the audit metadata's `transactionId` equals the authoritative tx id (not the execution id), and the `idempotencyRecordId` equals the REAL idempotency record id (verified against `idempotency.get(key).recordId`);
 - a rolled-back transition does NOT append an audit record (atomicity: audit + mutation commit together or both roll back);
+- REMEDIATION: rollback-on-audit-failure — a faulty audit writer (append throws) makes the transition fail AND the subject remain unmutated (DRAFT v0), no idempotency record is committed, no audit records exist, and a retry with the same key executes again (the whole apply rolled back atomically);
+- REMEDIATION: the runtime's audit writer IS the transactional audit writer (bootstrap wiring) — `forTransaction(tx)` buffers appends (not visible via query/count until the buffer commits) and stamps the authoritative `tx.transactionId` lineage;
 - audit records are append-only and immutable (deeply frozen — NET-W001-AC-06 preserved);
-- the audit record carries actor/subject/resource lineage for both opportunity and contribution transitions.
+- the audit record carries actor/subject/resource lineage for both opportunity and contribution transitions (with the same authoritative tx lineage).
 
 ### AC-08 — Architecture and out-of-scope regression
 
@@ -164,7 +200,7 @@ behavior is introduced.
 
 **Changed files (regression + tests):**
 - `tests/regression/ac-08-no-premature-domain-logic.test.ts` (MODIFIED) — adds `NET_W004_DOMAINS = ["opportunities", "contributions", "workflows"]` to the non-skeleton set; the forbidden-pattern scan continues to apply to ALL 16 domains (no economic/reputation/settlement/credit/evidence-evaluation logic introduced).
-- `tests/regression/net-w003-ac-08-architecture-out-of-scope.test.ts` (MODIFIED) — relaxes the "no domain-tier file references PostgresAuthority/IdempotencyStore" assertion to allow the NET-W004 domains to consume the provider-neutral CORE contracts (PostgresAuthority, AuthorityTransaction, IdempotencyStore, CoordinationService) as type-only imports. The CONCRETE implementation class names (PostgresAuthorityShim, RedisCoordinationShim, DurableObjectStore, TraceRecorder, TransactionalAuditWriter, SecretMaterialRedactor) remain forbidden in domain-tier files.
+- `tests/regression/net-w003-ac-08-architecture-out-of-scope.test.ts` (MODIFIED) — relaxes the "no domain-tier file references PostgresAuthority/IdempotencyStore" assertion to allow the NET-W004 domains to consume the provider-neutral CORE contracts (PostgresAuthority, AuthorityTransaction, IdempotencyStore, CoordinationService) as type-only imports. The CONCRETE implementation class/factory names (PostgresAuthorityShim, RedisCoordinationShim, DurableObjectStore, TraceRecorder, createTransactionalAuditWriter, SecretMaterialRedactor) remain forbidden in domain-tier files. REMEDIATION UPDATE: `TransactionalAuditWriter` is now a CORE contract (src/core/audit.ts) that the workflows domain consumes as a type-only import — only the concrete factory `createTransactionalAuditWriter` is forbidden in domain files, mirroring how `PostgresAuthority` (contract) is allowed while `PostgresAuthorityShim` (implementation) is not.
 
 **Test evidence:** `tests/regression/net-w004-ac-08-architecture-out-of-scope.test.ts` (10 tests):
 - NET-W004 domains introduce no forbidden material-operation patterns (issueCredit, mintCredit, settleAmount, mutateReputation, allocateBenefit, deliverCampaign, issueReward, createProofOfValue, evaluateProofOfValue, cashSettlement);
@@ -185,7 +221,7 @@ behavior is introduced.
 $ bun run verify
 $ bun run typecheck   # PASS
 $ bun run arch:check  # PASS — 162 files, 0 violations
-$ bun test             # 245 pass / 15 skip / 0 fail
+$ bun test             # 258 pass / 15 skip / 0 fail (remediation: +2 AC-07 tests)
 ```
 
 The 15 skips are the real PostgreSQL + Redis integration tests from

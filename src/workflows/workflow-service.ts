@@ -20,9 +20,9 @@
  * Tier compliance: this file is in the `workflows` domain boundary.
  * It imports ONLY:
  *   - its own port (self, same dir — allowed),
- *   - core contracts (ExecutionContext, AuditWriter, IdempotencyStore,
- *     CoordinationService, OpenConError subclasses, lifecycle types —
- *     all from `../core/*`, allowed).
+ *   - core contracts (ExecutionContext, TransactionalAuditWriter,
+ *     IdempotencyStore, CoordinationService, OpenConError subclasses,
+ *     lifecycle types — all from `../core/*`, allowed).
  * It does NOT import infrastructure or any other domain. The lifecycle
  * repositories + authorizer are injected as structural interfaces
  * declared in the workflows port.
@@ -44,15 +44,27 @@
  *     b. Check `expectedVersion` (optimistic concurrency: reject stale).
  *     c. Evaluate transition legality (state machine: pure).
  *     d. Write the updated subject (state, version+1, lineage).
- *     e. Append an audit record (transactional buffer when available;
- *        committed atomically with the mutation).
+ *     e. Buffer the audit record in the transactional audit buffer
+ *        bound to the SAME AuthorityTransaction, then flush it. An
+ *        audit append or flush failure throws so the idempotency store
+ *        rolls back the WHOLE tx — the lifecycle mutation is discarded
+ *        together with the audit record (rollback-on-audit-failure:
+ *        no committed mutation without committed audit lineage,
+ *        NET-W004-AC-07 remediation).
+ *
+ * Audit lineage: the flushed audit record carries
+ * `metadata.transactionId = tx.transactionId` — the AUTHORITATIVE
+ * transaction id from the AuthorityTransaction, NOT the execution id.
+ * The returned TransitionResult.transactionId is the same value so
+ * callers can correlate the mutation, its audit record, and its durable
+ * transaction.
  *
  * No economically material behaviour is introduced (work order §5).
  */
 
 import { randomUUID } from "node:crypto";
-import type { AuditWriter } from "../core/audit.ts";
-import { AuthorizationError, OpenConError } from "../core/errors.ts";
+import type { TransactionalAuditWriter } from "../core/audit.ts";
+import { AuthorizationError } from "../core/errors.ts";
 import type { ExecutionContext } from "../core/execution-context.ts";
 import type { IdempotencyStore, IdempotentResult } from "../core/idempotency.ts";
 import type {
@@ -65,6 +77,7 @@ import {
   ConcurrentTransitionError,
 } from "../core/workflow.ts";
 import type { CoordinationService } from "../core/coordination.ts";
+import type { AuthorityTransaction } from "../core/postgres-authority.ts";
 import type {
   LifecycleRepository,
   TransitionAuthorizer,
@@ -110,101 +123,117 @@ export function createWorkflowService(
    * that the IdempotencyStore opened. The tx is exposed on
    * `ctx.transaction` so the lifecycle mutation + the audit record
    * commit atomically with the idempotency record (NET-W004 §4.4, §4.7).
+   *
+   * The audit record is written through the TRANSACTIONAL audit buffer
+   * bound to the SAME AuthorityTransaction (`auditWriter.forTransaction(tx)`).
+   * The buffer's append + flush participate in the tx's atomicity:
+   *  - flush failure  → this function throws → the idempotency store
+   *    rolls back the tx → the lifecycle mutation + the idempotency
+   *    record are discarded (rollback-on-audit-failure).
+   *  - tx rollback    → this function's catch block discards the audit
+   *    buffer (no audit record for a mutation that never committed).
    */
   async function performTransition(
     request: TransitionRequest,
     execution: ExecutionContext,
-    tx: import("../core/postgres-authority.ts").AuthorityTransaction,
+    tx: AuthorityTransaction,
     idempotencyRecordId: string,
   ): Promise<TransitionResult> {
     const repo = repositoryFor(request.subjectKind);
+    // The transactional audit buffer bound to the SAME authoritative
+    // transaction as the lifecycle mutation + the idempotency record.
+    // Audit events appended through it are buffered (NOT visible via
+    // auditWriter.query/count) until the buffer commits.
+    const auditBuffer = auditWriter.forTransaction(tx);
 
-    // a. Re-read the subject within the tx. The tx sees its own
-    //    uncommitted writes so this is the authoritative current state.
-    const subject = await repo.getByIdWithinTx(request.subjectId, tx);
-    if (!subject) {
-      throw new LifecycleSubjectNotFoundError(
-        `${request.subjectKind} ${request.subjectId} not found`,
-        {
-          subjectId: request.subjectId,
-          subjectKind: request.subjectKind,
-          executionId: execution.executionId,
-          correlationId: execution.correlationId,
-        },
-      );
-    }
-
-    // b. Optimistic concurrency: reject stale writers (work order §4.8).
-    if (request.expectedVersion !== subject.version) {
-      throw new ConcurrentTransitionError(
-        `stale writer for ${request.subjectKind} ${request.subjectId}: expected version ${request.expectedVersion}, authoritative version ${subject.version}`,
-        {
-          subjectId: request.subjectId,
-          subjectKind: request.subjectKind,
-          expectedVersion: request.expectedVersion,
-          authoritativeVersion: subject.version,
-          executionId: execution.executionId,
-          correlationId: execution.correlationId,
-        },
-      );
-    }
-
-    // b'. Authorization: server-side, deny-by-default (work order §4.5).
-    //     Cross-org transitions are denied because the authorizer checks
-    //     the subject's organizationScopeId against the actor's
-    //     organization scope.
-    const decision = await authorizer.authorizeTransition({
-      execution,
-      actorPersonId: request.actorPersonId,
-      subject,
-      policyAction: request.policyAction,
-    });
-    if (decision.decision !== "allow") {
-      throw new AuthorizationError(
-        `transition denied for ${request.subjectKind} ${request.subjectId}: ${decision.reason}`,
-        {
-          subjectId: request.subjectId,
-          subjectKind: request.subjectKind,
-          actorPersonId: request.actorPersonId,
-          policyAction: request.policyAction,
-          reason: decision.reason,
-          executionId: execution.executionId,
-          correlationId: execution.correlationId,
-        },
-      );
-    }
-
-    // c. Evaluate transition legality (pure state machine).
-    const evaluation = evaluateTransition({
-      subject,
-      targetState: request.targetState,
-      expectedVersion: request.expectedVersion,
-      execution,
-    });
-    assertLegal(evaluation);
-    const rule = evaluation.rule!;
-
-    // d. Write the updated subject: new state, version+1, fresh lineage.
-    const updatedSubject: LifecycleSubject = {
-      ...subject,
-      state: request.targetState,
-      version: subject.version + 1,
-      executionId: execution.executionId,
-      correlationId: execution.correlationId,
-      causationId: execution.causationId,
-      updatedAt: new Date().toISOString(),
-    };
-    // The repository preserves non-lifecycle fields via read-modify-write.
-    await repo.saveWithinTx(updatedSubject, request.expectedVersion, execution, tx);
-
-    // e. Audit record (atomic with the mutation — the audit writer is
-    //    either the transactional buffer when wired, or the direct
-    //    append writer; both commit on tx commit). Carries execution/
-    //    correlation/causation lineage + actor/subject/resource so the
-    //    mutation is fully traceable (work order §4.7).
-    const transitionId = randomUUID();
     try {
-      await auditWriter.append({
+      // a. Re-read the subject within the tx. The tx sees its own
+      //    uncommitted writes so this is the authoritative current state.
+      const subject = await repo.getByIdWithinTx(request.subjectId, tx);
+      if (!subject) {
+        throw new LifecycleSubjectNotFoundError(
+          `${request.subjectKind} ${request.subjectId} not found`,
+          {
+            subjectId: request.subjectId,
+            subjectKind: request.subjectKind,
+            executionId: execution.executionId,
+            correlationId: execution.correlationId,
+          },
+        );
+      }
+
+      // b. Optimistic concurrency: reject stale writers (work order §4.8).
+      if (request.expectedVersion !== subject.version) {
+        throw new ConcurrentTransitionError(
+          `stale writer for ${request.subjectKind} ${request.subjectId}: expected version ${request.expectedVersion}, authoritative version ${subject.version}`,
+          {
+            subjectId: request.subjectId,
+            subjectKind: request.subjectKind,
+            expectedVersion: request.expectedVersion,
+            authoritativeVersion: subject.version,
+            executionId: execution.executionId,
+            correlationId: execution.correlationId,
+          },
+        );
+      }
+
+      // b'. Authorization: server-side, deny-by-default (work order §4.5).
+      //     Cross-org transitions are denied because the authorizer checks
+      //     the subject's organizationScopeId against the actor's
+      //     organization scope.
+      const decision = await authorizer.authorizeTransition({
+        execution,
+        actorPersonId: request.actorPersonId,
+        subject,
+        policyAction: request.policyAction,
+      });
+      if (decision.decision !== "allow") {
+        throw new AuthorizationError(
+          `transition denied for ${request.subjectKind} ${request.subjectId}: ${decision.reason}`,
+          {
+            subjectId: request.subjectId,
+            subjectKind: request.subjectKind,
+            actorPersonId: request.actorPersonId,
+            policyAction: request.policyAction,
+            reason: decision.reason,
+            executionId: execution.executionId,
+            correlationId: execution.correlationId,
+          },
+        );
+      }
+
+      // c. Evaluate transition legality (pure state machine).
+      const evaluation = evaluateTransition({
+        subject,
+        targetState: request.targetState,
+        expectedVersion: request.expectedVersion,
+        execution,
+      });
+      assertLegal(evaluation);
+      const rule = evaluation.rule!;
+
+      // d. Write the updated subject: new state, version+1, fresh lineage.
+      const updatedSubject: LifecycleSubject = {
+        ...subject,
+        state: request.targetState,
+        version: subject.version + 1,
+        executionId: execution.executionId,
+        correlationId: execution.correlationId,
+        causationId: execution.causationId,
+        updatedAt: new Date().toISOString(),
+      };
+      // The repository preserves non-lifecycle fields via read-modify-write.
+      await repo.saveWithinTx(updatedSubject, request.expectedVersion, execution, tx);
+
+      // e. Audit record — BUFFERED in the transactional audit buffer
+      //    bound to the SAME AuthorityTransaction as the lifecycle
+      //    mutation + the idempotency record. Carries execution/
+      //    correlation/causation lineage + actor/subject/resource so the
+      //    mutation is fully traceable (work order §4.7). The buffer
+      //    stamps the AUTHORITATIVE transaction id (tx.transactionId)
+      //    into the record's metadata for durable-tx lineage.
+      const transitionId = randomUUID();
+      await auditBuffer.append({
         eventType: rule.auditEventName,
         context: execution,
         actor: execution.actor?.id ?? null,
@@ -224,38 +253,40 @@ export function createWorkflowService(
           ...(request.metadata ?? {}),
         },
       });
-    } catch (auditErr) {
-      // Audit failure is logged but never silently swallows the
-      // mutation: the mutation already happened inside the tx; the
-      // audit record is best-effort lineage. (When a transactional
-      // audit buffer is wired, the audit write participates in the
-      // tx and rolls back with it — preserving atomicity.)
-      throw new OpenConError({
-        code: "AUDIT_WRITE_FAILED",
-        classification: "transient",
-        message: `audit write failed for transition ${transitionId}`,
-        cause: auditErr,
-        retryable: true,
-        context: {
-          transitionId,
-          subjectId: request.subjectId,
-          subjectKind: request.subjectKind,
-          auditEventName: rule.auditEventName,
-        },
-      });
-    }
 
-    return {
-      subject: updatedSubject,
-      executed: true,
-      transitionId,
-      recordId: idempotencyRecordId,
-      auditEventName: rule.auditEventName,
-      executionId: execution.executionId,
-      correlationId: execution.correlationId,
-      causationId: execution.causationId,
-      transactionId: execution.executionId, // The execution id is the stable tx reference for lineage.
-    };
+      // e'. Flush the audit buffer. The flushed events land in the
+      //     underlying append-only writer and become visible via
+      //     query/count. A flush failure THROWS so the idempotency
+      //     store rolls back the authoritative tx — the lifecycle
+      //     mutation + the idempotency record are discarded together
+      //     with the audit record (rollback-on-audit-failure: no
+      //     committed mutation without committed audit lineage).
+      await auditBuffer.commit();
+
+      return {
+        subject: updatedSubject,
+        executed: true,
+        transitionId,
+        recordId: idempotencyRecordId,
+        auditEventName: rule.auditEventName,
+        executionId: execution.executionId,
+        correlationId: execution.correlationId,
+        causationId: execution.causationId,
+        // Correct transactionId lineage: the AUTHORITATIVE transaction
+        // id of the AuthorityTransaction that committed the mutation +
+        // the idempotency record + the audit record (NOT the execution
+        // id — the execution id identifies the request, not the tx).
+        transactionId: tx.transactionId,
+      };
+    } catch (err) {
+      // Any failure (illegal transition, authorization denied, stale
+      // writer, audit append/flush failure) discards the audit buffer.
+      // The idempotency store rolls back the tx so the lifecycle
+      // mutation + the idempotency record are discarded too — all
+      // three artifacts commit together or none does.
+      await auditBuffer.rollback();
+      throw err;
+    }
   }
 
   const service: WorkflowService = {
@@ -294,12 +325,13 @@ export function createWorkflowService(
             async (ctx) => {
               // The idempotency store opened the authoritative tx;
               // `ctx.transaction` is the SAME tx the lifecycle
-              // mutation + audit record will commit in.
+              // mutation + audit record will commit in. `ctx.recordId`
+              // is the idempotency record's stable id for audit lineage.
               return performTransition(
                 request,
                 ctx.execution,
                 ctx.transaction,
-                ctx.transaction.transactionId,
+                ctx.recordId,
               );
             },
             execution,
@@ -319,5 +351,5 @@ export function createWorkflowService(
   return service;
 }
 
-export { AuthorizationError, OpenConError };
+export { AuthorizationError };
 export type { TransitionAuthorizer };

@@ -43,7 +43,7 @@
  */
 
 import type { ExecutionContext } from "../core/execution-context.ts";
-import type { AuditWriter } from "../core/audit.ts";
+import type { TransactionalAuditWriter } from "../core/audit.ts";
 import type { AuthorityTransaction } from "../core/postgres-authority.ts";
 import type {
   LifecycleSubject,
@@ -139,8 +139,15 @@ export interface WorkflowServiceDeps {
   readonly contributionRepository: LifecycleRepository;
   /** Server-side authorization (deny-by-default). */
   readonly authorizer: TransitionAuthorizer;
-  /** Audit writer (append-only; transactional buffer when applicable). */
-  readonly auditWriter: AuditWriter;
+  /**
+   * Transactional audit writer. The workflow service obtains a
+   * transaction-scoped buffer via `forTransaction(tx)` so the audit
+   * record commits atomically with the lifecycle mutation + the
+   * idempotency record (NET-W004 §4.7 + NET-W003 §4.8). The bootstrap
+   * composition root wires the concrete TransactionalAuditWriter
+   * implementation from src/audit/transactional-audit-writer.ts.
+   */
+  readonly auditWriter: TransactionalAuditWriter;
 }
 
 /**
@@ -156,16 +163,21 @@ export interface WorkflowServiceDeps {
  *     authoritative state).
  *  4. Applies the transition idempotently through the IdempotencyStore
  *     (exactly-once-per-key; deterministic replay on duplicate).
- *  5. Within the SAME authoritative transaction as the idempotency
- *     record:
+ *  5. Within the SAME authoritative {@link AuthorityTransaction} as the
+ *     idempotency record:
  *     a. re-reads the subject (sees uncommitted writes in this tx);
  *     b. checks `expectedVersion` (optimistic concurrency — rejects
  *        stale writers);
  *     c. evaluates the transition legality (state machine);
  *     d. writes the updated subject (new state, version+1, lineage);
- *     e. appends an audit record (atomic with the mutation).
+ *     e. buffers an audit record via the transactional audit buffer
+ *        bound to the SAME tx, then flushes it. The audit write
+ *        participates in the tx's atomicity — a buffer append/flush
+ *        failure rolls back the mutation + the idempotency record
+ *        (no committed mutation without committed audit lineage,
+ *        NET-W004-AC-07).
  *  6. Returns a stable {@link TransitionResult} with execution/
- *     correlation/causation lineage + transaction id.
+ *     correlation/causation lineage + the authoritative `transactionId`.
  *
  * Domain services (OpportunityService, ContributionService) MAY
  * validate business preconditions but MUST NOT mutate lifecycle state
@@ -203,4 +215,4 @@ export interface WorkflowsPort {
   };
 }
 
-export type { ExecutionContext, AuthorityTransaction, LifecycleSubject, LifecycleSubjectKind, TransitionRequest, TransitionResult };
+export type { ExecutionContext, AuthorityTransaction, LifecycleSubject, LifecycleSubjectKind, TransitionRequest, TransitionResult, TransactionalAuditWriter };

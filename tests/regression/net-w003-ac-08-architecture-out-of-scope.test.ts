@@ -120,14 +120,18 @@ describe("NET-W003-AC-08 architecture/out-of-scope regression", () => {
     // guards that domain-tier files do not REFERENCE the concrete
     // implementation class names (PostgresAuthorityShim,
     // RedisCoordinationShim, DurableObjectStore, TraceRecorder,
-    // TransactionalAuditWriter, SecretMaterialRedactor) — those are the
-    // concrete infrastructure implementations and must remain in the
-    // infrastructure tier.
+    // createTransactionalAuditWriter, SecretMaterialRedactor) — those
+    // are the concrete infrastructure implementations and must remain in
+    // the infrastructure tier.
     //
     // The provider-neutral contract names (PostgresAuthority,
-    // AuthorityTransaction, IdempotencyStore, CoordinationService) ARE
-    // allowed in the NET-W004 domains because they are core contracts,
-    // not infrastructure implementations.
+    // AuthorityTransaction, IdempotencyStore, CoordinationService,
+    // TransactionalAuditWriter) ARE allowed in the NET-W004 domains
+    // because they are core contracts, not infrastructure
+    // implementations. (NET-W004-AC-07 remediation: the workflows
+    // domain imports the TransactionalAuditWriter CONTRACT from
+    // src/core/audit.ts and the bootstrap composition root wires the
+    // concrete createTransactionalAuditWriter factory.)
     const DOMAIN_DIRS = [
       "identity", "organizations", "participants", "opportunities",
       "contributions", "campaigns", "inventory", "creators", "demand",
@@ -150,12 +154,21 @@ describe("NET-W003-AC-08 architecture/out-of-scope regression", () => {
     // AuthorityTransaction, IdempotencyStore, CoordinationService are
     // NOT in this list — they are core contracts that domains may
     // consume as type-only imports.)
+    //
+    // NET-W004-AC-07 remediation update: TransactionalAuditWriter is now
+    // a CORE contract (declared in src/core/audit.ts) that the workflows
+    // domain consumes as a type-only import — the architect-approved fix
+    // wires the workflow's audit writes through the transactional audit
+    // buffer. Only the CONCRETE factory name
+    // (createTransactionalAuditWriter) remains forbidden in domain files;
+    // the interface name (TransactionalAuditWriter) is a contract, like
+    // PostgresAuthority.
     const infraPatterns: RegExp[] = [
       /PostgresAuthorityShim/i,
       /RedisCoordinationShim/i,
       /DurableObjectStore/i,
       /TraceRecorder/i,
-      /TransactionalAuditWriter/i,
+      /createTransactionalAuditWriter/i,
       /SecretMaterialRedactor/i,
     ];
     for (const dir of DOMAIN_DIRS) {

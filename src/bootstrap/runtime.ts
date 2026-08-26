@@ -16,6 +16,14 @@ import { loadConfig } from "../config/provider.ts";
 import { createLogger, type LogEntrySink } from "../observability/logger.ts";
 import { HealthAggregator } from "../observability/health.ts";
 import { createInMemoryAuditWriter } from "../audit/audit-writer.ts";
+// NET-W004-AC-07 remediation: the runtime's audit writer is the
+// TRANSACTIONAL audit writer. The workflow service obtains a
+// transaction-scoped buffer via forTransaction(tx) so the audit record
+// commits atomically with the lifecycle mutation + the idempotency
+// record (same AuthorityTransaction). The concrete implementation is
+// wired HERE (composition root) — domain tiers consume only the core
+// contract (src/core/audit.ts TransactionalAuditWriter).
+import { createTransactionalAuditWriter } from "../audit/transactional-audit-writer.ts";
 import { createInMemoryObjectStore } from "../object-storage/in-memory-store.ts";
 import { createEnvSecretProvider, buildSecretCatalog } from "../secrets/env-provider.ts";
 import { createInMemoryJobQueue } from "../queues/in-memory-queue.ts";
@@ -30,7 +38,7 @@ import {
 } from "../core/execution-context.ts";
 import type { ConfigurationProvider } from "../core/config.ts";
 import type { Logger } from "../core/logger.ts";
-import type { AuditWriter } from "../core/audit.ts";
+import type { TransactionalAuditWriter } from "../core/audit.ts";
 import type { ObjectStore } from "../core/object-store.ts";
 import type { SecretProvider } from "../core/secrets.ts";
 import type { JobQueue } from "../core/queue.ts";
@@ -118,7 +126,14 @@ import { ledgerModule } from "../ledger/module.ts";
 export interface Runtime {
   readonly config: ConfigurationProvider;
   readonly logger: Logger;
-  readonly auditWriter: AuditWriter;
+  /**
+   * The runtime's audit writer. NET-W004-AC-07 remediation: this is the
+   * TRANSACTIONAL audit writer (createTransactionalAuditWriter wrapping
+   * the in-memory append-only writer). It is assignable to AuditWriter
+   * for non-transactional consumers; the workflow service uses
+   * forTransaction(tx) for atomic audit lineage.
+   */
+  readonly auditWriter: TransactionalAuditWriter;
   readonly objectStore: ObjectStore;
   readonly secretProvider: SecretProvider;
   readonly queue: JobQueue;
@@ -197,7 +212,21 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     collector: logSink,
   });
 
-  const auditWriter = createInMemoryAuditWriter({ logger: logger.child("audit") });
+  // NET-W004-AC-07 remediation: the runtime's audit writer is the
+  // TRANSACTIONAL audit writer wrapping the in-memory append-only
+  // writer. Non-transactional consumers (identity, organizations,
+  // participants, opportunities, contributions, workers) call
+  // append/query/count — the transactional writer delegates those
+  // directly to the underlying append-only writer (identical
+  // NET-W001/NET-W002 behaviour). The workflow authority calls
+  // forTransaction(tx) to obtain a transaction-scoped buffer so the
+  // lifecycle mutation + idempotency record + audit record commit
+  // atomically in the SAME AuthorityTransaction (rollback-on-audit-
+  // failure; no committed mutation without committed audit lineage).
+  const auditWriter = createTransactionalAuditWriter({
+    underlying: createInMemoryAuditWriter({ logger: logger.child("audit") }),
+    logger: { debug: (m, f) => logger.child("audit").debug(m, f) },
+  });
   const objectStore = createInMemoryObjectStore();
   const secretProvider = createEnvSecretProvider({
     source: opts.env ?? process.env,

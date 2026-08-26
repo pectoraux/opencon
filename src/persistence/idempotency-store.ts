@@ -185,9 +185,13 @@ export function createPostgresIdempotencyStore(opts: IdempotencyStoreOptions): I
           // so the workflow service can mutate lifecycle state AND
           // append a transactional audit record within the SAME
           // authoritative tx as the idempotency record (true atomicity).
+          // The recordId is exposed so the audit lineage references the
+          // EXACT idempotency record (not the tx id) — NET-W004-AC-07
+          // correct idempotency-record lineage.
           const applyCtx: IdempotentApplyContext = {
             execution,
             transaction: tx,
+            recordId: inFlightRecordId,
             commit: async () => {
               // The fn may call commit() explicitly to settle; otherwise
               // we commit after fn returns. If fn calls commit, subsequent

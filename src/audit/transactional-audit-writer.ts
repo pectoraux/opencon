@@ -32,6 +32,8 @@ import type {
   AuditEvent,
   AuditQuery,
   AuditWriter,
+  TransactionalAuditBuffer,
+  TransactionalAuditWriter,
 } from "../core/audit.ts";
 import type { ExecutionContext } from "../core/execution-context.ts";
 import type { AuthorityTransaction } from "../core/postgres-authority.ts";
@@ -56,25 +58,11 @@ export interface BufferedAuditEvent {
   readonly objectReferenceIds?: readonly string[];
 }
 
-export interface TransactionalAuditWriter extends AuditWriter {
-  /**
-   * Begin a transactional audit buffer bound to an authoritative
-   * transaction. Audit events appended via the returned writer are
-   * buffered until `commit` (then flushed to the underlying writer) or
-   * `rollback` (then discarded).
-   *
-   * The `transactionId` is recorded in each flushed event's metadata
-   * so the audit record can be traced back to its durable transaction.
-   */
-  forTransaction(tx: AuthorityTransaction): AuditWriter & {
-    /** Flush the buffered events to the underlying writer. */
-    commit(): Promise<void>;
-    /** Discard the buffered events (mutation rolled back). */
-    rollback(): Promise<void>;
-    /** Buffered event count (for tests). */
-    pendingCount(): number;
-  };
-}
+// Re-export the core contracts so existing consumers (tests, bootstrap)
+// can keep importing them from this boundary. The contracts themselves
+// live in src/core/audit.ts so domain tiers can consume them without
+// coupling to the audit infrastructure implementation.
+export type { TransactionalAuditBuffer, TransactionalAuditWriter };
 
 export interface TransactionalAuditWriterOptions {
   readonly underlying: AuditWriter;
@@ -102,15 +90,11 @@ export function createTransactionalAuditWriter(
   };
 
   const self: TransactionalAuditWriter = Object.assign(baseWriter, {
-    forTransaction(tx: AuthorityTransaction) {
+    forTransaction(tx: AuthorityTransaction): TransactionalAuditBuffer {
       const buffer: BufferedAuditEvent[] = [];
       let settled = false;
 
-      const txWriter: AuditWriter & {
-        commit(): Promise<void>;
-        rollback(): Promise<void>;
-        pendingCount(): number;
-      } = {
+      const txWriter: TransactionalAuditBuffer = {
         async append(input) {
           if (settled) {
             throw new Error(
@@ -158,6 +142,9 @@ export function createTransactionalAuditWriter(
           if (settled) return;
           settled = true;
           // Flush buffered events to the underlying append-only writer.
+          // A failure here surfaces to the caller (throws) so the bound
+          // authoritative transaction rolls back — no committed
+          // mutation without committed audit lineage (NET-W004-AC-07).
           for (const ev of buffer) {
             await underlying.append({
               eventType: ev.eventType,
