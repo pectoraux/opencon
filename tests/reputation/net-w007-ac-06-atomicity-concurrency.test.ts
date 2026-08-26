@@ -11,6 +11,14 @@
  *    (idempotency-store per-key locking — the NET-W004 primitive);
  *  - concurrent DIFFERENT-key snapshots both persist (append-only
  *    history);
+ *  - policy-lineage serialization under concurrency (PR #14
+ *    remediation): concurrent CROSS-organization v1 creates of the
+ *    same policyId cannot fork the lineage (exactly one succeeds, the
+ *    other receives the cross-scope lineage error) because the whole
+ *    apply runs under the ORGANIZATION-INDEPENDENT mutex
+ *    `reputation_policy_lineage:{policyId}`; concurrent
+ *    same-organization creates resolve to exactly one record /
+ *    gapless monotonic lineage;
  *  - an audit append failure INSIDE the transaction rolls the mutation
  *    back entirely (no record without its audit lineage);
  *  - an audit PUBLICATION failure after the durable commit retains the
@@ -30,6 +38,7 @@ import type {
   TransactionalAuditBuffer,
 } from "../../src/core/audit.ts";
 import type { AuthorityTransaction } from "../../src/core/postgres-authority.ts";
+import type { ReputationScoringPolicy } from "../../src/reputation/port.ts";
 import { createRuntime } from "../../src/bootstrap/runtime.ts";
 import { createTransactionalAuditWriter } from "../../src/audit/transactional-audit-writer.ts";
 import { createPostgresIdempotencyStore } from "../../src/persistence/idempotency-store.ts";
@@ -40,6 +49,7 @@ import {
   actorCtx,
   createDefaultPolicy,
   createVerifiedContribution,
+  DEFAULT_POLICY_RULES,
   REF_AT,
   type NetW007Harness,
 } from "./_net-w007-harness.ts";
@@ -290,6 +300,197 @@ describe("NET-W007-AC-06 atomicity/idempotency/concurrency", () => {
     );
     expect(history).toHaveLength(2);
     expect(history.map((s) => s.id).sort()).toEqual([a.snapshot.id, b.snapshot.id].sort());
+  });
+
+  // ---------------------------------------------------------------------
+  // PR #14 remediation regression tests — policy-lineage serialization
+  // under concurrency (architect re-review: "policy lineage isolation
+  // under concurrency").
+  //
+  // The policy idempotency key is ORG-SCOPED
+  // (`reputation_policy:{organizationScopeId}:{policyId}:{version}`),
+  // so two organizations concurrently creating the same policyId
+  // acquire DIFFERENT idempotency locks — without the lineage lock
+  // both could read "no existing lineage" and both create version 1
+  // (a cross-scope fork). The service therefore runs the whole apply
+  // under the ORGANIZATION-INDEPENDENT mutex
+  // `reputation_policy_lineage:{policyId}` on the idempotency store.
+  // ---------------------------------------------------------------------
+
+  test("two CONCURRENT cross-organization v1 creates of the same policyId cannot fork the lineage: exactly one succeeds, the other receives the cross-scope lineage error (PR #14 remediation)", async () => {
+    const ctx = actorCtx(harness, "ac06-cross-org-fork-race");
+    // A second organization in the SAME store/runtime — the lineage
+    // lock lives on the runtime-wired idempotency store instance, so
+    // both callers below are serialized by it.
+    const otherOrg = await harness.runtime.organizationService.createOrganization(
+      harness.bootstrapCtx,
+      { name: "Fork Rival Org", creatorId: harness.personId },
+    );
+    const policyId = "policy-cross-org-race";
+
+    // Fire both version-1 creates CONCURRENTLY. Before the
+    // remediation these acquired different (org-scoped) idempotency
+    // locks and BOTH could commit version 1 → fork.
+    const outcomes = await Promise.allSettled([
+      harness.runtime.reputationPolicyService.createPolicyVersion(ctx, {
+        organizationScopeId: harness.organizationScopeId,
+        policyId,
+        version: 1,
+        rules: DEFAULT_POLICY_RULES,
+      }),
+      harness.runtime.reputationPolicyService.createPolicyVersion(ctx, {
+        organizationScopeId: otherOrg.id,
+        policyId,
+        version: 1,
+        rules: DEFAULT_POLICY_RULES,
+      }),
+    ]);
+
+    const fulfilled = outcomes.filter(
+      (o): o is PromiseFulfilledResult<ReputationScoringPolicy> => o.status === "fulfilled",
+    );
+    const rejected = outcomes.filter(
+      (o): o is PromiseRejectedResult => o.status === "rejected",
+    );
+    // EXACTLY ONE succeeded.
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+
+    // The other received the CROSS-SCOPE LINEAGE ERROR (it observed
+    // the winner's COMMITTED version 1 inside its own transaction).
+    const reason = rejected[0]!.reason as Error & { code?: string };
+    expect(reason.message).toMatch(/belongs to organization scope/);
+    expect(reason.code).toBe("REPUTATION_POLICY_VALIDATION");
+
+    // The surviving lineage has EXACTLY ONE version-1 record owned by
+    // the winning organization — no fork, no duplicate versions.
+    const winner = fulfilled[0]!.value;
+    const versions = await harness.runtime.reputationPolicyService.listPolicyVersions(
+      ctx,
+      policyId,
+    );
+    expect(versions).toHaveLength(1);
+    expect(versions[0]!.version).toBe(1);
+    expect(versions[0]!.id).toBe(winner.id);
+    expect(versions[0]!.organizationScopeId).toBe(winner.organizationScopeId);
+    expect([harness.organizationScopeId, otherOrg.id]).toContain(winner.organizationScopeId);
+
+    // Exactly ONE audit event exists for the lineage's creation (the
+    // losing create rolled back entirely — record, idempotency AND
+    // audit — so no phantom audit lineage for the fork attempt).
+    const events = await harness.runtime.auditWriter.query({
+      eventType: "reputation_policy.version_created",
+    });
+    const forLineage = events.filter(
+      (e) => (e.metadata as Record<string, unknown>).policyId === policyId,
+    );
+    expect(forLineage).toHaveLength(1);
+
+    // The LOSING organization can still establish its OWN lineage
+    // under a different policyId (the rejected create poisoned
+    // nothing — no in-flight marker, no orphaned lock).
+    const rival = await harness.runtime.reputationPolicyService.createPolicyVersion(ctx, {
+      organizationScopeId: otherOrg.id,
+      policyId: "policy-cross-org-race-rival",
+      version: 1,
+      rules: DEFAULT_POLICY_RULES,
+    });
+    expect(rival.organizationScopeId).toBe(otherOrg.id);
+    expect(rival.version).toBe(1);
+  });
+
+  test("two CONCURRENT same-organization same-tuple version creates resolve to exactly one record (one create + one deterministic replay, one audit event)", async () => {
+    const ctx = actorCtx(harness, "ac06-same-org-concurrent-tuple");
+    const policyId = "policy-same-org-race";
+
+    const [a, b] = await Promise.all([
+      harness.runtime.reputationPolicyService.createPolicyVersion(ctx, {
+        organizationScopeId: harness.organizationScopeId,
+        policyId,
+        version: 1,
+        rules: DEFAULT_POLICY_RULES,
+      }),
+      harness.runtime.reputationPolicyService.createPolicyVersion(ctx, {
+        organizationScopeId: harness.organizationScopeId,
+        policyId,
+        version: 1,
+        rules: DEFAULT_POLICY_RULES,
+      }),
+    ]);
+
+    // Both callers resolve (serialized by the lineage lock; the
+    // second is a deterministic replay of the committed tuple).
+    expect(a.id).toBe(b.id);
+    expect(a.organizationScopeId).toBe(harness.organizationScopeId);
+
+    // Exactly ONE version-1 record exists.
+    const versions = await harness.runtime.reputationPolicyService.listPolicyVersions(
+      ctx,
+      policyId,
+    );
+    expect(versions).toHaveLength(1);
+    expect(versions[0]!.version).toBe(1);
+
+    // Exactly ONE audit event for the creation.
+    const events = await harness.runtime.auditWriter.query({
+      eventType: "reputation_policy.version_created",
+    });
+    const forLineage = events.filter(
+      (e) => (e.metadata as Record<string, unknown>).policyId === policyId,
+    );
+    expect(forLineage).toHaveLength(1);
+
+    // The lineage continues normally after the race: v2 is accepted.
+    const v2 = await harness.runtime.reputationPolicyService.createPolicyVersion(ctx, {
+      organizationScopeId: harness.organizationScopeId,
+      policyId,
+      version: 2,
+      rules: DEFAULT_POLICY_RULES,
+    });
+    expect(v2.version).toBe(2);
+  });
+
+  test("CONCURRENT same-organization version creates (v1 vs v2) leave a gapless, fork-free lineage regardless of serialization order", async () => {
+    const ctx = actorCtx(harness, "ac06-same-org-concurrent-versions");
+    const policyId = "policy-same-org-versions-race";
+
+    const outcomes = await Promise.allSettled([
+      harness.runtime.reputationPolicyService.createPolicyVersion(ctx, {
+        organizationScopeId: harness.organizationScopeId,
+        policyId,
+        version: 1,
+        rules: DEFAULT_POLICY_RULES,
+      }),
+      harness.runtime.reputationPolicyService.createPolicyVersion(ctx, {
+        organizationScopeId: harness.organizationScopeId,
+        policyId,
+        version: 2,
+        rules: DEFAULT_POLICY_RULES,
+      }),
+    ]);
+
+    // Invariants hold regardless of the serialization order: the
+    // lineage is gapless (1..n), duplicate-free and single-org.
+    const versions = await harness.runtime.reputationPolicyService.listPolicyVersions(
+      ctx,
+      policyId,
+    );
+    expect(versions.map((v) => v.version)).toEqual(
+      versions.map((_, i) => i + 1),
+    );
+    expect(versions.filter((v) => v.version === 1)).toHaveLength(1);
+    expect(new Set(versions.map((v) => v.organizationScopeId)).size).toBe(1);
+
+    // Any rejection is the deterministic monotonicity conflict (v2
+    // arriving before v1: "a new lineage starts at version 1") —
+    // never a fork and never a duplicate-version write.
+    for (const o of outcomes) {
+      if (o.status === "rejected") {
+        expect(String((o.reason as Error).message)).toMatch(
+          /starts at version 1|next version is/,
+        );
+      }
+    }
   });
 
   test("an audit APPEND failure inside the transaction rolls the input recording back ENTIRELY (no record without its audit lineage)", async () => {

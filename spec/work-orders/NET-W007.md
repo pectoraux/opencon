@@ -95,6 +95,24 @@ Evidence / Measurement / Verified Contribution
   per dimension (ALL eight required, exactly once), description,
   creator, lineage. New version = new record; existing versions are
   never rewritten (reproducibility).
+- All versions of a lineage share one organization scope; a lineage
+  cannot be forked across scopes — enforced for EVERY version create,
+  including version 1 (the org-INDEPENDENT lineage read runs inside
+  the create transaction).
+- Lineage serialization under concurrency (PR #14 remediation): the
+  mutation idempotency key is org-scoped
+  (`reputation_policy:{organizationScopeId}:{policyId}:{version}`), so
+  it cannot serialize concurrent creates of the same `policyId` from
+  DIFFERENT organizations. The whole create — lineage read → scope
+  check → version check → create → commit — therefore runs under an
+  ORGANIZATION-INDEPENDENT mutex `reputation_policy_lineage:{policyId}`
+  on the idempotency store (`IdempotencyStore.withLock`, the store's
+  per-key mutex — its documented stand-in for PostgreSQL
+  `SELECT … FOR UPDATE` row locking; OpenCon is a single-process
+  modular monolith, and all policy mutations flow through the one
+  runtime-wired store instance). A queued cross-scope caller observes
+  the first caller's COMMITTED lineage and receives the cross-scope
+  lineage error.
 - Snapshot computation references `policyId + version` explicitly, so a
   historical snapshot can ALWAYS be recomputed bit-for-bit.
 
@@ -165,7 +183,13 @@ Evidence / Measurement / Verified Contribution
    PostgreSQL-authoritative, and audit-linked ATOMICALLY (transactional
    audit buffer bound to the same authority transaction — NET-W004-AC-07
    semantics). A publication failure never fabricates a committed
-   change (retryable recovery, mirroring NET-W005/W006).
+   change (retryable recovery, mirroring NET-W005/W006). Concurrent
+   policy-version creates of the same `policyId` — including from
+   DIFFERENT organization scopes — are serialized under the
+   organization-independent lineage mutex
+   (`reputation_policy_lineage:{policyId}`), and the cross-scope
+   lineage check runs against the ORG-INDEPENDENT lineage read on
+   EVERY create (including version 1): a lineage can never fork.
 8. Reputation is separate from the economic ledger: no credit issuance,
    settlement, pricing, benefit allocation, or campaign delivery
    (AC-08 forbids the patterns); `settlement`/`ledger` stay skeletal.

@@ -17,6 +17,10 @@
  *  - Sequential replays do NOT re-invoke `fn` and return the cached result.
  *  - `fn` receives a transaction-scoped context so the mutation and the
  *    idempotency record commit atomically (or both roll back).
+ *  - `withLock(key, fn)` serializes `fn` per key with NO idempotency
+ *    semantics — the serialization boundary for check-then-act
+ *    sequences whose idempotency key is narrower than the invariant
+ *    they guard (NET-W007 policy-lineage fork prevention).
  *
  * This file defines interfaces ONLY. Concrete implementation lives in
  * src/persistence/idempotency-store.ts.
@@ -98,6 +102,46 @@ export interface IdempotencyStore {
     fn: (ctx: IdempotentApplyContext) => Promise<T>,
     execution: ExecutionContext,
   ): Promise<IdempotentResult<T>>;
+  /**
+   * Serialize `fn` per key across ALL callers of this store instance:
+   * concurrent `withLock(key, …)` calls run strictly one-at-a-time in
+   * call order (a FIFO queue), and the lock is held until `fn` settles
+   * (including its internal transaction commits).
+   *
+   * This is the store's per-key mutex exposed as a first-class
+   * serialization boundary — the same mechanism `applyIdempotent`
+   * already relies on, which the concrete implementation documents as
+   * the stand-in for PostgreSQL `SELECT … FOR UPDATE` row-level
+   * locking. OpenCon is a single-process modular monolith and every
+   * material mutation flows through the ONE runtime-wired store
+   * instance, so a per-key mutex on that instance is a correct
+   * serialization boundary (the same reasoning that underpins
+   * `applyIdempotent`'s exactly-once guarantee).
+   *
+   * Use it when the idempotency key alone is TOO NARROW to serialize a
+   * check-then-act sequence. Example (NET-W007 policy lineages): the
+   * idempotency key is
+   * `reputation_policy:{organizationScopeId}:{policyId}:{version}` —
+   * org-scoped — so two DIFFERENT organizations concurrently creating
+   * the same `policyId` would acquire different idempotency locks and
+   * could both observe "no existing lineage" and both create version 1
+   * (a cross-scope fork). Wrapping the apply in
+   * `withLock("reputation_policy_lineage:{policyId}", …)` serializes
+   * the lineage read → scope check → version check → create → commit
+   * sequence under an ORGANIZATION-INDEPENDENT key, so the second
+   * caller's in-transaction lineage read observes the first caller's
+   * COMMITTED version and the cross-scope fork is rejected.
+   *
+   * `withLock` carries NO idempotency semantics — it never caches,
+   * never replays; it is pure serialization. Nesting `withLock` inside
+   * `withLock` for the SAME key would deadlock; distinct keys are
+   * fine. `fn` MAY throw (the lock is released and the error
+   * propagates).
+   *
+   * NET-W007 remediation addition (additive, non-breaking): consumers
+   * that do not call this method are unaffected.
+   */
+  withLock<T>(key: string, fn: () => Promise<T>): Promise<T>;
   /** Inspect whether a key has a cached result (for tests). */
   has(key: string): Promise<boolean>;
   /** Read the cached result for a key (for tests). Returns null if absent. */

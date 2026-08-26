@@ -46,6 +46,21 @@
  *
  * The contract is proven by the integration test in
  * tests/persistence/net-w003-ac-06-idempotency-concurrency.test.ts.
+ *
+ * NET-W007 remediation addition (additive, non-breaking): `withLock`
+ * exposes the SAME per-key mutex as a first-class serialization
+ * primitive — pure serialization, no idempotency semantics. It exists
+ * for check-then-act sequences whose idempotency key is NARROWER than
+ * the invariant they guard (e.g. the org-scoped policy idempotency key
+ * vs. the ORGANIZATION-INDEPENDENT lineage-fork invariant — see
+ * src/reputation/policy-service.ts). Because OpenCon is a
+ * single-process modular monolith and every material mutation flows
+ * through the ONE runtime-wired store instance, the per-key mutex on
+ * that instance serializes all callers, exactly as it already does
+ * for `applyIdempotent`'s exactly-once guarantee. A real PostgreSQL
+ * deployment would implement the same boundary with a row-level lock
+ * / unique constraint on the lineage; the mutex is the monolith's
+ * equivalent.
  */
 
 import { randomUUID } from "node:crypto";
@@ -128,6 +143,18 @@ export function createPostgresIdempotencyStore(opts: IdempotencyStoreOptions): I
   }
 
   return {
+    /**
+     * Serialize `fn` per key across all callers of this store
+     * instance (the same per-key mutex `applyIdempotent` uses). The
+     * lock is held until `fn` settles — including any transaction `fn`
+     * commits internally — so a caller queued behind another observes
+     * the earlier caller's COMMITTED state. No idempotency semantics:
+     * never caches, never replays.
+     */
+    async withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+      return withKeyLock(key, fn);
+    },
+
     async applyIdempotent<T>(
       key: string,
       fn: (ctx: IdempotentApplyContext) => Promise<T>,

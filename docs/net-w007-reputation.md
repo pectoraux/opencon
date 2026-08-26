@@ -64,6 +64,33 @@ credits, settles nothing, prices nothing, and mutates no other domain.
    new lineage); a lineage cannot fork across organization scopes;
    existing versions are never rewritten so historical snapshots stay
    bit-for-bit reproducible.
+3a. **Lineage serialization under concurrency (PR #14 remediation).**
+   The policy idempotency key is ORG-SCOPED
+   (`reputation_policy:{organizationScopeId}:{policyId}:{version}`),
+   so concurrent creates of the same `policyId` from DIFFERENT
+   organizations acquire different idempotency locks — both could
+   read "no existing lineage" and both create version 1 (a
+   cross-scope fork). Two complementary fixes: (1) the whole create
+   apply — lineage read → scope check → version check → create →
+   commit — runs under the ORGANIZATION-INDEPENDENT mutex
+   `reputation_policy_lineage:{policyId}` (`IdempotencyStore.withLock`,
+   the new additive core-contract method exposing the store's per-key
+   mutex — its documented stand-in for PostgreSQL `SELECT … FOR UPDATE`
+   row locking; OpenCon is a single-process modular monolith and all
+   policy mutations flow through the one runtime-wired store
+   instance), so a queued cross-scope caller observes the first
+   caller's COMMITTED lineage; (2) the in-transaction lineage
+   verification now reads the lineage ORG-INDEPENDENTLY on EVERY
+   create — including version 1 (previously the cross-scope check
+   only fired for version > 1, so a cross-org v1 create against an
+   existing lineage bypassed it entirely). Regression tests prove:
+   concurrent Org A → policy-X v1 vs Org B → policy-X v1 → exactly
+   one succeeds, the other receives the cross-scope lineage error,
+   exactly one v1 record + one audit event survive, and the losing
+   org can still create its OWN lineage under a different policyId;
+   concurrent same-org same-tuple creates resolve to one record; and
+   concurrent same-org v1-vs-v2 creates leave a gapless, fork-free
+   lineage regardless of serialization order.
 4. **Derived basis (architecture-lock §4 made mechanical).** The input
    service resolves every source through neutral lookups and DERIVES
    `verified` (VERIFIED contribution/PoV/measured outcome, or
@@ -107,11 +134,11 @@ credits, settles nothing, prices nothing, and mutates no other domain.
 | AC | Requirement | Test file | Key assertions |
 |---|---|---|---|
 | AC-01 | Dimensions first-class, independent, reconstructable | `tests/reputation/net-w007-ac-01-dimensions.test.ts` (7 tests) | frozen 8-dimension vocabulary; full-coverage policy validation (partial/duplicate rejected); always-all-eight score emission in vocabulary order; mechanical independence (inputs to one dimension never move another); first-class persisted inputs; snapshot reconstructability from (inputIds, policyVersion, referenceAt) reproducing exact scores + digest; ordered history |
-| AC-02 | Deterministic, policy/version aware, reproducible | `tests/reputation/net-w007-ac-02-determinism.test.ts` (7 tests) | bit-identical repeated computations (digest); snapshot digest = pure-engine digest; v2 changes scoring while the v1 snapshot recomputes exactly against version 1; monotonic versioning with tuple-idempotent replay; cross-scope fork rejected; 6-decimal rounding stability (0.5^(1/3) exact); referenceAt part of the digest |
+| AC-02 | Deterministic, policy/version aware, reproducible | `tests/reputation/net-w007-ac-02-determinism.test.ts` (7 tests) | bit-identical repeated computations (digest); snapshot digest = pure-engine digest; v2 changes scoring while the v1 snapshot recomputes exactly against version 1; monotonic versioning with tuple-idempotent replay; cross-scope fork rejected (version 2 AND the remediation's version-1 case; lineage stays single-org); 6-decimal rounding stability (0.5^(1/3) exact); referenceAt part of the digest |
 | AC-03 | Evidence/verified-value provenance retained | `tests/reputation/net-w007-ac-03-provenance.test.ts` (7 tests) | empty sources rejected; nonexistent source rejected per kind; cross-org source rejected; exhaustive DERIVED basis table (VERIFIED contribution/PoV/measured outcome/platform/attested/provider vs DRAFT contribution/model/self, mixed); audit events carry sources + basis + inputIds + digest + policyVersion + the AUTHORITATIVE transactionId; material score deltas trace to the exact added inputs |
 | AC-04 | Deterministic time decay (no wall-clock races) | `tests/reputation/net-w007-ac-04-decay.test.ts` (9 tests) | exact half-life values (0.5^(elapsed/halfLife)); fail-closed invalid inputs; future-reference clamp; exact decayed scores (90-day-old input at half-life 90 → exactly 0.5 weight); temporal scoping (future inputs excluded); fixed referenceAt math (t0 vs t0+90d → 1 vs 0.5); occurredAt anchor independent of recordedAt; per-dimension versioned half-lives |
 | AC-05 | Spend/wealth/raw activity cannot buy reputation | `tests/reputation/net-w007-ac-05-non-purchasable.test.ts` (7 tests) | no economic field in the persisted contract (smuggled spend/wealth/credit fields dropped; exact key set asserted); empty-sources rejection; 80-input raw-activity volume capped at exactly indicatedOnlyCap=10; indicatedOnlyCap < maxScore validated; 12 verified + 80 indicated → exact composed score 32; non-VERIFIED contribution volume capped; score shape is trust-only (no economic units) |
-| AC-06 | Authorized, idempotent, concurrent-safe, authoritative, audit-atomic | `tests/reputation/net-w007-ac-06-atomicity-concurrency.test.ts` (10 tests) | deny-by-default API guard on all 3 mutation endpoints (unauthenticated + authenticated-without-policy → 403, with policies → 201); same-key input/snapshot replay (one record, one audit event); concurrent same-key recordings → exactly one mutation; concurrent different-key snapshots → both persist in order; in-tx audit append failure rolls back EVERYTHING (no record, no idempotency record; retry after healing succeeds); post-commit publication failure retains pending audit for recovery (durable commit never undone); authoritative transactionId lineage + revision round-trip through the authority store |
+| AC-06 | Authorized, idempotent, concurrent-safe, authoritative, audit-atomic | `tests/reputation/net-w007-ac-06-atomicity-concurrency.test.ts` (13 tests) | deny-by-default API guard on all 3 mutation endpoints (unauthenticated + authenticated-without-policy → 403, with policies → 201); same-key input/snapshot replay (one record, one audit event); concurrent same-key recordings → exactly one mutation; concurrent different-key snapshots → both persist in order; **PR #14 remediation:** concurrent cross-org v1 creates of the same policyId cannot fork the lineage (exactly one succeeds, the other receives the cross-scope lineage error `REPUTATION_POLICY_VALIDATION`; one v1 record + one audit event; the losing org can still create its own lineage), concurrent same-org same-tuple creates → exactly one record + one audit event + lineage continues at v2, concurrent same-org v1-vs-v2 creates → gapless fork-free lineage regardless of order; in-tx audit append failure rolls back EVERYTHING (no record, no idempotency record; retry after healing succeeds); post-commit publication failure retains pending audit for recovery (durable commit never undone); authoritative transactionId lineage + revision round-trip through the authority store. The `withLock` serialization primitive itself is directly proven in `tests/persistence/net-w003-ac-06-idempotency-concurrency.test.ts` (strict one-at-a-time FIFO mutual exclusion; queued callers observe committed state; distinct keys parallel; errors release the lock; no idempotency semantics) |
 | AC-07 | Provider/model inputs neutral + non-authoritative | `tests/reputation/net-w007-ac-07-neutrality.test.ts` (7 tests) | model evidence → indicated at 0.25 weight; 120 model/self inputs alone capped at 10 (< 100); one verified source upgrades the basis; provider evidence verified-grade with identical scoring for 3 different providers (kind+id refs only); domain imports ONLY core+self; no other domain imports reputation (leaf); model-only inputs stay indicated across dimensions |
 | AC-08 | Architecture/out-of-scope regression | `tests/regression/net-w007-ac-08-architecture-out-of-scope.test.ts` (10 tests) | arch:check 0 violations; frozen specs unchanged with the reputation invariants still declared (lock 1.4/1.8/13.22); work order binds to v1.0 + Issue #13 + REP-001..004; non-skeletal module; NO economic-authority patterns (issueCredit…participationCredit); no economic units in the port contract; core+self imports only; settlement still skeletal; NO reputation lifecycle subject added to /workflows; expected boundary files exist; frozen core vocabulary exports |
 

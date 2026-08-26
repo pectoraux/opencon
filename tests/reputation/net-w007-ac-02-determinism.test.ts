@@ -253,6 +253,25 @@ describe("NET-W007-AC-02 determinism", () => {
         rules: DEFAULT_POLICY_RULES,
       }),
     ).rejects.toThrow(/belongs to organization scope/);
+    // PR #14 remediation: the cross-scope check now applies to EVERY
+    // version — including a sequential cross-org VERSION-1 create
+    // against an existing lineage (previously this bypassed the
+    // org-independent lineage lookup and forked the lineage).
+    await expect(
+      harness.runtime.reputationPolicyService.createPolicyVersion(ctx, {
+        organizationScopeId: otherOrg.id,
+        policyId: "policy-scoped",
+        version: 1,
+        rules: DEFAULT_POLICY_RULES,
+      }),
+    ).rejects.toThrow(/belongs to organization scope/);
+    // The lineage remains single-org and single-version-1.
+    const versions = await harness.runtime.reputationPolicyService.listPolicyVersions(
+      ctx,
+      "policy-scoped",
+    );
+    expect(versions).toHaveLength(1);
+    expect(versions[0]!.organizationScopeId).toBe(harness.organizationScopeId);
   });
 
   test("rounding is deterministic at 6 decimals (no float drift in scores or digests)", async () => {

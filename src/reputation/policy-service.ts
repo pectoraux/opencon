@@ -19,6 +19,41 @@
  *  - all versions of a lineage share one organization scope (a lineage
  *    cannot be forked across scopes).
  *
+ * LINEAGE SERIALIZATION (NET-W007 PR #14 remediation — architect
+ * re-review): the idempotency key above is ORG-SCOPED
+ * (`reputation_policy:{organizationScopeId}:{policyId}:{version}`),
+ * so two DIFFERENT organizations concurrently creating the same
+ * `policyId` at version 1 acquire DIFFERENT idempotency locks — both
+ * could read "no existing lineage" and both create version 1 (a
+ * cross-scope fork; the in-tx `findLatestVersionWithinTx(policyId,
+ * undefined, tx)` check alone does not close this race because both
+ * transactions can perform the read before either commits).
+ * The fix: the whole apply runs under an ORGANIZATION-INDEPENDENT
+ * lineage lock — `reputation_policy_lineage:{policyId}` — on the
+ * idempotency store's per-key mutex (the store's documented
+ * stand-in for PostgreSQL `SELECT … FOR UPDATE` row locking; OpenCon
+ * is a single-process modular monolith and all policy mutations flow
+ * through the one runtime-wired store instance):
+ *
+ * ```text
+ * lock(policyId)                    ← org-INDEPENDENT serialization
+ *     ↓
+ * applyIdempotent(org-scoped key)  ← opens the authoritative tx
+ *     ├─ read lineage (within tx)
+ *     ├─ verify organizationScopeId
+ *     ├─ verify version = latest + 1
+ *     ├─ create version (+ audit record)
+ *     └─ commit (mutation + idempotency + audit atomically)
+ * release(policyId)
+ * ```
+ *
+ * A queued cross-scope caller therefore observes the first caller's
+ * COMMITTED version 1 and receives the cross-scope lineage error;
+ * same-org same-tuple callers still resolve to exactly-one record
+ * via the idempotency replay. Lock ordering is strictly
+ * lineage-mutex → idempotency-key-mutex (never reversed), so no
+ * deadlock is possible.
+ *
  * Rule-set validation (work order §3.1): exactly one rule per
  * dimension — ALL eight (a partial policy would silently zero the
  * unlisted dimensions); every rule validated by the core validator
@@ -172,90 +207,115 @@ export function createReputationPolicyService(
       // Key = the (policyId, version) tuple: retrying the same tuple
       // replays the committed record; concurrent same-tuple creates are
       // serialized by the idempotency store's per-key lock.
+      //
+      // LINEAGE LOCK (NET-W007 PR #14 remediation): the key above is
+      // org-scoped, so it CANNOT serialize concurrent creates of the
+      // same policyId from DIFFERENT organizations. The whole apply —
+      // including the in-tx lineage read, scope check, version check,
+      // create and commit — runs under an ORGANIZATION-INDEPENDENT
+      // `reputation_policy_lineage:{policyId}` mutex on the idempotency
+      // store, so cross-scope concurrent v1 creates serialize: the
+      // queued caller observes the first caller's COMMITTED lineage and
+      // gets the cross-scope error (no fork). See the header doc for the
+      // full sequence.
+      const lineageLockKey = `reputation_policy_lineage:${input.policyId}`;
       const key = `reputation_policy:${input.organizationScopeId}:${input.policyId}:${String(input.version)}`;
-      const applied = await idempotency.applyIdempotent(
-        key,
-        async (ctx) => {
-          const tx = ctx.transaction;
-          const latest = await repository.findLatestVersionWithinTx(
-            input.policyId,
-            input.organizationScopeId,
-            tx,
-          );
-          if (latest) {
-            if (input.version !== latest.version + 1) {
-              throw new ConflictError(
-                `policy lineage ${input.policyId} is at version ${String(latest.version)}; the next version is ${String(latest.version + 1)} (got ${String(input.version)})`,
-                {
-                  policyId: input.policyId,
-                  latestVersion: latest.version,
-                  requestedVersion: input.version,
-                },
-              );
-            }
-          } else {
-            // No version of this lineage exists in the requested scope.
-            if (input.version !== 1) {
-              // Either the lineage lives in ANOTHER organization scope
-              // (cannot be forked across scopes) or it never existed
-              // (cannot start at version > 1).
-              const anywhere = await repository.findLatestVersionWithinTx(
-                input.policyId,
-                undefined,
-                tx,
-              );
-              if (anywhere) {
+      const applied = await idempotency.withLock(lineageLockKey, () =>
+        idempotency.applyIdempotent(
+          key,
+          async (ctx) => {
+            const tx = ctx.transaction;
+            // Read the lineage ORGANIZATION-INDEPENDENTLY (the highest
+            // version of this policyId in ANY scope). The lineage-scope
+            // invariant applies to EVERY create — INCLUDING version 1:
+            // organization B must not be able to start a "new" lineage
+            // under a policyId organization A already owns. (PR #14
+            // remediation: the previous logic read the lineage with the
+            // ORG-SCOPED filter first and only performed the
+            // cross-scope lookup when version > 1 — so a cross-org
+            // VERSION-1 create against an existing lineage bypassed
+            // the check entirely and forked the lineage, even
+            // sequentially. The architect's remediation sequence —
+            // read lineage → verify organizationScopeId → verify
+            // version → create — is now applied to every create.)
+            const lineage = await repository.findLatestVersionWithinTx(
+              input.policyId,
+              undefined,
+              tx,
+            );
+            if (lineage) {
+              if (lineage.organizationScopeId !== input.organizationScopeId) {
+                // The lineage belongs to another organization scope:
+                // it cannot be forked across scopes — for ANY version,
+                // including a fresh "version 1".
                 throw new OpenConError({
                   code: "REPUTATION_POLICY_VALIDATION",
                   classification: "validation",
-                  message: `policy lineage ${input.policyId} belongs to organization scope ${anywhere.organizationScopeId}, not ${input.organizationScopeId}`,
+                  message: `policy lineage ${input.policyId} belongs to organization scope ${lineage.organizationScopeId}, not ${input.organizationScopeId}`,
                   context: {
                     policyId: input.policyId,
-                    lineageScope: anywhere.organizationScopeId,
+                    lineageScope: lineage.organizationScopeId,
                     requestedScope: input.organizationScopeId,
                   },
                 });
               }
-              throw new ConflictError(
-                `policy lineage ${input.policyId} does not exist; a new lineage starts at version 1 (got ${String(input.version)})`,
-                { policyId: input.policyId, requestedVersion: input.version },
-              );
+              // Same scope: versioning is strictly monotonic — every
+              // new version is exactly latest+1.
+              if (input.version !== lineage.version + 1) {
+                throw new ConflictError(
+                  `policy lineage ${input.policyId} is at version ${String(lineage.version)}; the next version is ${String(lineage.version + 1)} (got ${String(input.version)})`,
+                  {
+                    policyId: input.policyId,
+                    latestVersion: lineage.version,
+                    requestedVersion: input.version,
+                  },
+                );
+              }
+            } else {
+              // No version of this lineage exists ANYWHERE: a new
+              // lineage starts at version 1 — never above it.
+              if (input.version !== 1) {
+                throw new ConflictError(
+                  `policy lineage ${input.policyId} does not exist; a new lineage starts at version 1 (got ${String(input.version)})`,
+                  { policyId: input.policyId, requestedVersion: input.version },
+                );
+              }
             }
-          }
-          const record: ReputationScoringPolicy = Object.freeze({
-            id: randomUUID(),
-            policyId: input.policyId,
-            version: input.version,
-            organizationScopeId: input.organizationScopeId,
-            description: input.description?.trim() || null,
-            rules,
-            createdBy: execution.actor?.id ?? "unknown",
-            createdAt: new Date().toISOString(),
-            executionId: execution.executionId,
-            correlationId: execution.correlationId,
-            causationId: execution.causationId,
-          });
-          await repository.createWithinTx(record, tx);
-          const buffer = auditWriter.forTransaction(tx);
-          await buffer.append({
-            eventType: POLICY_VERSION_CREATED,
-            context: execution,
-            actor: execution.actor?.id ?? null,
-            subject: record.id,
-            resourceType: "reputation_scoring_policy",
-            resourceId: record.id,
-            metadata: {
-              policyId: record.policyId,
-              version: record.version,
-              organizationScopeId: record.organizationScopeId,
-              idempotencyRecordId: ctx.recordId,
-              transactionId: tx.transactionId,
-              dimensions: record.rules.map((r) => r.dimension),
-            },
-          });
-          return record;
-        },
-        execution,
+            const record: ReputationScoringPolicy = Object.freeze({
+              id: randomUUID(),
+              policyId: input.policyId,
+              version: input.version,
+              organizationScopeId: input.organizationScopeId,
+              description: input.description?.trim() || null,
+              rules,
+              createdBy: execution.actor?.id ?? "unknown",
+              createdAt: new Date().toISOString(),
+              executionId: execution.executionId,
+              correlationId: execution.correlationId,
+              causationId: execution.causationId,
+            });
+            await repository.createWithinTx(record, tx);
+            const buffer = auditWriter.forTransaction(tx);
+            await buffer.append({
+              eventType: POLICY_VERSION_CREATED,
+              context: execution,
+              actor: execution.actor?.id ?? null,
+              subject: record.id,
+              resourceType: "reputation_scoring_policy",
+              resourceId: record.id,
+              metadata: {
+                policyId: record.policyId,
+                version: record.version,
+                organizationScopeId: record.organizationScopeId,
+                idempotencyRecordId: ctx.recordId,
+                transactionId: tx.transactionId,
+                dimensions: record.rules.map((r) => r.dimension),
+              },
+            });
+            return record;
+          },
+          execution,
+        ),
       );
       logger.info("reputation_policy.version_created", {
         policyId: applied.result.policyId,
