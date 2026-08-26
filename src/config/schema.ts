@@ -26,6 +26,12 @@ export const ConfigSchema = z.object({
   DATABASE_URL: z.string().optional(),
   REDIS_URL: z.string().optional(),
   OBJECT_STORAGE_BUCKET: z.string().optional(),
+  // NET-W005: key for the default HMAC attestation signer/verifier
+  // (src/evidence/hmac-attestation-verifier.ts). Optional — a dev
+  // fallback is used when unset, with a warning in non-test envs.
+  // Production deployments should configure a strong key (or swap the
+  // signer for a real verifier adapter at the composition root).
+  ATTESTATION_SIGNING_KEY: z.string().optional(),
 
   // Observability
   LOG_LEVEL: LogLevelSchema.default("info"),
@@ -50,6 +56,7 @@ export const CONFIG_FIELD_CLASSIFICATIONS: readonly FieldClassification[] = [
   { key: "DATABASE_URL", classification: "secret", required: false },
   { key: "REDIS_URL", classification: "secret", required: false },
   { key: "OBJECT_STORAGE_BUCKET", classification: "secret", required: false },
+  { key: "ATTESTATION_SIGNING_KEY", classification: "secret", required: false },
   { key: "LOG_LEVEL", classification: "optional", required: false },
   { key: "LOG_PRETTY", classification: "optional", required: false },
 ] as const;

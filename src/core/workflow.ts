@@ -90,12 +90,48 @@ export function isTerminalState(state: LifecycleState): boolean {
 }
 
 /**
- * The kind of lifecycle subject. NET-W004 introduces two first-class
- * subjects: opportunities and contributions. Later work items (campaigns,
- * disputes, etc.) may add more. The transition table is parameterized by
- * subject kind so each subject can have its own legal-transition set.
+ * Build the policy-action string for a (subjectKind, from, to) triple
+ * (e.g. "opportunity.transition.draft_to_ready",
+ * "proof_of_value.transition.measuring_to_evaluating"). Centralized in
+ * CORE (pure string vocabulary over the lifecycle types) so the
+ * transition table (workflows domain — the SOLE lifecycle authority)
+ * and domain services that REQUEST transitions (e.g. the evidence
+ * domain's Proof-of-Value service, NET-W005) derive IDENTICAL policy
+ * actions without a domain→domain import. The authorization policies
+ * seeded for a subject kind stay aligned with the transition table by
+ * construction.
  */
-export type LifecycleSubjectKind = "opportunity" | "contribution";
+export function policyActionFor(
+  subjectKind: LifecycleSubjectKind,
+  from: LifecycleState,
+  to: LifecycleState,
+): string {
+  return `${subjectKind}.transition.${from.toLowerCase()}_to_${to.toLowerCase()}`;
+}
+
+/**
+ * Build the audit event name for a (subjectKind, from, to) triple —
+ * identical shape to the policy action (see {@link policyActionFor}).
+ */
+export function auditEventFor(
+  subjectKind: LifecycleSubjectKind,
+  from: LifecycleState,
+  to: LifecycleState,
+): string {
+  return `${subjectKind}.transition.${from.toLowerCase()}_to_${to.toLowerCase()}`;
+}
+
+/**
+ * The kind of lifecycle subject. NET-W004 introduced two first-class
+ * subjects: opportunities and contributions. NET-W005 adds the
+ * Proof-of-Value (the evidence-backed claim object whose lifecycle is
+ * DRAFT → MEASURING → EVALUATING → VERIFIED with REJECTED/CANCELLED
+ * exceptional states — see spec/work-orders/NET-W005.md §3.8). Later
+ * work items (campaigns, disputes, etc.) may add more. The transition
+ * table is parameterized by subject kind so each subject can have its
+ * own legal-transition set.
+ */
+export type LifecycleSubjectKind = "opportunity" | "contribution" | "proof_of_value";
 
 /**
  * The minimal shape of an authoritative lifecycle subject. Domain

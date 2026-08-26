@@ -120,6 +120,7 @@ export function createWorkflowService(
   const {
     opportunityRepository,
     contributionRepository,
+    proofOfValueRepository,
     authorizer,
     auditWriter,
     idempotency,
@@ -127,7 +128,9 @@ export function createWorkflowService(
   } = deps;
 
   function repositoryFor(kind: LifecycleSubject["kind"]): LifecycleRepository {
-    return kind === "opportunity" ? opportunityRepository : contributionRepository;
+    if (kind === "opportunity") return opportunityRepository;
+    if (kind === "contribution") return contributionRepository;
+    return proofOfValueRepository;
   }
 
   /**

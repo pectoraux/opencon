@@ -89,6 +89,30 @@ import type { OpportunityService } from "../opportunities/port.ts";
 import type { ContributionService, OpportunityLookup } from "../contributions/port.ts";
 import type { WorkflowService, TransitionAuthorizer } from "../workflows/port.ts";
 import type { TransitionRequest, TransitionResult } from "../core/workflow.ts";
+// NET-W005 evidence boundary: evidence records (deterministic grades +
+// confidence/uncertainty), provider-neutral outcome claims,
+// verifier-neutral attestations, cryptographic commitments for
+// sensitive material, deterministic aggregation, and the
+// Proof-of-Value model whose lifecycle transitions route through the
+// workflow service (the SOLE lifecycle authority).
+import { createAuthorityEvidenceRepository } from "../evidence/authority-evidence-repository.ts";
+import { createEvidenceService } from "../evidence/evidence-service.ts";
+import { createAuthorityOutcomeClaimRepository } from "../evidence/authority-outcome-claim-repository.ts";
+import { createOutcomeClaimService } from "../evidence/outcome-claim-service.ts";
+import { createAuthorityAttestationRepository } from "../evidence/authority-attestation-repository.ts";
+import { createAttestationService } from "../evidence/attestation-service.ts";
+import { createHmacAttestationSignerVerifier } from "../evidence/hmac-attestation-verifier.ts";
+import { createAuthorityProofOfValueRepository } from "../evidence/authority-proof-of-value-repository.ts";
+import { createProofOfValueService } from "../evidence/proof-of-value-service.ts";
+import type {
+  AttestationService,
+  CreateEvidenceInput,
+  CreateOutcomeClaimInput,
+  EvidenceService,
+  OutcomeClaimService,
+  ProofOfValueService,
+  SubjectLookup,
+} from "../evidence/port.ts";
 
 // Boundary module registrations (composition root imports all).
 import { identityModule } from "../identity/module.ts";
@@ -179,6 +203,11 @@ export interface Runtime {
   readonly opportunityService: OpportunityService;
   readonly contributionService: ContributionService;
   readonly workflowService: WorkflowService;
+  // NET-W005 domain services (exposed for integration/security tests).
+  readonly evidenceService: EvidenceService;
+  readonly outcomeClaimService: OutcomeClaimService;
+  readonly attestationService: AttestationService;
+  readonly proofOfValueService: ProofOfValueService;
   // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
   readonly idempotency: IdempotencyStore;
   initialize(): Promise<readonly { name: string; initialized: boolean }[]>;
@@ -396,9 +425,112 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       };
     },
   };
+  // -- NET-W005 evidence domain wiring --------------------------------
+  // Evidence boundary: evidence records (deterministic grade rule table
+  // + confidence/uncertainty + sensitivity/privacy boundary), outcome
+  // claims (OUT-001 vocabulary), attestations (verifier-neutral
+  // signer/verifier — the HMAC default is a clearly-marked dev/test
+  // implementation; production verifiers arrive as adapters), and the
+  // Proof-of-Value (lifecycle transitions route through the workflow
+  // service — the SOLE lifecycle authority).
+  const evidenceRepo = createAuthorityEvidenceRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("evidence").debug(m, f) },
+  });
+  const evidenceService = createEvidenceService({
+    repository: evidenceRepo,
+    authority: postgresAuthority,
+    auditWriter,
+    logger: logger.forModule("evidence"),
+  });
+  const outcomeClaimRepo = createAuthorityOutcomeClaimRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("evidence").debug(m, f) },
+  });
+  const outcomeClaimService = createOutcomeClaimService({
+    repository: outcomeClaimRepo,
+    evidenceRepository: evidenceRepo,
+    authority: postgresAuthority,
+    auditWriter,
+    logger: logger.forModule("evidence"),
+  });
+  const attestationRepo = createAuthorityAttestationRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("evidence").debug(m, f) },
+  });
+  const attestationSignerKey =
+    (snapshot as { readonly attestationSigningKey?: string }).attestationSigningKey ??
+    "dev-insecure-attestation-key";
+  if (
+    snapshot.environment !== "test" &&
+    !(snapshot as { readonly attestationSigningKey?: string }).attestationSigningKey
+  ) {
+    logger.warn("attestation.signing_key_fallback", {
+      message:
+        "ATTESTATION_SIGNING_KEY is not configured — using the insecure development default (configure a strong key or swap the signer adapter in production)",
+    });
+  }
+  const hmacSignerVerifier = createHmacAttestationSignerVerifier({
+    key: attestationSignerKey,
+  });
+  const attestationService = createAttestationService({
+    repository: attestationRepo,
+    evidenceRepository: evidenceRepo,
+    signer: hmacSignerVerifier,
+    verifier: hmacSignerVerifier,
+    authority: postgresAuthority,
+    auditWriter,
+    logger: logger.forModule("evidence"),
+  });
+  // Proof-of-Value: the subject lookup adapter delegates to the wired
+  // opportunity/contribution repositories WITHOUT a domain→domain
+  // import (the same structural-interface pattern as OpportunityLookup
+  // in the contributions domain).
+  const povSubjectLookup: SubjectLookup = {
+    async getOrganizationScope(subjectType, subjectId) {
+      if (subjectType === "opportunity") {
+        const opp = await opportunityRepo.findById(subjectId);
+        return opp ? opp.organizationScopeId : null;
+      }
+      if (subjectType === "contribution") {
+        const c = await contributionRepo.findById(subjectId);
+        return c ? c.organizationScopeId : null;
+      }
+      return null;
+    },
+    async exists(subjectType, subjectId) {
+      if (subjectType === "opportunity") return opportunityRepo.exists(subjectId);
+      if (subjectType === "contribution") return contributionRepo.exists(subjectId);
+      return false;
+    },
+  };
+  const proofOfValueRepo = createAuthorityProofOfValueRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("evidence").debug(m, f) },
+  });
+  const proofOfValueService = createProofOfValueService({
+    repository: proofOfValueRepo,
+    evidenceRepository: evidenceRepo,
+    outcomeClaimRepository: outcomeClaimRepo,
+    attestationRepository: attestationRepo,
+    subjectLookup: povSubjectLookup,
+    workflow: {
+      // Delegate to the SAME workflow service instance (the /workflows
+      // boundary is the SOLE lifecycle authority for proof_of_value
+      // transitions, exactly as for opportunities/contributions).
+      async requestTransition(request, execution) {
+        return workflowService.requestTransition(request, execution);
+      },
+    },
+    authority: postgresAuthority,
+    auditWriter,
+    logger: logger.forModule("evidence"),
+  });
+
   const workflowService = createWorkflowService({
     opportunityRepository: createLifecycleRepository(opportunityRepo),
     contributionRepository: createLifecycleRepository(contributionRepo),
+    proofOfValueRepository: createLifecycleRepository(proofOfValueRepo),
     authorizer: transitionAuthorizer,
     auditWriter,
     idempotency,
@@ -627,6 +759,265 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         transactionId: result.transactionId,
       };
     },
+    // -- NET-W005 evidence/proof-of-value commands -----------------------
+    async createEvidence(execution, actorPersonId, input) {
+      const evidence = await evidenceService.createEvidence(execution, {
+        organizationScopeId: input.organizationScopeId,
+        ownerId: actorPersonId,
+        subjectReference: input.subjectReference,
+        provenance: input.provenance as unknown as CreateEvidenceInput["provenance"],
+        confidence: input.confidence as unknown as CreateEvidenceInput["confidence"],
+        sensitivity: input.sensitivity as CreateEvidenceInput["sensitivity"],
+        payload: input.payload,
+        sensitivePayload: input.sensitivePayload,
+        commitment: input.commitment as unknown as CreateEvidenceInput["commitment"],
+        payloadReference: input.payloadReference,
+      });
+      return {
+        id: evidence.id,
+        organizationScopeId: evidence.organizationScopeId,
+        ownerId: evidence.ownerId,
+        subjectReference: evidence.subjectReference,
+        provenance: evidence.provenance as unknown as Record<string, unknown>,
+        grade: evidence.grade,
+        confidence: evidence.confidence as unknown as Record<string, unknown>,
+        sensitivity: evidence.sensitivity,
+        // For sensitive evidence this is null BY CONSTRUCTION (the raw
+        // material is never stored, so it can never be returned).
+        payload: evidence.payload as Record<string, unknown> | null,
+        commitment: evidence.commitment as unknown as Record<string, unknown> | null,
+        payloadReference: evidence.payloadReference,
+        createdAt: evidence.createdAt,
+      };
+    },
+    async getEvidence(execution, id) {
+      try {
+        const evidence = await evidenceService.getEvidence(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return {
+          id: evidence.id,
+          organizationScopeId: evidence.organizationScopeId,
+          ownerId: evidence.ownerId,
+          subjectReference: evidence.subjectReference,
+          provenance: evidence.provenance as unknown as Record<string, unknown>,
+          grade: evidence.grade,
+          confidence: evidence.confidence as unknown as Record<string, unknown>,
+          sensitivity: evidence.sensitivity,
+          payload: evidence.payload as Record<string, unknown> | null,
+          commitment: evidence.commitment as unknown as Record<string, unknown> | null,
+          payloadReference: evidence.payloadReference,
+          createdAt: evidence.createdAt,
+        };
+      } catch {
+        return null;
+      }
+    },
+    async verifyEvidenceCommitment(execution, id, presentedPayload) {
+      const result = await evidenceService.verifyEvidenceCommitment(
+        getExecutionContext() ?? execution,
+        id,
+        presentedPayload,
+      );
+      return { evidenceId: result.evidenceId, valid: result.valid, reason: result.reason };
+    },
+    async createOutcomeClaim(execution, actorPersonId, input) {
+      const claim = await outcomeClaimService.createOutcomeClaim(execution, {
+        organizationScopeId: input.organizationScopeId,
+        claimantId: actorPersonId,
+        subjectReference: input.subjectReference,
+        outcomeType: input.outcomeType as CreateOutcomeClaimInput["outcomeType"],
+        claimedValue: input.claimedValue,
+        confidence: input.confidence as unknown as CreateOutcomeClaimInput["confidence"],
+        evidenceIds: input.evidenceIds,
+        statement: input.statement,
+      });
+      return {
+        id: claim.id,
+        organizationScopeId: claim.organizationScopeId,
+        claimantId: claim.claimantId,
+        subjectReference: claim.subjectReference,
+        outcomeType: claim.outcomeType,
+        claimedValue: claim.claimedValue,
+        confidence: claim.confidence as unknown as Record<string, unknown>,
+        evidenceIds: claim.evidenceIds,
+        statement: claim.statement,
+        createdAt: claim.createdAt,
+        updatedAt: claim.updatedAt,
+        version: claim.version,
+      };
+    },
+    async getOutcomeClaim(execution, id) {
+      try {
+        const claim = await outcomeClaimService.getOutcomeClaim(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return {
+          id: claim.id,
+          organizationScopeId: claim.organizationScopeId,
+          claimantId: claim.claimantId,
+          subjectReference: claim.subjectReference,
+          outcomeType: claim.outcomeType,
+          claimedValue: claim.claimedValue,
+          confidence: claim.confidence as unknown as Record<string, unknown>,
+          evidenceIds: claim.evidenceIds,
+          statement: claim.statement,
+          createdAt: claim.createdAt,
+          updatedAt: claim.updatedAt,
+          version: claim.version,
+        };
+      } catch {
+        return null;
+      }
+    },
+    async attachEvidenceToClaim(execution, _actorPersonId, claimId, evidenceId) {
+      const claim = await outcomeClaimService.attachEvidence(
+        execution,
+        claimId,
+        evidenceId,
+      );
+      return {
+        id: claim.id,
+        organizationScopeId: claim.organizationScopeId,
+        claimantId: claim.claimantId,
+        subjectReference: claim.subjectReference,
+        outcomeType: claim.outcomeType,
+        claimedValue: claim.claimedValue,
+        confidence: claim.confidence as unknown as Record<string, unknown>,
+        evidenceIds: claim.evidenceIds,
+        statement: claim.statement,
+        createdAt: claim.createdAt,
+        updatedAt: claim.updatedAt,
+        version: claim.version,
+      };
+    },
+    async createAttestation(execution, _actorPersonId, input) {
+      const attestation = await attestationService.createAttestation(execution, {
+        organizationScopeId: input.organizationScopeId,
+        verifierId: input.verifierId,
+        statement: input.statement,
+        evidenceIds: input.evidenceIds,
+      });
+      return {
+        id: attestation.id,
+        organizationScopeId: attestation.organizationScopeId,
+        verifierId: attestation.verifierId,
+        statement: attestation.statement,
+        evidenceIds: attestation.evidenceIds,
+        algorithm: attestation.algorithm,
+        signature: attestation.signature,
+        signedAt: attestation.signedAt,
+        createdAt: attestation.createdAt,
+      };
+    },
+    async verifyAttestation(execution, id) {
+      const result = await attestationService.verifyAttestation(
+        getExecutionContext() ?? execution,
+        id,
+      );
+      return { attestationId: result.attestationId, valid: result.valid, reason: result.reason };
+    },
+    async createProofOfValue(execution, actorPersonId, input) {
+      const proof = await proofOfValueService.createProofOfValue(execution, {
+        organizationScopeId: input.organizationScopeId,
+        ownerId: actorPersonId,
+        subjectReference: input.subjectReference,
+        outcomeClaimIds: input.outcomeClaimIds,
+        evidenceIds: input.evidenceIds,
+      });
+      return {
+        id: proof.id,
+        organizationScopeId: proof.organizationScopeId,
+        ownerId: proof.ownerId,
+        subjectReference: proof.subjectReference,
+        outcomeClaimIds: proof.outcomeClaimIds,
+        evidenceIds: proof.evidenceIds,
+        attestationIds: proof.attestationIds,
+        state: proof.state,
+        version: proof.version,
+        createdAt: proof.createdAt,
+        updatedAt: proof.updatedAt,
+      };
+    },
+    async getProofOfValue(execution, id) {
+      try {
+        const proof = await proofOfValueService.getProofOfValue(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return {
+          id: proof.id,
+          organizationScopeId: proof.organizationScopeId,
+          ownerId: proof.ownerId,
+          subjectReference: proof.subjectReference,
+          outcomeClaimIds: proof.outcomeClaimIds,
+          evidenceIds: proof.evidenceIds,
+          attestationIds: proof.attestationIds,
+          state: proof.state,
+          version: proof.version,
+          createdAt: proof.createdAt,
+          updatedAt: proof.updatedAt,
+          aggregation: proof.aggregation as unknown as Record<string, unknown> | null,
+        };
+      } catch {
+        return null;
+      }
+    },
+    async attachEvidenceToProof(execution, _actorPersonId, proofId, evidenceId) {
+      const proof = await proofOfValueService.attachEvidence(execution, proofId, evidenceId);
+      return {
+        id: proof.id,
+        organizationScopeId: proof.organizationScopeId,
+        ownerId: proof.ownerId,
+        subjectReference: proof.subjectReference,
+        outcomeClaimIds: proof.outcomeClaimIds,
+        evidenceIds: proof.evidenceIds,
+        attestationIds: proof.attestationIds,
+        state: proof.state,
+        version: proof.version,
+        createdAt: proof.createdAt,
+        updatedAt: proof.updatedAt,
+      };
+    },
+    async aggregateProofEvidence(execution, _actorPersonId, proofId) {
+      const proof = await proofOfValueService.aggregateEvidence(execution, proofId);
+      return {
+        id: proof.id,
+        organizationScopeId: proof.organizationScopeId,
+        ownerId: proof.ownerId,
+        subjectReference: proof.subjectReference,
+        outcomeClaimIds: proof.outcomeClaimIds,
+        evidenceIds: proof.evidenceIds,
+        attestationIds: proof.attestationIds,
+        state: proof.state,
+        version: proof.version,
+        createdAt: proof.createdAt,
+        updatedAt: proof.updatedAt,
+        aggregation: proof.aggregation as unknown as Record<string, unknown> | null,
+      };
+    },
+    async attachAttestationToProof(execution, _actorPersonId, proofId, attestationId) {
+      const proof = await proofOfValueService.attachAttestation(
+        execution,
+        proofId,
+        attestationId,
+      );
+      return {
+        id: proof.id,
+        organizationScopeId: proof.organizationScopeId,
+        ownerId: proof.ownerId,
+        subjectReference: proof.subjectReference,
+        outcomeClaimIds: proof.outcomeClaimIds,
+        evidenceIds: proof.evidenceIds,
+        attestationIds: proof.attestationIds,
+        state: proof.state,
+        version: proof.version,
+        createdAt: proof.createdAt,
+        updatedAt: proof.updatedAt,
+      };
+    },
   };
 
   const registry = createModuleRegistry(snapshot, logger);
@@ -719,6 +1110,11 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     opportunityService,
     contributionService,
     workflowService,
+    // NET-W005 domain services.
+    evidenceService,
+    outcomeClaimService,
+    attestationService,
+    proofOfValueService,
     // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
     idempotency,
     async initialize() {

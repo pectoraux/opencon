@@ -131,12 +131,20 @@ export interface TransitionAuthorizer {
  * service + idempotency store are all provider-neutral contracts (core
  * or domain tier). The bootstrap composition root wires the concrete
  * implementations.
+ *
+ * NET-W005 adds the Proof-of-Value lifecycle repository: the PoV
+ * lifecycle (DRAFT → MEASURING → EVALUATING → VERIFIED + REJECTED/
+ * CANCELLED, spec/work-orders/NET-W005.md §3.8) transitions through the
+ * SAME workflow machinery (authorization, idempotency, optimistic
+ * concurrency, audit lineage) as opportunities and contributions.
  */
 export interface WorkflowServiceDeps {
   /** Opportunity lifecycle repository (used for opportunity transitions). */
   readonly opportunityRepository: LifecycleRepository;
   /** Contribution lifecycle repository (used for contribution transitions). */
   readonly contributionRepository: LifecycleRepository;
+  /** Proof-of-Value lifecycle repository (used for proof_of_value transitions). */
+  readonly proofOfValueRepository: LifecycleRepository;
   /** Server-side authorization (deny-by-default). */
   readonly authorizer: TransitionAuthorizer;
   /**

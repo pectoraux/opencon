@@ -34,3 +34,9 @@ export * from "./trace.ts";
 // lifecycle subject shape; the transition table + state machine live in
 // the workflows boundary (the SOLE lifecycle authority).
 export * from "./workflow.ts";
+// NET-W005 shared evidence vocabulary (standard outcome types OUT-001,
+// evidence source types + grades, confidence estimates with uncertainty
+// EVID-005, provenance records EVID-002, cryptographic commitments
+// EVID-006). The /evidence domain implements the behaviour; later work
+// items (/outcomes, /reputation, /settlement) consume the vocabulary.
+export * from "./evidence.ts";
