@@ -29,6 +29,7 @@ import { createLifecycleRepository } from "../../src/workflows/lifecycle-reposit
 import { createAuthorityOpportunityRepository } from "../../src/opportunities/authority-opportunity-repository.ts";
 import { createAuthorityContributionRepository } from "../../src/contributions/authority-contribution-repository.ts";
 import { createAuthorityProofOfValueRepository } from "../../src/evidence/authority-proof-of-value-repository.ts";
+import { createAuthorityMeasuredOutcomeRepository } from "../../src/outcomes/authority-measured-outcome-repository.ts";
 import { createPostgresIdempotencyStore } from "../../src/persistence/idempotency-store.ts";
 import { createEvidenceService } from "../../src/evidence/evidence-service.ts";
 import { createAuthorityEvidenceRepository } from "../../src/evidence/authority-evidence-repository.ts";
@@ -338,6 +339,9 @@ describe("NET-W005-AC-07 failure/replay/concurrency", () => {
       proofOfValueRepository: createLifecycleRepository(
         createAuthorityProofOfValueRepository({ authority: failingAuthority }),
       ),
+      outcomeMeasurementRepository: createLifecycleRepository(
+        createAuthorityMeasuredOutcomeRepository({ authority: failingAuthority }),
+      ),
       authorizer: allowAllAuthorizer,
       auditWriter: createTransactionalAuditWriter({
         underlying: harness.runtime.auditWriter,
@@ -490,6 +494,9 @@ describe("NET-W005-AC-07 failure/replay/concurrency", () => {
         ),
         proofOfValueRepository: createLifecycleRepository(
           createAuthorityProofOfValueRepository({ authority: failingAuthority }),
+        ),
+        outcomeMeasurementRepository: createLifecycleRepository(
+          createAuthorityMeasuredOutcomeRepository({ authority: failingAuthority }),
         ),
         authorizer: allowAllAuthorizer,
         auditWriter: createTransactionalAuditWriter({

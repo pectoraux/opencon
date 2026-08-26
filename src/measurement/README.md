@@ -1,22 +1,37 @@
 # `measurement` boundary
 
-**Tier:** adapter
-**Authority:** measurement provider integrations; semantics remain in /outcomes
-**Architecture ref:** `spec/architecture.md` §18 (Module ownership)
-**Concrete behaviour:** deferred to NET-W006/W022
+**Tier:** adapter (the root `port.ts` / `index.ts` / `module.ts` are the
+neutral integration surface)
+**Authority:** measurement provider integrations; **measurement
+semantics remain in `/outcomes`** (architecture §18; architecture-lock
+§14 invariant 25)
+**Architecture ref:** `spec/architecture.md` §13, §18;
+`spec/architecture-lock.md` §14
+**Work order:** `spec/work-orders/NET-W006.md` §3.7
 
-## Scope in NET-W001
+## Scope after NET-W006
 
-This boundary is established as an explicit module with a documented
-public interface (see `port.ts`) and a skeletal `Module` registration
-(`module.ts`). **No domain logic is implemented in NET-W001** per the
-work order explicit non-goals (§5). The boundary exists so that:
+`port.ts` declares the provider-neutral `MeasurementProviderAdapter`
+contract. Every external measurement platform integration implements
+it; the `/outcomes` domain consumes ONLY this neutral port (domain →
+neutral is allowed by the tier matrix; provider SDKs/types never cross
+into the domain — architecture-lock §14 invariant 24).
 
-- the architecture enforcement check can verify dependency direction;
-- future work items have a stable home for their contracts and rules;
-- the module registry reports the boundary as initialized at startup.
+Provider observations are NORMALIZED facts
+(`ProviderObservationReport`): outcome type from the OUT-001
+vocabulary, measured value + unit, confidence with uncertainty, and
+method + methodVersion provenance. Raw provider payloads stay on the
+provider side of the adapter boundary.
+
+The reference adapter (`providers/echo-measurement-provider.ts`)
+reports no observations; it exists so the composition root has a real
+adapter to wire and health-check, and as a compile-checked reference
+for later providers. Concrete platform adapters — browser/platform
+attribution and iOS attribution (requirements ADAPTER-003..004) —
+arrive in NET-W022 under `providers/`.
 
 ## Dependencies
 
-None beyond the shared `core` contracts. Cross-domain access will
-occur through declared interfaces (added in later work items).
+Core contracts (`src/core/measurement.ts`, `src/core/evidence.ts`) —
+vocabulary only. No domain imports (the semantics live in `/outcomes`;
+this boundary only carries the integration surface).

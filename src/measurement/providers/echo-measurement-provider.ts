@@ -1,26 +1,39 @@
-import type { MeasurementInput, MeasurementPort, MeasurementResult } from "../port.ts";
-import type { ProviderAdapter } from "../../core/adapter.ts";
+/**
+ * Echo measurement provider — a REFERENCE adapter satisfying the
+ * provider-neutral MeasurementProviderAdapter contract (NET-W006
+ * §3.7).
+ *
+ * This adapter reports NO observations: it exists so the composition
+ * root has a real adapter to wire and health-check, and so later work
+ * items (NET-W022: browser/platform + iOS attribution adapters) have
+ * a compile-checked reference implementation of the contract. Real
+ * providers live beside this file and keep all platform-specific
+ * behavior inside the adapter tier (architecture-lock §14.24/§14.25).
+ */
 
-export class EchoMeasurementProvider implements MeasurementPort, ProviderAdapter {
-  public readonly boundary = "measurement" as const;
-  public readonly readiness = "skeleton" as const;
+import type {
+  MeasurementProviderAdapter,
+  ProviderObservationFetchResult,
+  ProviderObservationFetchRequest,
+} from "../port.ts";
+
+export class EchoMeasurementProvider implements MeasurementProviderAdapter {
   public readonly info = {
     kind: "measurement" as const,
     provider: "echo",
-    version: "0.1.0",
+    version: "0.2.0",
   };
 
   public async initialize(): Promise<void> {}
+
   public async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
     return { ok: true };
   }
-  public async measure(input: MeasurementInput): Promise<MeasurementResult> {
-    return {
-      subject: input.subject,
-      value: 0,
-      confidence: 0,
-      provenance: "echo",
-    };
+
+  public async fetchObservations(
+    _request: ProviderObservationFetchRequest,
+  ): Promise<ProviderObservationFetchResult> {
+    return { observations: [], nextCursor: null };
   }
 }
 

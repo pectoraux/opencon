@@ -66,12 +66,26 @@ const NET_W004_DOMAINS = ["opportunities", "contributions", "workflows"];
 // economic value attaches in NET-W008).
 const NET_W005_DOMAINS = ["evidence"];
 
-// Domains still deferred past NET-W005 (must remain skeletons).
+// Domains implemented in NET-W006 (no longer skeletons). The outcomes
+// domain introduces the MEASUREMENT semantics layer (first-class
+// immutable/append-corrected outcome observations, distinct
+// deterministic/probabilistic/experimental attribution representation,
+// experiments/holdouts + incrementality with derived causal status,
+// explicit counterfactual baselines, provider-neutral provider
+// ingestion, and the measured-outcome maturation lifecycle routed
+// through /workflows). It introduces NO economically material
+// behaviour: measurement ≠ economic truth — no credit issuance, no
+// settlement, no reputation mutation, no campaign delivery, no
+// pricing (NET-W006 work order §5 non-goals).
+const NET_W006_DOMAINS = ["outcomes"];
+
+// Domains still deferred past NET-W006 (must remain skeletons).
 const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
   (d) =>
     !NET_W002_DOMAINS.includes(d) &&
     !NET_W004_DOMAINS.includes(d) &&
-    !NET_W005_DOMAINS.includes(d),
+    !NET_W005_DOMAINS.includes(d) &&
+    !NET_W006_DOMAINS.includes(d),
 );
 
 // Patterns that would indicate economically/material domain logic,
@@ -167,6 +181,25 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
       // authorized transitions + audit lineage).
       expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
       expect(moduleExport.describe?.() ?? "").toMatch(/NET-W004/i);
+    }
+  });
+
+  test("NET-W006 domain modules are non-skeletal (tier domain, no 'skeleton' marker, reference NET-W006)", async () => {
+    for (const dir of NET_W006_DOMAINS) {
+      const modulePath = join(SRC, dir, "module.ts");
+      expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
+      const mod = await import(`../../src/${dir}/module.ts`);
+      const moduleExport = Object.values(mod)[0] as {
+        name: string;
+        tier: string;
+        describe?: () => string;
+      };
+      expect(moduleExport.tier).toBe("domain");
+      // NET-W006 modules are no longer skeletons — they carry the
+      // measurement-semantics behaviour (observations, attribution,
+      // experiments/incrementality, baselines, maturation lifecycle).
+      expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
+      expect(moduleExport.describe?.() ?? "").toMatch(/NET-W006/);
     }
   });
 

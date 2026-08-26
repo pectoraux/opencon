@@ -716,6 +716,311 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // -- NET-W006 outcomes/measurement endpoints ----------------------
+    // Every protected mutation is guarded by guardMutation() exactly
+    // like the NET-W004/W005 endpoints. Lifecycle transitions for
+    // measured outcomes go through the EXISTING /api/workflows/
+    // transitions endpoint (subjectKind "outcome_measurement") — the
+    // SOLE lifecycle entry point.
+
+    // POST /api/outcome-observations — create an observation (protected).
+    if (path === "/api/outcome-observations" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "outcomeObservation.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseOutcomeObservationInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createOutcomeObservation(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/outcome-observations/:id — fetch an observation (public).
+    if (path.startsWith("/api/outcome-observations/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/outcome-observations/".length);
+      const view = await opts.commands.getOutcomeObservation(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `outcome observation not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/outcome-observations/:id/corrections — correct an
+    // observation (append-corrected; protected).
+    if (
+      path.startsWith("/api/outcome-observations/") &&
+      path.endsWith("/corrections") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const observationId = path.slice("/api/outcome-observations/".length, -"/corrections".length);
+      const guarded = await guardMutation(ctx, req, "outcomeObservation.correct", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseOutcomeObservationInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.correctOutcomeObservation(guarded.execution, guarded.personId, observationId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // POST /api/outcome-observations:ingest — ingest provider
+    // observations through the neutral adapter (protected).
+    if (path === "/api/outcome-observations:ingest" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "outcomeObservation.ingest", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = body as Record<string, unknown>;
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.ingestProviderObservations(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          subjectReference: parseSubjectReference(obj),
+          since: typeof obj.since === "string" ? obj.since : undefined,
+        }),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // POST /api/measurement-experiments — create an experiment (protected).
+    if (path === "/api/measurement-experiments" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "measurementExperiment.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseMeasurementExperimentInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createMeasurementExperiment(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/measurement-experiments/:id — fetch an experiment (public).
+    if (path.startsWith("/api/measurement-experiments/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/measurement-experiments/".length);
+      const view = await opts.commands.getMeasurementExperiment(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `measurement experiment not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/measurement-experiments/:id/start|complete|invalidate —
+    // experiment status changes (protected, optimistic concurrency).
+    for (const [suffix, action, command] of [
+      ["start", "measurementExperiment.start", "startMeasurementExperiment"],
+      ["complete", "measurementExperiment.complete", "completeMeasurementExperiment"],
+      ["invalidate", "measurementExperiment.invalidate", "invalidateMeasurementExperiment"],
+    ] as const) {
+      if (
+        path.startsWith("/api/measurement-experiments/") &&
+        path.endsWith(`/${suffix}`) &&
+        method === "POST" &&
+        opts.commands
+      ) {
+        const commands = opts.commands;
+        const experimentId = path.slice("/api/measurement-experiments/".length, -(`/${suffix}`.length));
+        const guarded = await guardMutation(ctx, req, action, "*", res);
+        if (!guarded) return true;
+        const body = await readBody(req);
+        const obj = (body ?? {}) as Record<string, unknown>;
+        const input = {
+          expectedVersion: numField(obj, "expectedVersion"),
+          reason: typeof obj.reason === "string" ? obj.reason : undefined,
+        };
+        const view = await runWithExecutionContextAsync(guarded.execution, () =>
+          command === "startMeasurementExperiment"
+            ? commands.startMeasurementExperiment(guarded.execution, guarded.personId, experimentId, input)
+            : command === "completeMeasurementExperiment"
+              ? commands.completeMeasurementExperiment(guarded.execution, guarded.personId, experimentId, input)
+              : commands.invalidateMeasurementExperiment(guarded.execution, guarded.personId, experimentId, input),
+        );
+        await send(res, 200, view);
+        return true;
+      }
+    }
+
+    // POST /api/attributions — create an attribution (protected).
+    if (path === "/api/attributions" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "attribution.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseAttributionInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createAttribution(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/attributions/:id — fetch an attribution (public).
+    if (path.startsWith("/api/attributions/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/attributions/".length);
+      const view = await opts.commands.getAttribution(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `attribution not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/incrementality-observations — create an incrementality
+    // observation (protected).
+    if (path === "/api/incrementality-observations" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "incrementality.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseIncrementalityInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createIncrementalityObservation(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/incrementality-observations/:id — fetch (public).
+    if (path.startsWith("/api/incrementality-observations/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/incrementality-observations/".length);
+      const view = await opts.commands.getIncrementalityObservation(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `incrementality observation not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/counterfactual-baselines — create a counterfactual/
+    // baseline (protected).
+    if (path === "/api/counterfactual-baselines" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "baseline.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseCounterfactualBaselineInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createCounterfactualBaseline(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/counterfactual-baselines/:id — fetch (public).
+    if (path.startsWith("/api/counterfactual-baselines/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/counterfactual-baselines/".length);
+      const view = await opts.commands.getCounterfactualBaseline(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `counterfactual baseline not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/measured-outcomes — create a measured outcome (protected).
+    if (path === "/api/measured-outcomes" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "measuredOutcome.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseMeasuredOutcomeInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createMeasuredOutcome(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/measured-outcomes/:id — fetch the detailed view (public).
+    if (path.startsWith("/api/measured-outcomes/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/measured-outcomes/".length);
+      const view = await opts.commands.getMeasuredOutcome(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `measured outcome not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/measured-outcomes/:id/observations|attributions|
+    // baselines|incrementality — attach records (append-only, protected).
+    for (const [suffix, action, kind] of [
+      ["observations", "measuredOutcome.attachObservation", "observation"],
+      ["attributions", "measuredOutcome.attachAttribution", "attribution"],
+      ["baselines", "measuredOutcome.attachBaseline", "baseline"],
+      ["incrementality", "measuredOutcome.attachIncrementality", "incrementality"],
+    ] as const) {
+      if (
+        path.startsWith("/api/measured-outcomes/") &&
+        path.endsWith(`/${suffix}`) &&
+        method === "POST" &&
+        opts.commands
+      ) {
+        const commands = opts.commands;
+        const measurementId = path.slice("/api/measured-outcomes/".length, -(`/${suffix}`.length));
+        const guarded = await guardMutation(ctx, req, action, "*", res);
+        if (!guarded) return true;
+        const body = await readBody(req);
+        const obj = body as Record<string, unknown>;
+        const attachKey =
+          kind === "observation"
+            ? "observationId"
+            : kind === "attribution"
+              ? "attributionId"
+              : kind === "baseline"
+                ? "baselineId"
+                : "incrementalityId";
+        const attachId = obj[attachKey];
+        if (typeof attachId !== "string" || !attachId.trim()) {
+          throw apiValidationError(`field "${attachKey}" must be a non-empty string`);
+        }
+        const view = await runWithExecutionContextAsync(guarded.execution, () =>
+          kind === "observation"
+            ? commands.attachObservationToMeasurement(guarded.execution, guarded.personId, measurementId, attachId)
+            : kind === "attribution"
+              ? commands.attachAttributionToMeasurement(guarded.execution, guarded.personId, measurementId, attachId)
+              : kind === "baseline"
+                ? commands.attachBaselineToMeasurement(guarded.execution, guarded.personId, measurementId, attachId)
+                : commands.attachIncrementalityToMeasurement(guarded.execution, guarded.personId, measurementId, attachId),
+        );
+        await send(res, 200, view);
+        return true;
+      }
+    }
+
+    // POST /api/measured-outcomes/:id/rollup — record the deterministic
+    // rollup (protected).
+    if (
+      path.startsWith("/api/measured-outcomes/") &&
+      path.endsWith("/rollup") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const measurementId = path.slice("/api/measured-outcomes/".length, -"/rollup".length);
+      const guarded = await guardMutation(ctx, req, "measuredOutcome.recordRollup", "*", res);
+      if (!guarded) return true;
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recordMeasurementRollup(guarded.execution, guarded.personId, measurementId),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
     return false;
   }
 
@@ -763,9 +1068,10 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
     if (
       subjectKind !== "opportunity" &&
       subjectKind !== "contribution" &&
-      subjectKind !== "proof_of_value"
+      subjectKind !== "proof_of_value" &&
+      subjectKind !== "outcome_measurement"
     ) {
-      throw apiValidationError(`subjectKind must be "opportunity", "contribution" or "proof_of_value" (got ${String(subjectKind)})`);
+      throw apiValidationError(`subjectKind must be "opportunity", "contribution", "proof_of_value" or "outcome_measurement" (got ${String(subjectKind)})`);
     }
     const targetState = strField(obj, "targetState");
     const expectedVersion = numField(obj, "expectedVersion");
@@ -879,6 +1185,183 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       subjectReference: parseSubjectReference(obj),
       outcomeClaimIds: Array.isArray(obj.outcomeClaimIds) ? (obj.outcomeClaimIds as string[]) : undefined,
       evidenceIds: Array.isArray(obj.evidenceIds) ? (obj.evidenceIds as string[]) : undefined,
+    };
+  }
+
+  // -- NET-W006 request-body parsers ----------------------------------
+
+  /** Parse the shared measurement-provenance shape. */
+  function parseProvenanceField(obj: Record<string, unknown>): Readonly<Record<string, unknown>> {
+    const provenance = obj.provenance;
+    if (!provenance || typeof provenance !== "object") {
+      throw apiValidationError('field "provenance" must be an object with sourceType, method and methodVersion');
+    }
+    const p = provenance as Record<string, unknown>;
+    if (typeof p.sourceType !== "string" || !p.sourceType.trim()) {
+      throw apiValidationError('field "provenance.sourceType" must be a non-empty string');
+    }
+    if (typeof p.method !== "string" || !p.method.trim()) {
+      throw apiValidationError('field "provenance.method" must be a non-empty string');
+    }
+    if (typeof p.methodVersion !== "string" || !p.methodVersion.trim()) {
+      throw apiValidationError('field "provenance.methodVersion" must be a non-empty string');
+    }
+    return p;
+  }
+
+  function parseOutcomeObservationInput(body: unknown): import("./port.ts").ApiCreateOutcomeObservationInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const observedValue = obj.observedValue;
+    if (!observedValue || typeof observedValue !== "object") {
+      throw apiValidationError('field "observedValue" must be an object with value and unit');
+    }
+    const ov = observedValue as Record<string, unknown>;
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      subjectReference: parseSubjectReference(obj),
+      outcomeType: strField(obj, "outcomeType"),
+      outcomeClaimId: typeof obj.outcomeClaimId === "string" ? obj.outcomeClaimId : undefined,
+      evidenceId: typeof obj.evidenceId === "string" ? obj.evidenceId : undefined,
+      observedValue: {
+        value: numField(ov, "value"),
+        unit: strField(ov, "unit"),
+      },
+      confidence: parseConfidence(obj),
+      provenance: parseProvenanceField(obj),
+    };
+  }
+
+  function parseMeasurementExperimentInput(body: unknown): import("./port.ts").ApiCreateMeasurementExperimentInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      experimentType: strField(obj, "experimentType"),
+      hypothesis: typeof obj.hypothesis === "string" ? obj.hypothesis : undefined,
+    };
+  }
+
+  function parseAttributionInput(body: unknown): import("./port.ts").ApiCreateAttributionInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const attributionValue = obj.attributionValue;
+    if (!attributionValue || typeof attributionValue !== "object") {
+      throw apiValidationError('field "attributionValue" must be an object with value and unit');
+    }
+    const av = attributionValue as Record<string, unknown>;
+    const deterministicLink = obj.deterministicLink;
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      observationId: strField(obj, "observationId"),
+      attributedSubject: parseSubjectReference(obj),
+      mode: strField(obj, "mode"),
+      attributionValue: {
+        value: numField(av, "value"),
+        unit: strField(av, "unit"),
+      },
+      confidence: parseConfidence(obj),
+      provenance: parseProvenanceField(obj),
+      deterministicLink:
+        deterministicLink && typeof deterministicLink === "object"
+          ? deterministicLink as { linkType: string; linkIdentifier: string }
+          : undefined,
+      experimentId: typeof obj.experimentId === "string" ? obj.experimentId : undefined,
+      evidenceIds: Array.isArray(obj.evidenceIds) ? (obj.evidenceIds as string[]) : undefined,
+    };
+  }
+
+  function parseIncrementalityInput(body: unknown): import("./port.ts").ApiCreateIncrementalityObservationInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const lift = obj.lift;
+    if (!lift || typeof lift !== "object") {
+      throw apiValidationError('field "lift" must be an object with value and unit');
+    }
+    const baselineValue = obj.baselineValue;
+    if (!baselineValue || typeof baselineValue !== "object") {
+      throw apiValidationError('field "baselineValue" must be an object with value and unit');
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      subjectReference: parseSubjectReference(obj),
+      outcomeType: strField(obj, "outcomeType"),
+      lift: {
+        value: numField(lift as Record<string, unknown>, "value"),
+        unit: strField(lift as Record<string, unknown>, "unit"),
+      },
+      baselineValue: {
+        value: numField(baselineValue as Record<string, unknown>, "value"),
+        unit: strField(baselineValue as Record<string, unknown>, "unit"),
+      },
+      confidence: parseConfidence(obj),
+      provenance: parseProvenanceField(obj),
+      experimentId: typeof obj.experimentId === "string" ? obj.experimentId : undefined,
+      evidenceIds: Array.isArray(obj.evidenceIds) ? (obj.evidenceIds as string[]) : undefined,
+    };
+  }
+
+  function parseCounterfactualBaselineInput(body: unknown): import("./port.ts").ApiCreateCounterfactualBaselineInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const baselineValue = obj.baselineValue;
+    if (!baselineValue || typeof baselineValue !== "object") {
+      throw apiValidationError('field "baselineValue" must be an object with value and unit');
+    }
+    const comparisonValue = obj.comparisonValue;
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      subjectReference: parseSubjectReference(obj),
+      outcomeType: strField(obj, "outcomeType"),
+      baselineKind: strField(obj, "baselineKind"),
+      baselineValue: {
+        value: numField(baselineValue as Record<string, unknown>, "value"),
+        unit: strField(baselineValue as Record<string, unknown>, "unit"),
+      },
+      comparisonValue:
+        comparisonValue && typeof comparisonValue === "object"
+          ? {
+              value: numField(comparisonValue as Record<string, unknown>, "value"),
+              unit: strField(comparisonValue as Record<string, unknown>, "unit"),
+            }
+          : undefined,
+      confidence: parseConfidence(obj),
+      provenance: parseProvenanceField(obj),
+      evidenceIds: Array.isArray(obj.evidenceIds) ? (obj.evidenceIds as string[]) : undefined,
+    };
+  }
+
+  function parseMeasuredOutcomeInput(body: unknown): import("./port.ts").ApiCreateMeasuredOutcomeInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const maturation = obj.maturation;
+    if (!maturation || typeof maturation !== "object") {
+      throw apiValidationError('field "maturation" must be an object with strategy');
+    }
+    const m = maturation as Record<string, unknown>;
+    if (typeof m.strategy !== "string" || !m.strategy.trim()) {
+      throw apiValidationError('field "maturation.strategy" must be a non-empty string');
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      subjectReference: parseSubjectReference(obj),
+      outcomeType: strField(obj, "outcomeType"),
+      outcomeClaimId: typeof obj.outcomeClaimId === "string" ? obj.outcomeClaimId : undefined,
+      maturation: m,
+      rollupStrategy: typeof obj.rollupStrategy === "string" ? obj.rollupStrategy : undefined,
+      observationIds: Array.isArray(obj.observationIds) ? (obj.observationIds as string[]) : undefined,
     };
   }
 

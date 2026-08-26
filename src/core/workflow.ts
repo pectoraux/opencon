@@ -123,15 +123,24 @@ export function auditEventFor(
 
 /**
  * The kind of lifecycle subject. NET-W004 introduced two first-class
- * subjects: opportunities and contributions. NET-W005 adds the
+ * subjects: opportunities and contributions. NET-W005 added the
  * Proof-of-Value (the evidence-backed claim object whose lifecycle is
  * DRAFT → MEASURING → EVALUATING → VERIFIED with REJECTED/CANCELLED
- * exceptional states — see spec/work-orders/NET-W005.md §3.8). Later
- * work items (campaigns, disputes, etc.) may add more. The transition
- * table is parameterized by subject kind so each subject can have its
- * own legal-transition set.
+ * exceptional states — see spec/work-orders/NET-W005.md §3.8).
+ * NET-W006 adds the measured outcome (the outcome-measurement
+ * aggregate whose maturation lifecycle is DRAFT → MEASURING →
+ * VERIFIED with CANCELLED exceptional states — see
+ * spec/work-orders/NET-W006.md §3.5; finalization is explicit and
+ * auditable, delayed outcomes cannot silently become final).
+ * Later work items (campaigns, disputes, etc.) may add more. The
+ * transition table is parameterized by subject kind so each subject
+ * can have its own legal-transition set.
  */
-export type LifecycleSubjectKind = "opportunity" | "contribution" | "proof_of_value";
+export type LifecycleSubjectKind =
+  | "opportunity"
+  | "contribution"
+  | "proof_of_value"
+  | "outcome_measurement";
 
 /**
  * The minimal shape of an authoritative lifecycle subject. Domain

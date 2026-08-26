@@ -67,22 +67,44 @@ describe("NET-W005-AC-08 architecture/out-of-scope regression", () => {
     expect(evidenceModule.describe?.() ?? "").not.toMatch(/skeleton/i);
   });
 
-  test("the /outcomes domain REMAINS skeletal (NET-W006 — measurement semantics deferred)", async () => {
+  test("the /outcomes domain is implemented by NET-W006 (measurement semantics; no longer skeletal)", async () => {
+    // NET-W006 BASELINE UPDATE: when NET-W005 merged, /outcomes was a
+    // skeleton (measurement semantics deferred to NET-W006). NET-W006
+    // has now implemented it. The NET-W005 boundary intent is
+    // preserved: the OUTCOME CLAIM vocabulary lives in /evidence
+    // (NET-W005), and /outcomes carries only the MEASUREMENT semantics
+    // behind those claims — no economic behaviour.
     const mod = await import("../../src/outcomes/module.ts");
     const outcomesModule = Object.values(mod)[0] as {
       tier: string;
       describe?: () => string;
     };
     expect(outcomesModule.tier).toBe("domain");
-    expect(outcomesModule.describe?.() ?? "").toMatch(/skeleton/i);
-    // The outcomes boundary carries NO source beyond the skeleton
-    // module (NET-W005 put outcome CLAIMS in /evidence, not /outcomes).
+    expect(outcomesModule.describe?.() ?? "").not.toMatch(/skeleton/i);
+    expect(outcomesModule.describe?.() ?? "").toMatch(/NET-W006/);
+    // The outcomes boundary now carries the measurement-semantics
+    // source set (observations, attribution, experiments,
+    // incrementality, baselines, maturation).
     const files = await listTsFiles(join(SRC, "outcomes"));
-    expect(files.map((f) => f.split("/").pop()!).sort()).toEqual([
-      "index.ts",
-      "module.ts",
+    const names = files.map((f) => f.split("/").pop()!).sort();
+    for (const expected of [
+      "observation-service.ts",
+      "attribution-service.ts",
+      "experiment-service.ts",
+      "incrementality-service.ts",
+      "baseline-service.ts",
+      "measured-outcome-service.ts",
+      "measurement-rollup.ts",
       "port.ts",
-    ]);
+      "module.ts",
+      "index.ts",
+    ]) {
+      expect(names).toContain(expected);
+    }
+    // NET-W005's own boundary is untouched: the evidence domain still
+    // owns the outcome CLAIM vocabulary.
+    const evidencePort = await readFile(join(SRC, "evidence/port.ts"), "utf8");
+    expect(evidencePort).toContain("interface OutcomeClaim");
   });
 
   test("the evidence domain introduces NO forbidden economic-material patterns", async () => {

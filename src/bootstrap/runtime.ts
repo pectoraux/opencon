@@ -120,6 +120,52 @@ import type {
   ProofOfValueService,
   SubjectLookup,
 } from "../evidence/port.ts";
+// NET-W006 outcomes boundary: first-class immutable/append-corrected
+// outcome observations, distinct deterministic/probabilistic/
+// experimental attribution representation, experiments/holdouts +
+// incrementality (derived causal status), explicit counterfactual
+// baselines, provider-neutral provider ingestion, and the
+// measured-outcome maturation lifecycle (transitions route through
+// the workflow service — the SOLE lifecycle authority). Measurement
+// establishes facts + uncertainty; it NEVER creates economic
+// authority.
+import { createAuthorityOutcomeObservationRepository } from "../outcomes/authority-outcome-observation-repository.ts";
+import { createOutcomeObservationService } from "../outcomes/observation-service.ts";
+import { createAuthorityMeasurementExperimentRepository } from "../outcomes/authority-measurement-experiment-repository.ts";
+import { createMeasurementExperimentService } from "../outcomes/experiment-service.ts";
+import { createAuthorityAttributionRepository } from "../outcomes/authority-attribution-repository.ts";
+import { createAttributionService } from "../outcomes/attribution-service.ts";
+import { createAuthorityIncrementalityObservationRepository } from "../outcomes/authority-incrementality-repository.ts";
+import { createIncrementalityService } from "../outcomes/incrementality-service.ts";
+import { createAuthorityCounterfactualBaselineRepository } from "../outcomes/authority-baseline-repository.ts";
+import { createBaselineService } from "../outcomes/baseline-service.ts";
+import { createAuthorityMeasuredOutcomeRepository } from "../outcomes/authority-measured-outcome-repository.ts";
+import { createMeasuredOutcomeService } from "../outcomes/measured-outcome-service.ts";
+import type {
+  AttributionService,
+  BaselineService,
+  CreateAttributionInput,
+  CreateCounterfactualBaselineInput,
+  CreateIncrementalityObservationInput,
+  CreateMeasuredOutcomeInput,
+  CreateMeasurementExperimentInput,
+  CreateOutcomeObservationInput,
+  EvidenceRecordLookup,
+  IncrementalityService,
+  MeasurementExperimentService,
+  MeasurementSubjectLookup,
+  MeasuredOutcomeService,
+  OutcomeClaimLookup,
+  OutcomeObservationService,
+} from "../outcomes/port.ts";
+// NET-W006 measurement boundary: the provider-neutral adapter contract
+// + the clearly-marked reference adapter. Concrete platform adapters
+// (browser/platform + iOS attribution) arrive in NET-W022 behind the
+// SAME neutral port.
+import type {
+  MeasurementProviderAdapter,
+} from "../measurement/port.ts";
+import { echoMeasurementProvider } from "../measurement/providers/echo-measurement-provider.ts";
 
 // Boundary module registrations (composition root imports all).
 import { identityModule } from "../identity/module.ts";
@@ -223,6 +269,15 @@ export interface Runtime {
   readonly outcomeClaimService: OutcomeClaimService;
   readonly attestationService: AttestationService;
   readonly proofOfValueService: ProofOfValueService;
+  // NET-W006 domain services (exposed for integration/security tests).
+  readonly outcomeObservationService: OutcomeObservationService;
+  readonly measurementExperimentService: MeasurementExperimentService;
+  readonly attributionService: AttributionService;
+  readonly incrementalityService: IncrementalityService;
+  readonly baselineService: BaselineService;
+  readonly measuredOutcomeService: MeasuredOutcomeService;
+  /** The wired provider-neutral measurement adapters (diagnostics). */
+  readonly measurementProviders: readonly MeasurementProviderAdapter[];
   // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
   readonly idempotency: IdempotencyStore;
   initialize(): Promise<readonly { name: string; initialized: boolean }[]>;
@@ -249,6 +304,17 @@ export interface CreateRuntimeOptions {
   readonly attestation?: {
     readonly signer?: AttestationSigner;
     readonly verifier?: AttestationVerifier;
+  };
+  /**
+   * NET-W006: explicitly configured measurement provider adapters
+   * (e.g. the browser/platform + iOS attribution adapters arriving in
+   * NET-W022, or test doubles). When omitted, the reference ECHO
+   * adapter is wired (it reports no observations). The outcomes
+   * domain consumes ONLY the neutral MeasurementProviderAdapter
+   * contract — concrete providers never cross into the domain.
+   */
+  readonly measurement?: {
+    readonly providers?: readonly MeasurementProviderAdapter[];
   };
 }
 
@@ -559,14 +625,148 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     logger: logger.forModule("evidence"),
   });
 
+  const measuredOutcomeRepo = createAuthorityMeasuredOutcomeRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("outcomes").debug(m, f) },
+  });
   const workflowService = createWorkflowService({
     opportunityRepository: createLifecycleRepository(opportunityRepo),
     contributionRepository: createLifecycleRepository(contributionRepo),
     proofOfValueRepository: createLifecycleRepository(proofOfValueRepo),
+    outcomeMeasurementRepository: createLifecycleRepository(measuredOutcomeRepo),
     authorizer: transitionAuthorizer,
     auditWriter,
     idempotency,
     coordination: coordinationService,
+  });
+
+  // -- NET-W006 outcomes domain wiring --------------------------------
+  // Measurement semantics (architecture §18: /outcomes owns them;
+  // /measurement owns provider integrations only). Cross-domain
+  // lookups arrive as thin adapters over the wired repositories —
+  // the same dependency-inversion pattern as povSubjectLookup.
+  const measurementSubjectLookup: MeasurementSubjectLookup = {
+    async getOrganizationScope(subjectType, subjectId) {
+      if (subjectType === "opportunity") {
+        const opp = await opportunityRepo.findById(subjectId);
+        return opp ? opp.organizationScopeId : null;
+      }
+      if (subjectType === "contribution") {
+        const c = await contributionRepo.findById(subjectId);
+        return c ? c.organizationScopeId : null;
+      }
+      return null;
+    },
+    async exists(subjectType, subjectId) {
+      if (subjectType === "opportunity") return opportunityRepo.exists(subjectId);
+      if (subjectType === "contribution") return contributionRepo.exists(subjectId);
+      return false;
+    },
+  };
+  const outcomeClaimLookup: OutcomeClaimLookup = {
+    async exists(id) {
+      return outcomeClaimRepo.exists(id);
+    },
+    async getOrganizationScope(id) {
+      const claim = await outcomeClaimRepo.findById(id);
+      return claim ? claim.organizationScopeId : null;
+    },
+  };
+  const evidenceRecordLookup: EvidenceRecordLookup = {
+    async exists(id) {
+      return evidenceRepo.exists(id);
+    },
+    async getOrganizationScope(id) {
+      const evidence = await evidenceRepo.findById(id);
+      return evidence ? evidence.organizationScopeId : null;
+    },
+  };
+  // Provider-neutral measurement adapters: explicitly configured
+  // adapters (opts.measurement.providers — test doubles today, the
+  // NET-W022 platform attribution adapters later) or the reference
+  // ECHO adapter. The outcomes domain consumes only the neutral
+  // contract.
+  const measurementProviders: readonly MeasurementProviderAdapter[] =
+    opts.measurement?.providers?.length
+      ? opts.measurement.providers
+      : [echoMeasurementProvider];
+  const outcomeObservationRepo = createAuthorityOutcomeObservationRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("outcomes").debug(m, f) },
+  });
+  const measurementExperimentRepo = createAuthorityMeasurementExperimentRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("outcomes").debug(m, f) },
+  });
+  const attributionRepo = createAuthorityAttributionRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("outcomes").debug(m, f) },
+  });
+  const incrementalityRepo = createAuthorityIncrementalityObservationRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("outcomes").debug(m, f) },
+  });
+  const baselineRepo = createAuthorityCounterfactualBaselineRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("outcomes").debug(m, f) },
+  });
+  const outcomeObservationService = createOutcomeObservationService({
+    repository: outcomeObservationRepo,
+    outcomeClaimLookup,
+    evidenceLookup: evidenceRecordLookup,
+    providerAdapters: measurementProviders,
+    authority: postgresAuthority,
+    auditWriter,
+    logger: logger.forModule("outcomes"),
+  });
+  const measurementExperimentService = createMeasurementExperimentService({
+    repository: measurementExperimentRepo,
+    authority: postgresAuthority,
+    auditWriter,
+    logger: logger.forModule("outcomes"),
+  });
+  const attributionService = createAttributionService({
+    repository: attributionRepo,
+    observationRepository: outcomeObservationRepo,
+    experimentRepository: measurementExperimentRepo,
+    evidenceLookup: evidenceRecordLookup,
+    authority: postgresAuthority,
+    auditWriter,
+    logger: logger.forModule("outcomes"),
+  });
+  const incrementalityService = createIncrementalityService({
+    repository: incrementalityRepo,
+    experimentRepository: measurementExperimentRepo,
+    authority: postgresAuthority,
+    auditWriter,
+    logger: logger.forModule("outcomes"),
+  });
+  const baselineService = createBaselineService({
+    repository: baselineRepo,
+    evidenceLookup: evidenceRecordLookup,
+    authority: postgresAuthority,
+    auditWriter,
+    logger: logger.forModule("outcomes"),
+  });
+  // The measured-outcome lifecycle routes through the SAME workflow
+  // service instance (the /workflows boundary is the SOLE lifecycle
+  // authority for outcome_measurement transitions).
+  const measuredOutcomeService = createMeasuredOutcomeService({
+    repository: measuredOutcomeRepo,
+    observationRepository: outcomeObservationRepo,
+    attributionRepository: attributionRepo,
+    baselineRepository: baselineRepo,
+    incrementalityRepository: incrementalityRepo,
+    subjectLookup: measurementSubjectLookup,
+    outcomeClaimLookup,
+    workflow: {
+      async requestTransition(request, execution) {
+        return workflowService.requestTransition(request, execution);
+      },
+    },
+    authority: postgresAuthority,
+    auditWriter,
+    logger: logger.forModule("outcomes"),
   });
 
   // API auth + commands adapter (dependency inversion: the API server
@@ -597,6 +797,63 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       };
     },
   };
+  // NET-W006 view helpers (domain entity → API view).
+  function toObservationView(observation: import("../outcomes/port.ts").OutcomeObservation) {
+    return {
+      id: observation.id,
+      organizationScopeId: observation.organizationScopeId,
+      observerId: observation.observerId,
+      subjectReference: observation.subjectReference,
+      outcomeType: observation.outcomeType,
+      outcomeClaimId: observation.outcomeClaimId,
+      evidenceId: observation.evidenceId,
+      observedValue: observation.observedValue,
+      confidence: observation.confidence as unknown as Record<string, unknown>,
+      provenance: observation.provenance as unknown as Record<string, unknown>,
+      correctsObservationId: observation.correctsObservationId,
+      providerAttributionMode: observation.providerAttributionMode,
+      externalSubjectRef: observation.externalSubjectRef,
+      createdAt: observation.createdAt,
+    };
+  }
+  function toExperimentView(experiment: import("../outcomes/port.ts").MeasurementExperiment) {
+    return {
+      id: experiment.id,
+      organizationScopeId: experiment.organizationScopeId,
+      ownerId: experiment.ownerId,
+      experimentType: experiment.experimentType,
+      hypothesis: experiment.hypothesis,
+      status: experiment.status,
+      startedAt: experiment.startedAt,
+      completedAt: experiment.completedAt,
+      invalidatedAt: experiment.invalidatedAt,
+      invalidationReason: experiment.invalidationReason,
+      createdAt: experiment.createdAt,
+      updatedAt: experiment.updatedAt,
+      version: experiment.version,
+    };
+  }
+  function toMeasurementView(measurement: import("../outcomes/port.ts").MeasuredOutcome) {
+    return {
+      id: measurement.id,
+      organizationScopeId: measurement.organizationScopeId,
+      ownerId: measurement.ownerId,
+      subjectReference: measurement.subjectReference,
+      outcomeType: measurement.outcomeType,
+      outcomeClaimId: measurement.outcomeClaimId,
+      observationIds: measurement.observationIds,
+      attributionIds: measurement.attributionIds,
+      baselineIds: measurement.baselineIds,
+      incrementalityIds: measurement.incrementalityIds,
+      maturation: measurement.maturation as unknown as Record<string, unknown>,
+      rollupStrategy: measurement.rollupStrategy,
+      state: measurement.state,
+      version: measurement.version,
+      createdAt: measurement.createdAt,
+      updatedAt: measurement.updatedAt,
+    };
+  }
+
   const apiCommands: ApiCommands = {
     async createIdentity(execution, input) {
       const identity = await identityService.createIdentity(execution, {
@@ -1050,6 +1307,336 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         updatedAt: proof.updatedAt,
       };
     },
+    // -- NET-W006 outcomes/measurement commands -------------------------
+    async createOutcomeObservation(execution, actorPersonId, input) {
+      const observation = await outcomeObservationService.createOutcomeObservation(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId,
+          observerId: actorPersonId,
+          subjectReference: input.subjectReference,
+          outcomeType: input.outcomeType as CreateOutcomeObservationInput["outcomeType"],
+          ...(input.outcomeClaimId !== undefined ? { outcomeClaimId: input.outcomeClaimId } : {}),
+          ...(input.evidenceId !== undefined ? { evidenceId: input.evidenceId } : {}),
+          observedValue: input.observedValue,
+          confidence: input.confidence as unknown as CreateOutcomeObservationInput["confidence"],
+          provenance: input.provenance as unknown as CreateOutcomeObservationInput["provenance"],
+        },
+      );
+      return toObservationView(observation);
+    },
+    async getOutcomeObservation(execution, id) {
+      try {
+        const observation = await outcomeObservationService.getOutcomeObservation(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toObservationView(observation);
+      } catch {
+        return null;
+      }
+    },
+    async correctOutcomeObservation(execution, actorPersonId, observationId, input) {
+      const correction = await outcomeObservationService.correctOutcomeObservation(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId,
+          observerId: actorPersonId,
+          ...(input.outcomeClaimId !== undefined ? { outcomeClaimId: input.outcomeClaimId } : {}),
+          ...(input.evidenceId !== undefined ? { evidenceId: input.evidenceId } : {}),
+          observedValue: input.observedValue,
+          confidence: input.confidence as unknown as CreateOutcomeObservationInput["confidence"],
+          provenance: input.provenance as unknown as CreateOutcomeObservationInput["provenance"],
+          correctsObservationId: observationId,
+        },
+      );
+      return toObservationView(correction);
+    },
+    async ingestProviderObservations(execution, actorPersonId, input) {
+      const result = await outcomeObservationService.ingestProviderObservations(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId,
+          observerId: actorPersonId,
+          subjectReference: input.subjectReference,
+          ...(input.since !== undefined ? { since: input.since } : {}),
+        },
+      );
+      return {
+        providerId: result.providerId,
+        createdObservations: result.createdObservations.map(toObservationView),
+      };
+    },
+    async createMeasurementExperiment(execution, actorPersonId, input) {
+      const experiment = await measurementExperimentService.createMeasurementExperiment(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId,
+          ownerId: actorPersonId,
+          experimentType: input.experimentType,
+          ...(input.hypothesis !== undefined ? { hypothesis: input.hypothesis } : {}),
+        },
+      );
+      return toExperimentView(experiment);
+    },
+    async getMeasurementExperiment(execution, id) {
+      try {
+        const experiment = await measurementExperimentService.getMeasurementExperiment(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toExperimentView(experiment);
+      } catch {
+        return null;
+      }
+    },
+    async startMeasurementExperiment(execution, _actorPersonId, experimentId, input) {
+      return toExperimentView(
+        await measurementExperimentService.startExperiment(execution, {
+          experimentId,
+          expectedVersion: input.expectedVersion,
+        }),
+      );
+    },
+    async completeMeasurementExperiment(execution, _actorPersonId, experimentId, input) {
+      return toExperimentView(
+        await measurementExperimentService.completeExperiment(execution, {
+          experimentId,
+          expectedVersion: input.expectedVersion,
+        }),
+      );
+    },
+    async invalidateMeasurementExperiment(execution, _actorPersonId, experimentId, input) {
+      const reason = input.reason ?? "invalidated via API";
+      return toExperimentView(
+        await measurementExperimentService.invalidateExperiment(execution, {
+          experimentId,
+          expectedVersion: input.expectedVersion,
+          reason,
+        }),
+      );
+    },
+    async createAttribution(execution, actorPersonId, input) {
+      const attribution = await attributionService.createAttribution(execution, {
+        organizationScopeId: input.organizationScopeId,
+        observationId: input.observationId,
+        attributedSubject: input.attributedSubject,
+        mode: input.mode,
+        attributionValue: input.attributionValue,
+        confidence: input.confidence as unknown as CreateAttributionInput["confidence"],
+        provenance: input.provenance as unknown as CreateAttributionInput["provenance"],
+        ...(input.deterministicLink !== undefined
+          ? { deterministicLink: input.deterministicLink }
+          : {}),
+        ...(input.experimentId !== undefined ? { experimentId: input.experimentId } : {}),
+        evidenceIds: input.evidenceIds ?? [],
+      });
+      return {
+        id: attribution.id,
+        organizationScopeId: attribution.organizationScopeId,
+        observationId: attribution.observationId,
+        attributedSubject: attribution.attributedSubject,
+        mode: attribution.mode,
+        attributionValue: attribution.attributionValue,
+        confidence: attribution.confidence as unknown as Record<string, unknown>,
+        provenance: attribution.provenance as unknown as Record<string, unknown>,
+        deterministicLink: attribution.deterministicLink as unknown as Record<string, unknown> | null,
+        experimentId: attribution.experimentId,
+        evidenceIds: attribution.evidenceIds,
+        createdAt: attribution.createdAt,
+      };
+    },
+    async getAttribution(execution, id) {
+      try {
+        const attribution = await attributionService.getAttribution(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return {
+          id: attribution.id,
+          organizationScopeId: attribution.organizationScopeId,
+          observationId: attribution.observationId,
+          attributedSubject: attribution.attributedSubject,
+          mode: attribution.mode,
+          attributionValue: attribution.attributionValue,
+          confidence: attribution.confidence as unknown as Record<string, unknown>,
+          provenance: attribution.provenance as unknown as Record<string, unknown>,
+          deterministicLink: attribution.deterministicLink as unknown as Record<string, unknown> | null,
+          experimentId: attribution.experimentId,
+          evidenceIds: attribution.evidenceIds,
+          createdAt: attribution.createdAt,
+        };
+      } catch {
+        return null;
+      }
+    },
+    async createIncrementalityObservation(execution, actorPersonId, input) {
+      const observation = await incrementalityService.createIncrementalityObservation(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId,
+          ownerId: actorPersonId,
+          subjectReference: input.subjectReference,
+          outcomeType: input.outcomeType as CreateIncrementalityObservationInput["outcomeType"],
+          lift: input.lift,
+          baselineValue: input.baselineValue,
+          confidence: input.confidence as unknown as CreateIncrementalityObservationInput["confidence"],
+          provenance: input.provenance as unknown as CreateIncrementalityObservationInput["provenance"],
+          ...(input.experimentId !== undefined ? { experimentId: input.experimentId } : {}),
+          evidenceIds: input.evidenceIds ?? [],
+        },
+      );
+      return {
+        id: observation.id,
+        organizationScopeId: observation.organizationScopeId,
+        ownerId: observation.ownerId,
+        subjectReference: observation.subjectReference,
+        outcomeType: observation.outcomeType,
+        lift: observation.lift,
+        baselineValue: observation.baselineValue,
+        confidence: observation.confidence as unknown as Record<string, unknown>,
+        provenance: observation.provenance as unknown as Record<string, unknown>,
+        experimentId: observation.experimentId,
+        causalStatus: observation.causalStatus,
+        evidenceIds: observation.evidenceIds,
+        createdAt: observation.createdAt,
+      };
+    },
+    async getIncrementalityObservation(execution, id) {
+      try {
+        const observation = await incrementalityService.getIncrementalityObservation(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return {
+          id: observation.id,
+          organizationScopeId: observation.organizationScopeId,
+          ownerId: observation.ownerId,
+          subjectReference: observation.subjectReference,
+          outcomeType: observation.outcomeType,
+          lift: observation.lift,
+          baselineValue: observation.baselineValue,
+          confidence: observation.confidence as unknown as Record<string, unknown>,
+          provenance: observation.provenance as unknown as Record<string, unknown>,
+          experimentId: observation.experimentId,
+          causalStatus: observation.causalStatus,
+          evidenceIds: observation.evidenceIds,
+          createdAt: observation.createdAt,
+        };
+      } catch {
+        return null;
+      }
+    },
+    async createCounterfactualBaseline(execution, actorPersonId, input) {
+      const baseline = await baselineService.createCounterfactualBaseline(execution, {
+        organizationScopeId: input.organizationScopeId,
+        ownerId: actorPersonId,
+        subjectReference: input.subjectReference,
+        outcomeType: input.outcomeType as CreateCounterfactualBaselineInput["outcomeType"],
+        baselineKind: input.baselineKind,
+        baselineValue: input.baselineValue,
+        ...(input.comparisonValue !== undefined ? { comparisonValue: input.comparisonValue } : {}),
+        confidence: input.confidence as unknown as CreateCounterfactualBaselineInput["confidence"],
+        provenance: input.provenance as unknown as CreateCounterfactualBaselineInput["provenance"],
+        evidenceIds: input.evidenceIds ?? [],
+      });
+      return {
+        id: baseline.id,
+        organizationScopeId: baseline.organizationScopeId,
+        ownerId: baseline.ownerId,
+        subjectReference: baseline.subjectReference,
+        outcomeType: baseline.outcomeType,
+        baselineKind: baseline.baselineKind,
+        baselineValue: baseline.baselineValue,
+        comparisonValue: baseline.comparisonValue,
+        confidence: baseline.confidence as unknown as Record<string, unknown>,
+        provenance: baseline.provenance as unknown as Record<string, unknown>,
+        evidenceIds: baseline.evidenceIds,
+        createdAt: baseline.createdAt,
+      };
+    },
+    async getCounterfactualBaseline(execution, id) {
+      try {
+        const baseline = await baselineService.getCounterfactualBaseline(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return {
+          id: baseline.id,
+          organizationScopeId: baseline.organizationScopeId,
+          ownerId: baseline.ownerId,
+          subjectReference: baseline.subjectReference,
+          outcomeType: baseline.outcomeType,
+          baselineKind: baseline.baselineKind,
+          baselineValue: baseline.baselineValue,
+          comparisonValue: baseline.comparisonValue,
+          confidence: baseline.confidence as unknown as Record<string, unknown>,
+          provenance: baseline.provenance as unknown as Record<string, unknown>,
+          evidenceIds: baseline.evidenceIds,
+          createdAt: baseline.createdAt,
+        };
+      } catch {
+        return null;
+      }
+    },
+    async createMeasuredOutcome(execution, actorPersonId, input) {
+      const maturation = input.maturation as unknown as CreateMeasuredOutcomeInput["maturation"];
+      const measurement = await measuredOutcomeService.createMeasuredOutcome(execution, {
+        organizationScopeId: input.organizationScopeId,
+        ownerId: actorPersonId,
+        subjectReference: input.subjectReference,
+        outcomeType: input.outcomeType as CreateMeasuredOutcomeInput["outcomeType"],
+        ...(input.outcomeClaimId !== undefined ? { outcomeClaimId: input.outcomeClaimId } : {}),
+        maturation,
+        ...(input.rollupStrategy !== undefined ? { rollupStrategy: input.rollupStrategy } : {}),
+        observationIds: input.observationIds ?? [],
+      });
+      return toMeasurementView(measurement);
+    },
+    async getMeasuredOutcome(execution, id) {
+      try {
+        const measurement = await measuredOutcomeService.getMeasuredOutcome(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return {
+          ...toMeasurementView(measurement),
+          rollup: measurement.rollup as unknown as Record<string, unknown> | null,
+        };
+      } catch {
+        return null;
+      }
+    },
+    async attachObservationToMeasurement(execution, _actorPersonId, measurementId, observationId) {
+      return toMeasurementView(
+        await measuredOutcomeService.attachObservation(execution, measurementId, observationId),
+      );
+    },
+    async attachAttributionToMeasurement(execution, _actorPersonId, measurementId, attributionId) {
+      return toMeasurementView(
+        await measuredOutcomeService.attachAttribution(execution, measurementId, attributionId),
+      );
+    },
+    async attachBaselineToMeasurement(execution, _actorPersonId, measurementId, baselineId) {
+      return toMeasurementView(
+        await measuredOutcomeService.attachBaseline(execution, measurementId, baselineId),
+      );
+    },
+    async attachIncrementalityToMeasurement(execution, _actorPersonId, measurementId, incrementalityId) {
+      return toMeasurementView(
+        await measuredOutcomeService.attachIncrementality(execution, measurementId, incrementalityId),
+      );
+    },
+    async recordMeasurementRollup(execution, _actorPersonId, measurementId) {
+      const measurement = await measuredOutcomeService.recordMeasurementRollup(
+        execution,
+        measurementId,
+      );
+      return {
+        ...toMeasurementView(measurement),
+        rollup: measurement.rollup as unknown as Record<string, unknown> | null,
+      };
+    },
   };
 
   const registry = createModuleRegistry(snapshot, logger);
@@ -1148,9 +1735,22 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     outcomeClaimService,
     attestationService,
     proofOfValueService,
+    // NET-W006 domain services.
+    outcomeObservationService,
+    measurementExperimentService,
+    attributionService,
+    incrementalityService,
+    baselineService,
+    measuredOutcomeService,
+    measurementProviders,
     // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
     idempotency,
     async initialize() {
+      // Provider-neutral measurement adapters initialize with the
+      // runtime (concrete providers establish their clients here).
+      for (const provider of measurementProviders) {
+        await provider.initialize();
+      }
       const states = await registry.initializeAll();
       return states.map((s) => ({ name: s.name, initialized: s.initialized }));
     },
