@@ -3,15 +3,27 @@
  *
  * Evidence: architecture review of changed files + test suite.
  *
- * No implementation in this work item authorizes economically material
- * value creation, settlement, reputation mutation, campaign delivery
- * or user benefit allocation. This test guards against premature domain
- * logic by:
- *   - asserting domain modules are skeletal (tier "domain", describe
- *     contains "skeleton");
+ * No implementation in the platform-foundation work item authorizes
+ * economically material value creation, settlement, reputation mutation,
+ * campaign delivery or user benefit allocation. This test guards against
+ * premature domain logic by:
+ *   - asserting still-deferred domain modules remain skeletal (tier
+ *     "domain", describe contains "skeleton");
+ *   - asserting identity/organizations/participants (now implemented in
+ *     NET-W002) are non-skeletal and tier "domain";
  *   - asserting domain source contains none of a denylist of material
- *     operation patterns;
+ *     operation patterns (for ALL 16 domains, including the NET-W002
+ *     three — NET-W002 introduces identity/org/authz behaviour only,
+ *     never economic-material behaviour);
  *   - asserting the full architecture check still passes.
+ *
+ * NET-W002 update: identity, organizations and participants now have
+ * concrete behaviour (identity model, membership lifecycle, participant
+ * roles, server-side authorization, audit lineage). They are no longer
+ * "skeleton" — but they still introduce NO economically material domain
+ * logic (no credit issuance, no settlement, no reputation mutation, no
+ * campaign delivery, no benefit allocation). The forbidden-pattern check
+ * below applies to ALL 16 domains including the three NET-W002 ones.
  */
 
 import { describe, test, expect } from "bun:test";
@@ -30,8 +42,20 @@ const DOMAIN_DIRS = [
   "disputes", "workflows",
 ];
 
+// Domains implemented in NET-W002 (no longer skeletons).
+const NET_W002_DOMAINS = ["identity", "organizations", "participants"];
+
+// Domains still deferred past NET-W002 (must remain skeletons).
+const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
+  (d) => !NET_W002_DOMAINS.includes(d),
+);
+
 // Patterns that would indicate economically/material domain logic,
-// which NET-W001 explicitly forbids (§5 non-goals).
+// which the foundation work item explicitly forbids (§5 non-goals).
+// Applied to ALL 16 domains — including the NET-W002 three, which
+// introduce identity/org/authz behaviour but NEVER economic-material
+// behaviour (no credit issuance, no settlement, no reputation mutation,
+// no campaign delivery, no benefit allocation).
 const FORBIDDEN_PATTERNS: RegExp[] = [
   /issueCredit/i,
   /mintCredit/i,
@@ -57,12 +81,11 @@ async function listTsFiles(dir: string, out: string[] = []): Promise<string[]> {
 }
 
 describe("NET-W001-AC-08 no premature domain logic", () => {
-  test("domain modules are skeletal (tier domain, describe includes skeleton)", async () => {
-    for (const dir of DOMAIN_DIRS) {
+  test("still-deferred domain modules remain skeletal (tier domain, describe includes skeleton)", async () => {
+    for (const dir of SKELETON_DOMAIN_DIRS) {
       const modulePath = join(SRC, dir, "module.ts");
       expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
       const mod = await import(`../../src/${dir}/module.ts`);
-      // Each domain module exports exactly one boundary Module.
       const moduleExport = Object.values(mod)[0] as {
         name: string;
         tier: string;
@@ -70,6 +93,24 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
       };
       expect(moduleExport.tier).toBe("domain");
       expect(moduleExport.describe?.() ?? "").toMatch(/skeleton/i);
+    }
+  });
+
+  test("NET-W002 domain modules are non-skeletal (tier domain, no 'skeleton' marker)", async () => {
+    for (const dir of NET_W002_DOMAINS) {
+      const modulePath = join(SRC, dir, "module.ts");
+      expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
+      const mod = await import(`../../src/${dir}/module.ts`);
+      const moduleExport = Object.values(mod)[0] as {
+        name: string;
+        tier: string;
+        describe?: () => string;
+      };
+      expect(moduleExport.tier).toBe("domain");
+      // NET-W002 modules are no longer skeletons — they carry concrete
+      // (non-economic) identity/org/authz behaviour.
+      expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
+      expect(moduleExport.describe?.() ?? "").toMatch(/NET-W002/i);
     }
   });
 
@@ -102,7 +143,9 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
   test("domain modules do not perform economically material mutations on init", async () => {
     // Drive init for every domain module through the registry and
     // confirm it completes without side-effecting state. The boundary
-    // modules are no-ops by construction (defineBoundaryModule).
+    // modules are no-ops by construction (defineBoundaryModule) —
+    // including the NET-W002 ones, whose concrete behaviour is wired
+    // by the bootstrap composition root, NOT by module init.
     const { createRuntime } = await import("../../src/bootstrap/runtime.ts");
     const runtime = createRuntime({ env: { APP_ENV: "test" }, port: 0 });
     const states = await runtime.initialize();
