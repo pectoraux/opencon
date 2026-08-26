@@ -26,8 +26,27 @@ export interface SecretProvider {
    * Resolve secret material by key. The value is intended to be consumed
    * immediately at the infrastructure boundary (e.g. constructing a DB
    * client) and MUST NOT be persisted or logged.
+   *
+   * Returns a Promise so that provider implementations backed by a remote
+   * secret store (e.g. a future Vault adapter) can resolve asynchronously.
+   * The bootstrap composition root that needs the value synchronously to
+   * construct an adapter at runtime-boot time uses
+   * {@link getSecretSync} instead.
    */
   getSecret(key: string): Promise<string>;
+  /**
+   * Resolve secret material synchronously. Used by the composition root
+   * (bootstrap) where the connection string must be available at
+   * construction time to wire a real provider adapter. Provider
+   * implementations backed by a remote secret store that cannot resolve
+   * synchronously SHOULD throw {@link SecretNotFoundError} (or a
+   * provider-specific error) — the composition root wraps that in a
+   * {@link ProviderConfigurationError} so a configured deployment fails
+   * fast rather than silently selecting a test double.
+   *
+   * The value MUST NOT be persisted or logged.
+   */
+  getSecretSync(key: string): string;
   /** Redacted diagnostics for the secret catalog (safe to log/audit). */
   describe(): readonly SecretDescriptor[];
   /** True iff a value is present for `key`. */

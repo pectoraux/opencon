@@ -45,13 +45,21 @@ service containers exercising the real adapters).
 ```
 $ bun run verify
 $ tsc --noEmit                       # typecheck: PASS (exit 0)
-$ bun scripts/check-architecture.ts  # ✓ 152 files scanned, 0 violations (exit 0)
+$ bun scripts/check-architecture.ts  # ✓ 153 files scanned, 0 violations (exit 0)
 $ bun test                           # unit + integration-canary PASS; integration tests SKIP (no services)
 ```
 
 Without `PG_TEST_DATABASE_URL` / `REDIS_TEST_URL`, the integration
 tests skip (their canaries pass), so the canonical gate is green from
 a clean checkout with no external services.
+
+Test count: 193 pass, 15 skip (integration), 0 fail, 1323 expect()
+calls, 29 files. The 16 new composition-root provider-selection
+tests (`tests/bootstrap/provider-selection.test.ts`) exercise the
+runtime wiring: real adapter `instanceof` in configured
+production/staging, shim selection in development/test, and
+fail-fast `ProviderConfigurationError` on missing required provider
+configuration.
 
 ### 2b. Real-provider integration (with services provisioned)
 
@@ -91,7 +99,7 @@ tests/integration/redis-coordination-integration.test.ts:
 
 ```
 $ bun test   # with PG_TEST_DATABASE_URL + REDIS_TEST_URL set
-192 pass, 0 fail, 1322 expect() calls, 28 files
+208 pass, 0 fail, 1377 expect() calls, 29 files
 ```
 
 Test breakdown:
@@ -107,7 +115,13 @@ Test breakdown:
   - tests/persistence/net-w003-ac-06-idempotency-concurrency.test.ts (7 tests)
   - tests/observability/net-w003-ac-07-correlation-tracing.test.ts (6 tests)
   - tests/regression/net-w003-ac-08-architecture-out-of-scope.test.ts (10 tests — +2 scanner/provider assertions)
-- NET-W003 real-provider integration suites (NEW): 17 tests across 2 files
+- NET-W003 composition-root provider-selection suite (NEW — architect
+  re-review on PR #6, final blocker): 16 tests across 1 file
+  - tests/bootstrap/provider-selection.test.ts (3 dev/test shim + 4
+    production/staging real-adapter selection + 1 SecretProvider-wiring
+    spy + 6 fail-fast on missing required provider configuration + 2
+    end-to-end createRuntime wiring)
+- NET-W003 real-provider integration suites: 17 tests across 2 files
   - tests/integration/postgres-authority-integration.test.ts (7 real + 1 canary)
   - tests/integration/redis-coordination-integration.test.ts (7 real + 1 canary)
 
@@ -152,6 +166,25 @@ passes — NET-W003 touches ONLY infrastructure + adapter modules; the
   rolled back (real ROLLBACK); `recover()` detects+discards orphaned
   in-flight markers; explicit rollback; READ COMMITTED isolation;
   lineage columns; monotonic revisions via `ON CONFLICT`; scan.
+- `src/bootstrap/provider-selection.ts` (NEW, architect re-review on PR
+  #6, final blocker) — composition-root provider selection: resolves
+  `DATABASE_URL` through the `SecretProvider` and constructs the REAL
+  `PostgresAuthorityAdapter` in configured production/staging
+  deployments (fail-fast `ProviderConfigurationError` if the secret
+  is missing — NEVER silently selecting a shim). In development/test
+  it selects the `PostgresAuthorityShim` as a deliberate test/dev
+  double.
+- `src/bootstrap/runtime.ts` (MODIFIED, architect re-review on PR #6) —
+  the composition root now calls `selectProviders` and exposes
+  `postgresAuthority` / `coordinationService` / `providerSelection`
+  on the `Runtime` interface (typed by the provider-neutral
+  contracts). `shutdown()` releases the selected providers' resources.
+- `tests/bootstrap/provider-selection.test.ts` (NEW, 16 tests) —
+  composition-root wiring evidence: real adapter `instanceof` in
+  production/staging, shim `instanceof` in development/test,
+  SecretProvider-wiring spy, fail-fast `ProviderConfigurationError`
+  on missing required provider configuration, and end-to-end
+  `createRuntime` wiring.
 
 ### NET-W003-AC-02 — Redis non-authority (PASS — shim unit tests + real-provider integration)
 - `src/core/coordination.ts` (NEW) — `CoordinationService` contract
@@ -454,3 +487,164 @@ updated to permit provider packages ONLY in the adapter tier, real-
 provider integration tests added (CI service containers + docker-
 compose), and recovery hardened (corrupt committed snapshot → explicit
 `StorageCorruptionError`). The frozen architecture is unchanged.
+
+The architect's second re-review on PR #6 (final remaining blocker:
+"the composition root/runtime is still wired to the shims rather than
+selecting the real adapters in configured deployments") is remediated
+in the same PR — see §9 for the composition-root wiring evidence.
+
+## 9. Composition-root runtime wiring (architect re-review on PR #6, final blocker)
+
+The architect's final remaining blocker on PR #6 was that the real
+PostgreSQL/Redis adapters existed behind `/adapters` but the
+**composition root was still wired to the file-backed shims** — so the
+actual application did not establish PostgreSQL as authoritative
+application state or Redis as its coordination provider in a configured
+deployment. Required remediation (all DONE in this PR):
+
+1. **Composition-root provider selection path** —
+   `src/bootstrap/provider-selection.ts` (NEW). The `selectProviders`
+   function resolves the PostgreSQL and Redis connection strings
+   through the existing `SecretProvider` (via `getSecretSync`) and
+   constructs the REAL `PostgresAuthorityAdapter` +
+   `RedisCoordinationAdapter` when production/staging configuration
+   requires it. Provider selection flow:
+
+   ```
+   configured production/staging
+           ↓
+   SecretProvider.getSecretSync
+     ↓                 ↓
+   DATABASE_URL     REDIS_URL
+        ↓               ↓
+   PostgresAuthorityAdapter
+            +
+   RedisCoordinationAdapter
+   ```
+
+2. **Redis adapter wiring for coordination** — the same
+   `selectProviders` constructs the `RedisCoordinationAdapter` from
+   the Redis connection string resolved through the SecretProvider.
+   The runtime exposes it via `runtime.coordinationService` (typed by
+   the provider-neutral `CoordinationService` contract).
+
+3. **Shims retained ONLY as explicit test/dev doubles** — in
+   `development` / `test`, `selectProviders` constructs the
+   `PostgresAuthorityShim` + `RedisCoordinationShim` so the runtime
+   is operable out-of-the-box without a real PostgreSQL or Redis. A
+   configured production/staging deployment NEVER silently falls back
+   to a file/in-memory implementation.
+
+4. **Fail-fast on missing required provider configuration** — when
+   `production` or `staging` is selected and a required connection
+   string cannot be resolved through the SecretProvider, selection
+   throws `ProviderConfigurationError` (classification `validation`,
+   not retryable; carries the provider name, secret key, and
+   environment in its context; chains the original `SecretNotFoundError`
+   as its cause). This is the SECOND fail-fast layer — the first is
+   the config layer (`loadConfig` enforces `REQUIRED_IN_PRODUCTION` in
+   non-development environments, tested in NET-W001-AC-04).
+
+5. **Runtime interface extension** — `Runtime` now exposes
+   `postgresAuthority: PostgresAuthority`, `coordinationService:
+   CoordinationService`, and `providerSelection: ProviderSelection`
+   (with `mode` recording which concrete implementation was selected).
+   `shutdown()` releases the selected providers' resources (real
+   adapter pools/connections in production/staging; no-op for dev/test
+   shims).
+
+6. **SecretProvider contract extension** — `getSecretSync(key)` added
+   to the `SecretProvider` interface (backward-compatible: existing
+   `getSecret` Promise-based accessor unchanged). The env-backed
+   provider implements it as a synchronous map read. The composition
+   root uses `getSecretSync` because it needs the connection string at
+   construction time to wire a real adapter eagerly; a future
+   remote-backed SecretProvider (e.g. Vault) that cannot resolve
+   synchronously throws `SecretNotFoundError`, which the composition
+   root wraps in `ProviderConfigurationError`.
+
+7. **Defensive Redis error listener** — the `RedisCoordinationAdapter`
+   constructor now attaches a no-op `error` listener so a transient
+   or unreachable connection does NOT crash the process via an
+   unhandled `error` event. Connection failures are surfaced on the
+   individual commands that depend on connectivity (which reject
+   after `maxRetries`). This makes the adapter safe to construct at
+   the composition root even when the provider is not yet reachable
+   (the fail-fast boundary is the SecretProvider config check, not a
+   connection probe). Verified: the 8 real Redis integration tests
+   still pass with the listener in place.
+
+### 9a. Three-layer evidence model (architect requirement #5)
+
+The architect required NET-W003 evidence to distinguish **provider
+existence**, **runtime wiring**, and **real-provider integration**.
+NET-W003 now provides all three:
+
+| Layer | What it proves | Evidence |
+|---|---|---|
+| **Provider existence** | The REAL `pg`/`ioredis` adapters exist behind `/adapters` and implement the provider-neutral contracts | `src/adapters/postgres/postgres-authority-adapter.ts`, `src/adapters/redis/redis-coordination-adapter.ts`; architecture checker permits `pg`/`ioredis` ONLY in the adapter tier (`external-adapter-only` classification) |
+| **Runtime wiring** | The composition root selects the REAL adapter classes in configured production/staging deployments (resolving connection strings through the SecretProvider) and NEVER silently falls back to a shim | `tests/bootstrap/provider-selection.test.ts` (16 tests): `instanceof PostgresAuthorityAdapter`/`RedisCoordinationAdapter` in production/staging, `instanceof PostgresAuthorityShim`/`RedisCoordinationShim` in development/test, SecretProvider-wiring spy, fail-fast `ProviderConfigurationError` on missing config, end-to-end `createRuntime` wiring |
+| **Real-provider integration** | The real adapters actually work against real PostgreSQL + Redis services | `tests/integration/` (17 tests, conditional on `PG_TEST_DATABASE_URL`/`REDIS_TEST_URL`): commits survive restart, ROLLBACK discards uncommitted writes, `recover()` detects orphaned in-flight markers, READ COMMITTED isolation, `SET NX PX` locks, Lua compare-and-delete release, TTL expiry, `FLUSHDB` non-authority invariant. CI provisions `postgres:17-alpine` + `redis:7-alpine` service containers. |
+
+### 9b. Verification (composition-root wiring)
+
+```
+$ bun test tests/bootstrap/provider-selection.test.ts
+16 pass, 0 fail, 54 expect() calls
+
+$ bun run verify   # no services
+193 pass, 15 skip (integration), 0 fail, 1323 expect() calls, 29 files
+typecheck PASS; arch:check ✓ 153 files, 0 violations
+
+$ PG_TEST_DATABASE_URL=… REDIS_TEST_URL=… bun run verify   # with services
+208 pass, 0 fail, 1377 expect() calls, 29 files
+```
+
+The 16 composition-root tests prove:
+- development/test → `PostgresAuthorityShim` + `RedisCoordinationShim`
+  (test/dev doubles), `mode: {postgres: "shim", redis: "shim"}`.
+- production/staging (secrets present) → `PostgresAuthorityAdapter` +
+  `RedisCoordinationAdapter` (real adapter classes),
+  `mode: {postgres: "real-adapter", redis: "real-adapter"}`.
+- production/staging (DATABASE_URL missing) → `ProviderConfigurationError`
+  (classification `validation`, not retryable; context carries provider
+  `"postgres"`, secretKey `"DATABASE_URL"`, environment `"production"`;
+  cause is the original `SecretNotFoundError`). NEVER silently selects
+  a shim.
+- production/staging (REDIS_URL missing) → same fail-fast.
+- the connection strings are resolved THROUGH the SecretProvider (spy
+  records `getSecretSync("DATABASE_URL")` and `getSecretSync("REDIS_URL")`
+  calls — the bootstrap never reads env directly for secrets).
+- end-to-end `createRuntime(production, secrets present)` exposes the
+  real adapter classes on the `Runtime` interface; `initialize()`
+  succeeds (adapters constructed but not dialed at boot); `shutdown()`
+  releases resources.
+- end-to-end `createRuntime(production, secrets missing)` fails fast
+  at the config layer (defense in depth — `loadConfig` enforces
+  `REQUIRED_IN_PRODUCTION` before `selectProviders` is even called).
+
+### 9c. What is unchanged
+
+- **Frozen architecture** — `spec/architecture.md` and
+  `spec/architecture-lock.md` are byte-for-byte identical to `main`
+  (verified: `git diff --stat main -- spec/architecture.md
+  spec/architecture-lock.md` = empty). The composition-root wiring
+  conforms to the already-frozen adapter model (§2, §14, §18).
+- **Provider-neutral contracts** — `PostgresAuthority` and
+  `CoordinationService` in `src/core/` are unchanged. The
+  `SecretProvider` interface gained a backward-compatible
+  `getSecretSync` method (existing `getSecret` callers unaffected).
+- **Domain modules** — the 16 frozen domain dirs are untouched. No
+  domain module imports a concrete provider adapter or a shim; they
+  consume the provider-neutral contracts (when they eventually do so
+  in later work items).
+- **Real-provider integration tests** — `tests/integration/` is
+  unchanged. The 17 integration tests pass against real PostgreSQL
+  17.10 + Redis 8.0 (reproduced in the sandbox; CI provisions the same
+  services as containers). The Redis adapter's defensive error listener
+  does not interfere with real commands (verified: all 8 Redis
+  integration tests pass with the listener in place).
+- **NET-W001 (52) + NET-W002 (60) regression suites** — unchanged and
+  still pass alongside the 77 NET-W003 tests (61 unit/shim + 16
+  composition-root + 17 real-provider integration, 2 of which are
+  canaries).

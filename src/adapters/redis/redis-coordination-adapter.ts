@@ -98,6 +98,17 @@ export class RedisCoordinationAdapter implements CoordinationService {
       lazyConnect: false,
       maxRetriesPerRequest: 3,
     });
+    // Defensive: attach a no-op 'error' listener so a transient or
+    // unreachable connection does NOT crash the process via an
+    // unhandled 'error' event. Connection failures are surfaced on
+    // the individual commands that depend on connectivity (which
+    // reject after maxRetries). This is standard ioredis hygiene and
+    // makes the adapter safe to construct at the composition root even
+    // when the provider is not yet reachable (the fail-fast boundary
+    // is the SecretProvider config check, not a connection probe).
+    this.redis.on("error", (err: Error) => {
+      this.logger?.warn?.("coordination.redis_error", { message: err.message });
+    });
   }
 
   private prefix(key: string): string {
