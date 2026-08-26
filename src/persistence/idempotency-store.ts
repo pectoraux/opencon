@@ -181,8 +181,13 @@ export function createPostgresIdempotencyStore(opts: IdempotencyStoreOptions): I
           // Invoke the material mutation. The caller receives the
           // AuthorityTransaction so it can perform the mutation within
           // the SAME tx (atomicity: mutation + idempotency record).
+          // NET-W004: the transaction is exposed on the apply context
+          // so the workflow service can mutate lifecycle state AND
+          // append a transactional audit record within the SAME
+          // authoritative tx as the idempotency record (true atomicity).
           const applyCtx: IdempotentApplyContext = {
             execution,
+            transaction: tx,
             commit: async () => {
               // The fn may call commit() explicitly to settle; otherwise
               // we commit after fn returns. If fn calls commit, subsequent

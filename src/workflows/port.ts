@@ -1,21 +1,206 @@
 /**
  * Workflows boundary — declared public interface (port).
  *
- * Architecture ref: spec/architecture.md §18 (Module ownership).
- * Authority: authoritative lifecycle transitions and orchestration.
+ * Architecture ref: spec/architecture.md §17 (canonical lifecycle),
+ * §18 (Module ownership): `/workflows` is the SOLE authoritative
+ * lifecycle authority. §19 (Authority rules).
+ * Architecture ref: spec/architecture-lock.md §7 (workflow authority),
+ * §11 (workflow invariants: deterministic/idempotent transitions;
+ * stable error codes for illegal transitions).
  *
- * NET-W001 ships the boundary and contract ONLY. Concrete domain
- * behaviour is deferred to NET-W004. This port is
- * intentionally a contract surface, not an implementation; no
- * economically/material state is created here (work order §5).
+ * Work order ref: spec/work-orders/NET-W004.md
+ *   §3.3 Workflow authority: the canonical contribution lifecycle.
+ *   §4.1 Only `/workflows` may authoritatively transition lifecycle
+ *      state; domain/application services may validate preconditions
+ *      but MUST NOT bypass workflow authority.
+ *   §4.4 Idempotency semantics: repeating the same authorized
+ *      transition with the same idempotency key is a deterministic
+ *      replay.
+ *   §4.5 Authorization: transitions are tenant/participant scoped and
+ *      server-authorized.
+ *   §4.7 Audit lineage: every material mutation preserves execution/
+ *      correlation/causation lineage and append-oriented audit.
+ *
+ * CROSS-BOUNDARY LOOKUP PATTERN: the WorkflowService needs to mutate
+ * Opportunity/Contribution subjects, but the tier allow matrix prohibits
+ * domain→domain imports. This port declares a minimal
+ * {@link LifecycleRepository} structural interface that the bootstrap
+ * composition root satisfies by wiring thin adapters over the concrete
+ * OpportunityRepository and ContributionRepository (TypeScript
+ * structural typing makes them assignable).
+ *
+ * The {@link TransitionAuthorizer} structural interface mirrors the
+ * AuthorizationService from `/participants`. The bootstrap wires a thin
+ * adapter so the workflow service delegates to the existing deny-by-
+ * default authorization primitives (NET-W002 §4.5).
+ *
+ * Tier compliance: contracts ONLY. Concrete transition table + state
+ * machine + workflow service live in this boundary (self-imports
+ * allowed). Domain modules consume only the type vocabulary from
+ * `src/core/workflow.ts`.
+ *
+ * No economically material behaviour is introduced here (work order §5).
  */
 
-export interface WorkflowsPort {
-  /** Stable boundary identifier for diagnostics and registry. */
-  readonly boundary: "workflows";
+import type { ExecutionContext } from "../core/execution-context.ts";
+import type { AuditWriter } from "../core/audit.ts";
+import type { AuthorityTransaction } from "../core/postgres-authority.ts";
+import type {
+  LifecycleSubject,
+  LifecycleSubjectKind,
+  TransitionRequest,
+  TransitionResult,
+} from "../core/workflow.ts";
+
+/**
+ * A repository of lifecycle subjects for a single subject kind. The
+ * workflow service uses two of these (one for opportunities, one for
+ * contributions). The repository reads + writes a subject within an
+ * authoritative transaction so the mutation commits atomically with
+ * the idempotency record and the audit record (work order §4.4, §4.7).
+ *
+ * The repository is parameterized over the concrete subject type (T)
+ * so each domain (opportunities, contributions) can carry its own
+ * domain-specific fields alongside the lifecycle vocabulary. The
+ * workflow service only manipulates the lifecycle fields; the
+ * repository preserves all non-lifecycle fields via read-modify-write.
+ *
+ * The transaction is passed EXPLICITLY to each method (the workflow
+ * service receives it from the idempotency apply context's `transaction`
+ * field). This keeps the lifecycle repository stateless — no module-
+ * level "active tx" variable, no AsyncLocalStorage coupling.
+ */
+export interface LifecycleRepository<T extends LifecycleSubject = LifecycleSubject> {
   /**
-   * Boundary readiness. Always "skeleton" until NET-W004
-   * ships concrete behaviour.
+   * Read the current authoritative subject within a transaction.
+   * Sees uncommitted writes in the same tx (so the workflow service
+   * can read-modify-write atomically).
    */
-  readonly readiness: "skeleton";
+  getByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<T | null>;
+  /**
+   * Persist the updated subject within a transaction. The repository
+   * preserves all non-lifecycle fields by reading the current subject
+   * first and merging the lifecycle mutation onto it. The version is
+   * incremented atomically (optimistic concurrency: the write MUST
+   * carry `expectedVersion`; the repository rejects with
+   * {@link ConcurrentTransitionError} when the authoritative version
+   * differs — work order §4.8).
+   */
+  saveWithinTx(
+    subject: T,
+    expectedVersion: number,
+    execution: ExecutionContext,
+    tx: AuthorityTransaction,
+  ): Promise<T>;
 }
+
+/**
+ * TransitionAuthorizer — structural surface the WorkflowService consumes
+ * for server-side authorization. Mirrored from the `/participants`
+ * AuthorizationService. The bootstrap composition root wires a thin
+ * adapter that delegates to the real AuthorizationService.
+ *
+ * The authorizer carries the server-resolved principal (NOT client-
+ * asserted claims). Returns an allow/deny decision the workflow service
+ * treats as authoritative (deny-by-default, NET-W002 §4.5).
+ */
+export interface TransitionAuthorizer {
+  /**
+   * Authorize a transition. Returns `{ decision: "allow" }` when the
+   * actor is permitted to perform `policyAction` on the subject's
+   * organization scope. Returns `{ decision: "deny", reason }` otherwise.
+   *
+   * The subject's `organizationScopeId` is the resource the authorizer
+   * checks against; cross-organization transitions are denied (work
+   * order §4.5).
+   */
+  authorizeTransition(input: {
+    readonly execution: ExecutionContext;
+    readonly actorPersonId: string;
+    readonly subject: LifecycleSubject;
+    readonly policyAction: string;
+  }): Promise<{ readonly decision: "allow" | "deny"; readonly reason: string }>;
+}
+
+/**
+ * WorkflowServiceDeps — the dependencies injected into the workflow
+ * service. The repositories + authorizer + audit writer + coordination
+ * service + idempotency store are all provider-neutral contracts (core
+ * or domain tier). The bootstrap composition root wires the concrete
+ * implementations.
+ */
+export interface WorkflowServiceDeps {
+  /** Opportunity lifecycle repository (used for opportunity transitions). */
+  readonly opportunityRepository: LifecycleRepository;
+  /** Contribution lifecycle repository (used for contribution transitions). */
+  readonly contributionRepository: LifecycleRepository;
+  /** Server-side authorization (deny-by-default). */
+  readonly authorizer: TransitionAuthorizer;
+  /** Audit writer (append-only; transactional buffer when applicable). */
+  readonly auditWriter: AuditWriter;
+}
+
+/**
+ * WorkflowService — the SOLE authority for lifecycle transitions
+ * (work order §4.1).
+ *
+ * `requestTransition` is the only public entry point. It:
+ *  1. Resolves the subject from the appropriate lifecycle repository.
+ *  2. Authorizes the transition through the {@link TransitionAuthorizer}
+ *     (deny-by-default; cross-org denied).
+ *  3. Acquires a per-subject coordination lock (non-authoritative
+ *     serialization — losing the coordination store cannot corrupt
+ *     authoritative state).
+ *  4. Applies the transition idempotently through the IdempotencyStore
+ *     (exactly-once-per-key; deterministic replay on duplicate).
+ *  5. Within the SAME authoritative transaction as the idempotency
+ *     record:
+ *     a. re-reads the subject (sees uncommitted writes in this tx);
+ *     b. checks `expectedVersion` (optimistic concurrency — rejects
+ *        stale writers);
+ *     c. evaluates the transition legality (state machine);
+ *     d. writes the updated subject (new state, version+1, lineage);
+ *     e. appends an audit record (atomic with the mutation).
+ *  6. Returns a stable {@link TransitionResult} with execution/
+ *     correlation/causation lineage + transaction id.
+ *
+ * Domain services (OpportunityService, ContributionService) MAY
+ * validate business preconditions but MUST NOT mutate lifecycle state
+ * directly — they route through `requestTransition`.
+ */
+export interface WorkflowService {
+  /**
+   * Request an authorized lifecycle transition. Idempotent: repeating
+   * with the same `idempotencyKey` is a deterministic replay.
+   *
+   * Throws:
+   *  - {@link LifecycleSubjectNotFoundError} when the subject does not exist.
+   *  - {@link AuthorizationError} when the actor is denied (deny-by-default).
+   *  - {@link IllegalTransitionError} when the (from, to) pair is not in the table.
+   *  - {@link TerminalStateError} when the subject is in a terminal state.
+   *  - {@link ConcurrentTransitionError} when `expectedVersion` is stale.
+   */
+  requestTransition(
+    request: TransitionRequest,
+    execution: ExecutionContext,
+  ): Promise<TransitionResult>;
+}
+
+/**
+ * The WorkflowsPort describes the boundary's readiness. After NET-W004
+ * it is `"ready"` (the boundary now carries the authoritative workflow
+ * service + transition table).
+ */
+export interface WorkflowsPort {
+  readonly boundary: "workflows";
+  readonly readiness: "ready";
+  readonly auditEventNamespaces: {
+    readonly opportunity: "opportunity.transition";
+    readonly contribution: "contribution.transition";
+  };
+}
+
+export type { ExecutionContext, AuthorityTransaction, LifecycleSubject, LifecycleSubjectKind, TransitionRequest, TransitionResult };

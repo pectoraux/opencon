@@ -214,6 +214,18 @@ export class PostgresAuthorityShim implements PostgresAuthority {
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
     this.loaded = true;
+    // Ensure the persistence dir exists before reading/writing. The
+    // dev/test provider-selection.ts sets the shim dir to a unique
+    // subdirectory under the OS tmp dir, which may not exist yet on
+    // first use. Without this mkdir, the first `fs.writeFile(tmp, ...)`
+    // fails with ENOENT because the parent dir is missing.
+    try {
+      await fs.mkdir(this.dir, { recursive: true });
+    } catch {
+      // If mkdir fails (e.g. permission), the subsequent load/read calls
+      // will surface the appropriate error. Don't mask the real failure
+      // here with a misleading "could not create dir" error.
+    }
     await this.loadCommitted();
     await this.loadInflight();
   }

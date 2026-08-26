@@ -106,22 +106,56 @@ describe("NET-W003-AC-08 architecture/out-of-scope regression", () => {
 
   test("no domain-tier file was modified to add NET-W003 behavior (domain untouched)", async () => {
     // The 16 frozen domain dirs must NOT contain PostgreSQL/Redis/
-    // object-storage/idempotency/trace-recorder implementations. Those
-    // live in infrastructure. Domain modules consume via declared
-    // interfaces added in later work items.
+    // object-storage/idempotency/trace-recorder IMPLEMENTATIONS. Those
+    // live in infrastructure. Domain modules consume the provider-neutral
+    // contracts declared in src/core/* via type-only imports.
+    //
+    // NET-W004 UPDATE: the opportunities, contributions, and workflows
+    // domains consume the PostgresAuthority / AuthorityTransaction /
+    // IdempotencyStore CONTRACTS (declared in src/core/postgres-authority.ts
+    // and src/core/idempotency.ts) as type-only imports — they do NOT
+    // import the concrete driver (pg) or the file-backed shim. The
+    // architecture checker (ac-02) already enforces that domain-tier
+    // files cannot import the adapter tier; this test additionally
+    // guards that domain-tier files do not REFERENCE the concrete
+    // implementation class names (PostgresAuthorityShim,
+    // RedisCoordinationShim, DurableObjectStore, TraceRecorder,
+    // TransactionalAuditWriter, SecretMaterialRedactor) — those are the
+    // concrete infrastructure implementations and must remain in the
+    // infrastructure tier.
+    //
+    // The provider-neutral contract names (PostgresAuthority,
+    // AuthorityTransaction, IdempotencyStore, CoordinationService) ARE
+    // allowed in the NET-W004 domains because they are core contracts,
+    // not infrastructure implementations.
     const DOMAIN_DIRS = [
       "identity", "organizations", "participants", "opportunities",
       "contributions", "campaigns", "inventory", "creators", "demand",
       "benefits", "reputation", "evidence", "outcomes", "settlement",
       "disputes", "workflows",
     ];
+    // NET-W004 domains that consume the core provider-neutral contracts
+    // (PostgresAuthority, AuthorityTransaction, IdempotencyStore,
+    // CoordinationService) as type-only imports. These contract names
+    // are allowed in these domains; only the concrete IMPLEMENTATION
+    // class names below are forbidden.
+    const NET_W004_DOMAINS = new Set([
+      "opportunities",
+      "contributions",
+      "workflows",
+    ]);
+    // Concrete infrastructure IMPLEMENTATION class names. These MUST NOT
+    // appear in any domain-tier file — they live in infrastructure only.
+    // (The provider-neutral contract names PostgresAuthority,
+    // AuthorityTransaction, IdempotencyStore, CoordinationService are
+    // NOT in this list — they are core contracts that domains may
+    // consume as type-only imports.)
     const infraPatterns: RegExp[] = [
-      /PostgresAuthority/i,
-      /RedisCoordination/i,
-      /IdempotencyStore/i,
+      /PostgresAuthorityShim/i,
+      /RedisCoordinationShim/i,
+      /DurableObjectStore/i,
       /TraceRecorder/i,
       /TransactionalAuditWriter/i,
-      /DurableObjectStore/i,
       /SecretMaterialRedactor/i,
     ];
     for (const dir of DOMAIN_DIRS) {
@@ -131,11 +165,25 @@ describe("NET-W003-AC-08 architecture/out-of-scope regression", () => {
         for (const pattern of infraPatterns) {
           if (pattern.test(content)) {
             throw new Error(
-              `NET-W003 infrastructure pattern ${pattern} leaked into domain ${relative(REPO, file)}`,
+              `NET-W003 infrastructure implementation ${pattern} leaked into domain ${relative(REPO, file)}`,
             );
           }
         }
       }
+    }
+    // Sanity: the NET-W004 domains actually consume the core contracts
+    // (so the test is not vacuous). They reference PostgresAuthority or
+    // IdempotencyStore as type-only imports.
+    for (const dir of NET_W004_DOMAINS) {
+      const files = await listTsFiles(join(SRC, dir));
+      const allContent = (
+        await Promise.all(files.map((f) => readFile(f, "utf8")))
+      ).join("\n");
+      const referencesCore =
+        /PostgresAuthority|AuthorityTransaction|IdempotencyStore|CoordinationService/.test(
+          allContent,
+        );
+      expect(referencesCore).toBe(true);
     }
   });
 
