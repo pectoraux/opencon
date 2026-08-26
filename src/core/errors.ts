@@ -198,6 +198,40 @@ export class InvariantError extends OpenConError {
 }
 
 /**
+ * Raised when the authoritative persistence boundary detects that its
+ * durable committed state is corrupt (e.g. a file-backed authority test
+ * double finds a malformed committed snapshot on recovery).
+ *
+ * Classification: `invariant` — NEVER retryable. An authority boundary
+ * MUST NOT silently convert storage corruption into an empty store
+ * (that would turn corruption into data loss). The operator must
+ * restore from backup / investigate; surfacing an explicit error is
+ * the safe recovery posture.
+ *
+ * Work order ref: NET-W003 §4.1 (PostgreSQL authoritative persistence),
+ * §4.5 (recovery restores only committed state) — architect re-review
+ * on PR #6: corruption of the committed snapshot must be surfaced as an
+ * explicit recovery/storage error rather than converting the
+ * authoritative state to empty.
+ */
+export class StorageCorruptionError extends OpenConError {
+  public constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+    cause?: unknown,
+  ) {
+    super({
+      code: "STORAGE_CORRUPTION",
+      classification: "invariant",
+      message,
+      retryable: false,
+      cause,
+      context,
+    });
+  }
+}
+
+/**
  * Classify an arbitrary thrown value into a serializable error record.
  * Used by the logger and worker boundary to normalize unknown failures.
  */

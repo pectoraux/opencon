@@ -49,7 +49,7 @@ Implement a provider-neutral authoritative persistence boundary with:
 - recovery-on-restart that restores only committed state (uncommitted writes are never visible after recovery);
 - stable, typed records carrying execution/correlation identifiers where they represent material mutations.
 
-PostgreSQL is the system of record for durable domain state (architecture-lock §3, §16). A real PostgreSQL driver is not coupled into this work item; the authority contract is proven by a clearly-marked test double that demonstrates the SAME authority semantics (durability across restart, transactional atomicity, recovery). Domain modules consume the authority boundary through declared ports, never through a driver.
+PostgreSQL is the system of record for durable domain state (architecture-lock §3, §16). The provider-neutral `PostgresAuthority` contract lives in `src/core/`; the REAL PostgreSQL driver integration lives behind the adapter boundary at `src/adapters/postgres/` (the `pg` package), and a clearly-marked file-backed test double at `src/persistence/` proves the SAME authority semantics (durability across restart, transactional atomicity, recovery) for deterministic unit tests that do not need a real database. Domain modules consume the authority boundary through the declared `PostgresAuthority` port, never through a driver — the architecture checker permits `pg` ONLY in the adapter tier (`ADAPTER_ALLOWED_EXTERNAL_PACKAGES`). Real-adapter integration evidence (commit/restart/rollback/recovery) is required (see §8 + the architect re-review note below).
 
 ### 4.2 Redis non-authoritative coordination
 
@@ -61,7 +61,7 @@ Implement a non-authoritative coordination boundary for:
 
 Redis, caches, queues and worker memory are NEVER authoritative state (architecture-lock §16). Loss of Redis coordination state MUST NOT imply loss of domain truth. The coordination boundary is explicitly recoverable and non-durable: clearing it never corrupts authoritative state.
 
-A real Redis client is not coupled into this work item; the coordination contract is proven by a clearly-marked test double that demonstrates the SAME non-authority semantics. The non-authority invariant is testable: destroying the coordination state leaves PostgreSQL authority intact.
+The provider-neutral `CoordinationService` contract lives in `src/core/`; the REAL Redis client integration lives behind the adapter boundary at `src/adapters/redis/` (the `ioredis` package; SET NX PX locks + Lua compare-and-delete release + TTL ephemeral values), and a clearly-marked in-process test double at `src/queues/` proves the SAME non-authority semantics for deterministic unit tests. The architecture checker permits `ioredis` ONLY in the adapter tier. The non-authority invariant is testable against BOTH: destroying the coordination state leaves PostgreSQL authority intact (proven against the real adapters in `tests/integration/redis-coordination-integration.test.ts`).
 
 ### 4.3 Object storage with durable references
 
@@ -169,7 +169,7 @@ TraceRecorder              (span/trace correlation lineage)
 AuditWriter                (transactional + material-mutation tracing — extended)
 ```
 
-External persistence/coordination drivers remain behind adapter boundaries. Concrete test doubles clearly marked as test doubles are permitted solely to prove the authority/non-authority/transaction/idempotency contracts (architecture check forbids external packages beyond `zod`).
+External persistence/coordination drivers remain behind the adapter boundary (`src/adapters/postgres/`, `src/adapters/redis/`); domain modules never import them. The architecture checker permits the concrete provider packages (`pg`, `ioredis`) ONLY in the adapter tier (`ADAPTER_ALLOWED_EXTERNAL_PACKAGES`) — every other tier (core/domain/infrastructure/neutral) importing a provider package is a violation of frozen architecture §14 (provider-specific SDK/types do not cross into core domain modules) and §2/§18 (external providers are integrated through `/adapters`). Clearly-marked test doubles (`PostgresAuthorityShim`, `RedisCoordinationShim`, `DurableObjectStore`) remain for deterministic unit tests that do not need real services; real-adapter integration tests (conditional on provisioned service availability, CI service containers + `docker-compose.yml` for local invocation) prove the SAME authority/non-authority/transaction/idempotency contracts against real PostgreSQL and Redis.
 
 ## 7. Acceptance criteria
 
@@ -273,3 +273,35 @@ The Work Item may move to verification only when:
 - the NET-W001/NET-W002 regression suites still pass unchanged.
 
 Architect review determines whether the item is approved, changes requested, or escalated for architecture change.
+
+## 12. Architect re-review note (PR #6)
+
+The initial PR #6 implementation shipped only clearly-marked test
+doubles (`PostgresAuthorityShim`, `RedisCoordinationShim`) and read
+the architecture checker's blanket external-package forbid (`only zod
+allowed`) as prohibiting the real `pg`/`ioredis` drivers. The architect
+re-review corrected that reading: the frozen architecture (§2, §14,
+§18, §19) already places external provider integrations behind
+`/adapters` with provider-specific SDK/types NOT crossing into core
+domain modules. The remediation therefore:
+
+- keeps the provider-neutral `PostgresAuthority` and `CoordinationService`
+  contracts in `src/core/` (unchanged) and the shims as test doubles;
+- adds the REAL `pg`-backed PostgreSQL adapter at
+  `src/adapters/postgres/` and the REAL `ioredis`-backed Redis adapter
+  at `src/adapters/redis/`;
+- updates the architecture checker (`scripts/lib/architecture.ts`) to
+  classify `pg`/`ioredis` as `external-adapter-only`, permitted ONLY in
+  the adapter tier and rejected everywhere else (so domain modules
+  remain provider-independent);
+- adds real-provider integration tests (conditional on provisioned
+  service availability — CI service containers + `docker-compose.yml`
+  for local invocation);
+- hardens recovery: a corrupt committed snapshot now surfaces as a
+  `StorageCorruptionError` rather than silently becoming an empty
+  store (an authority boundary must never convert corruption into
+  data loss).
+
+The frozen architecture (`spec/architecture.md`,
+`spec/architecture-lock.md`) is UNCHANGED. No downstream domain or
+economic behavior is introduced.

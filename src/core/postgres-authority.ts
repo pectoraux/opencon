@@ -15,11 +15,24 @@
  * The authority is a typed, relation-oriented key/value store
  * sufficient to prove the authority contract (durable records, atomic
  * transactions, recovery) without coupling domain code to a PostgreSQL
- * driver. The concrete implementation in src/persistence/ uses a
- * clearly-marked file-backed test double that demonstrates the SAME
- * authority semantics — a real `pg` driver is forbidden by the
- * architecture check (only `zod` external package is allowed) and is
- * an adapter concern for a later work item.
+ * driver. Domain and infrastructure modules consume this contract;
+ * the concrete implementations sit behind the adapter boundary:
+ *
+ *  - `src/adapters/postgres/postgres-authority-adapter.ts` — the REAL
+ *    PostgreSQL driver integration (the `pg` package), exercised by
+ *    `tests/integration/postgres-authority-integration.test.ts`
+ *    against a real PostgreSQL (CI service container or
+ *    `docker compose up`).
+ *  - `src/persistence/postgres-authority-shim.ts` — a clearly-marked
+ *    file-backed TEST DOUBLE for deterministic unit tests that do not
+ *    need a real database; it demonstrates the SAME authority
+ *    semantics (durability across restart, transactional atomicity,
+ *    recovery).
+ *
+ * The architecture checker permits `pg` ONLY in the adapter tier
+ * (`ADAPTER_ALLOWED_EXTERNAL_PACKAGES`); it is never imported from
+ * core/domain/infrastructure, so domain modules remain
+ * provider-independent (frozen architecture §14).
  *
  * Material mutations written through this boundary carry
  * execution/correlation identifiers (architecture-lock §12, NET-W003

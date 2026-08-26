@@ -1,0 +1,43 @@
+# Reproducible local invocation for the NET-W003 real-provider
+# integration tests (architect re-review on PR #6, requirement #4:
+# "the repository must contain the real integration path and a
+# reproducible local invocation").
+#
+# Usage:
+#   docker compose up -d
+#   export PG_TEST_DATABASE_URL="postgres://opencon:opencon@localhost:55432/opencon_test"
+#   export REDIS_TEST_URL="redis://localhost:56379"
+#   bun test tests/integration/
+#   docker compose down
+#
+# The integration tests are conditional: when the env vars above are
+# unset, every test in tests/integration/ is skipped (so `bun run
+# verify` stays green without provisioned services). CI provisions
+# equivalent service containers in .github/workflows/ci.yml.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: opencon
+      POSTGRES_PASSWORD: opencon
+      POSTGRES_DB: opencon_test
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "opencon", "-d", "opencon_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Integration tests create a unique schema per run (and DROP it on
+    # cleanup), so the data volume is ephemeral — no host bind mount.
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

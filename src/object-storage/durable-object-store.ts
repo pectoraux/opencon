@@ -20,9 +20,13 @@
  *    is rejected (evidence integrity — same as the NET-W001 in-memory
  *    store, now durable).
  *
- * TEST DOUBLE — a real object-storage backend (S3/GCS/Azure-Blob) is
- * an adapter concern for a later work item and is forbidden by the
- * architecture check (only `zod` external package allowed).
+ * TEST DOUBLE for the object-storage bytes: the file-backed backend
+ * here is sufficient to prove the durable-reference + content-integrity
+ * contract. A real cloud object-storage backend (S3/GCS/Azure-Blob)
+ * is a provider integration that lives behind the `/adapters` boundary
+ * (frozen architecture §14/§18) and is the subject of a later work
+ * item; the architecture checker permits provider SDKs ONLY in the
+ * adapter tier.
  */
 
 import { createHash } from "node:crypto";

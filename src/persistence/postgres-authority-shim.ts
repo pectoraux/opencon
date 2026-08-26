@@ -5,9 +5,9 @@
  * §4.5 (Transactions, rollback and recovery), AC-01 (PostgreSQL
  * authority), AC-05 (Transaction rollback/recovery).
  *
- * TEST DOUBLE — clearly marked. This is NOT a real PostgreSQL driver.
- * It is a file-backed authoritative persistence store that demonstrates
- * the SAME authority semantics required by NET-W003:
+ * TEST DOUBLE — clearly marked. This is NOT the real PostgreSQL
+ * driver. It is a file-backed authoritative persistence store that
+ * demonstrates the SAME authority semantics required by NET-W003:
  *
  *  - Durability: committed records survive process restart (persisted
  *    to `<dir>/committed.json` via atomic temp-file + rename).
@@ -18,10 +18,18 @@
  *    reports any interrupted (begun-but-not-settled) transactions as
  *    discarded. Uncommitted writes are NEVER visible after recovery.
  *
- * A real `pg` driver is forbidden by the architecture check (only `zod`
- * is an allowed external package) and is an adapter concern for a later
- * work item. Domain code consumes the {@link PostgresAuthority} contract;
- * it never imports this shim directly (only bootstrap/tests do).
+ * The REAL PostgreSQL driver integration lives in
+ * `src/adapters/postgres/postgres-authority-adapter.ts` (the `pg`
+ * package), exercised by `tests/integration/postgres-authority-integration.test.ts`
+ * against a real PostgreSQL service. This shim remains for
+ * deterministic unit tests that do not need a real database. Domain
+ * code consumes the {@link PostgresAuthority} contract; it never
+ * imports this shim directly (only bootstrap/tests do).
+ *
+ * Recovery hardening (architect re-review on PR #6): a corrupt
+ * committed snapshot surfaces as a {@link StorageCorruptionError}
+ * rather than silently becoming an empty store — an authority
+ * boundary must never convert storage corruption into data loss.
  */
 
 import { randomUUID } from "node:crypto";
@@ -34,7 +42,7 @@ import type {
   PostgresAuthority,
 } from "../core/postgres-authority.ts";
 import type { ExecutionContext } from "../core/execution-context.ts";
-import { InvariantError } from "../core/errors.ts";
+import { InvariantError, StorageCorruptionError } from "../core/errors.ts";
 
 /**
  * A committed record as persisted to the snapshot. The execution
@@ -221,39 +229,98 @@ export class PostgresAuthorityShim implements PostgresAuthority {
   private async loadCommitted(): Promise<void> {
     const path = this.committedPath();
     if (!existsSync(path)) return;
+    // An authority boundary MUST NOT silently convert storage
+    // corruption into an empty store — that would turn corruption
+    // into data loss. A malformed committed snapshot is surfaced as
+    // an explicit `StorageCorruptionError` (invariant / not retryable)
+    // so the operator restores from backup rather than running with a
+    // silently-wiped authority. (Architect re-review on PR #6.)
+    let raw: string;
     try {
-      const raw = await fs.readFile(path, "utf8");
-      const snap = JSON.parse(raw) as PersistedSnapshot;
-      for (const [coll, byKey] of Object.entries(snap.records)) {
+      raw = await fs.readFile(path, "utf8");
+    } catch (err) {
+      throw new StorageCorruptionError(
+        `authority committed snapshot is unreadable at ${path}`,
+        { path },
+        err,
+      );
+    }
+    let snap: PersistedSnapshot;
+    try {
+      snap = JSON.parse(raw) as PersistedSnapshot;
+    } catch (err) {
+      throw new StorageCorruptionError(
+        `authority committed snapshot is malformed (unparseable JSON) at ${path}`,
+        { path, length: raw.length },
+        err,
+      );
+    }
+    if (!snap || typeof snap !== "object" || snap.version !== 1) {
+      throw new StorageCorruptionError(
+        `authority committed snapshot has an unsupported/missing version at ${path}`,
+        { path, version: snap?.version },
+      );
+    }
+    try {
+      for (const [coll, byKey] of Object.entries(snap.records ?? {})) {
         const map = new Map<string, PersistedRecord>();
-        for (const [key, rec] of Object.entries(byKey)) {
+        for (const [key, rec] of Object.entries(byKey ?? {})) {
+          if (!rec || typeof rec !== "object") {
+            throw new StorageCorruptionError(
+              `authority committed snapshot has a malformed record for ${coll}/${key}`,
+              { path, collection: coll, key },
+            );
+          }
           map.set(key, rec as PersistedRecord);
         }
         this.committed.set(coll, map);
       }
       for (const [coll, byKey] of Object.entries(snap.revisions ?? {})) {
         const map = new Map<string, number>();
-        for (const [key, rev] of Object.entries(byKey)) {
+        for (const [key, rev] of Object.entries(byKey ?? {})) {
           map.set(key, rev as number);
         }
         this.revisions.set(coll, map);
       }
-    } catch {
-      // Corrupt snapshot — treat as empty (recovery is forward-only).
+    } catch (err) {
+      if (err instanceof StorageCorruptionError) throw err;
+      throw new StorageCorruptionError(
+        `authority committed snapshot is structurally corrupt at ${path}`,
+        { path },
+        err,
+      );
     }
   }
 
   private async loadInflight(): Promise<void> {
     const path = this.inflightPath();
     if (!existsSync(path)) return;
+    // The in-flight log is NON-AUTHORITATIVE coordination metadata —
+    // it only records begun-but-not-settled transaction ids so
+    // `recover()` can report them as discarded. Corruption here does
+    // NOT endanger committed state: the safe recovery posture is to
+    // treat ALL possibly-in-flight transactions as interrupted and
+    // discard them (which is exactly what `recover()` does). So unlike
+    // the committed snapshot, in-flight corruption is logged and
+    // treated as "no active txns" rather than surfacing as a hard
+    // error — recovery of committed state proceeds normally.
+    let raw: string;
     try {
-      const raw = await fs.readFile(path, "utf8");
+      raw = await fs.readFile(path, "utf8");
+    } catch (err) {
+      this.logger?.debug("authority.inflight_unreadable", { path });
+      return;
+    }
+    try {
       const log = JSON.parse(raw) as InflightLog;
-      for (const txId of log.activeTransactionIds) {
-        this.activeTxIds.add(txId);
+      if (log && Array.isArray(log.activeTransactionIds)) {
+        for (const txId of log.activeTransactionIds) {
+          if (typeof txId === "string") this.activeTxIds.add(txId);
+        }
       }
     } catch {
-      // Corrupt in-flight log — ignore.
+      // Corrupt in-flight log — treat as no active txns (safe).
+      this.logger?.debug("authority.inflight_corrupt_ignored", { path });
     }
   }
 

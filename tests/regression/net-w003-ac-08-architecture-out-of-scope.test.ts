@@ -25,7 +25,7 @@ import { describe, test, expect } from "bun:test";
 import { join, relative } from "node:path";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { scanArchitecture, INFRA_DIRS } from "../../scripts/lib/architecture.ts";
+import { scanArchitecture, INFRA_DIRS, ADAPTER_ALLOWED_EXTERNAL_PACKAGES, tierFromModulePath } from "../../scripts/lib/architecture.ts";
 
 const REPO = join(import.meta.dir, "../..");
 const SRC = join(REPO, "src");
@@ -139,10 +139,17 @@ describe("NET-W003-AC-08 architecture/out-of-scope regression", () => {
     }
   });
 
-  test("no external package beyond zod is imported anywhere in src/", async () => {
-    // The architecture check already forbids external-forbidden, but
-    // we assert explicitly: scan all .ts files under src/ and confirm
-    // no bare import of a non-builtin, non-zod package.
+  test("external provider packages are permitted ONLY in the adapter tier; zod everywhere", async () => {
+    // Architect re-review on PR #6: the frozen architecture places real
+    // provider integrations (pg, ioredis, ...) behind `/adapters` (§2,
+    // §18), with provider-specific SDK/types NOT crossing into core
+    // domain modules (§14). The architecture checker therefore:
+    //   - permits `pg` and `ioredis` ONLY under `src/adapters/**`
+    //     (adapter tier);
+    //   - permits `zod` (and `bun`) everywhere;
+    //   - forbids every other external package everywhere.
+    //
+    // This scans every .ts file under src/ and asserts the above.
     const files = await listTsFiles(SRC);
     const BUILTIN = new Set([
       "assert", "async_hooks", "buffer", "child_process", "cluster",
@@ -151,8 +158,16 @@ describe("NET-W003-AC-08 architecture/out-of-scope regression", () => {
       "string_decoder", "timers", "tls", "url", "util", "zlib",
     ]);
     const re = /(?:^|[;\s{}()])(?:import|export)(?:[^'"`;]*?from)?\s*["']([^"']+)["']/g;
+    const isAdapterFile = (f: string) => {
+      const rel = relative(SRC, f);
+      return rel === "adapters/port.ts" || rel === "adapters/index.ts" || rel === "adapters/module.ts"
+        ? false // neutral-tier adapter boundary files — NOT adapter tier
+        : rel.startsWith("adapters/");
+    };
+    const providerPackages = new Set<string>();
     for (const file of files) {
       const content = await readFile(file, "utf8");
+      const inAdapter = isAdapterFile(file);
       re.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = re.exec(content)) !== null) {
@@ -165,11 +180,67 @@ describe("NET-W003-AC-08 architecture/out-of-scope regression", () => {
           : spec.split("/")[0] ?? "";
         if (BUILTIN.has(base)) continue;
         if (base === "zod" || base === "bun") continue;
+        // Provider package (pg, ioredis, ...). Allowed ONLY in adapter tier.
+        if (ADAPTER_ALLOWED_EXTERNAL_PACKAGES.has(base)) {
+          providerPackages.add(base);
+          if (!inAdapter) {
+            throw new Error(
+              `Provider package "${base}" imported OUTSIDE the adapter tier in ${relative(REPO, file)} — providers must live behind /adapters (architecture §14/§18)`,
+            );
+          }
+          continue;
+        }
         throw new Error(
-          `External package "${base}" imported in ${relative(REPO, file)} — only zod is allowed`,
+          `External package "${base}" imported in ${relative(REPO, file)} — only zod (everywhere) and pg/ioredis (adapter-only) are allowed`,
         );
       }
     }
+    // Sanity: the real adapters actually exercise the provider path.
+    // (If this set is empty, the adapters weren't wired and the test
+    // would be vacuous.)
+    expect(providerPackages.has("pg") || providerPackages.has("ioredis")).toBe(true);
+  });
+
+  test("the real adapter files are classified adapter-tier and the full src scan is clean", async () => {
+    // The real PostgreSQL and Redis adapters import `pg` and `ioredis`.
+    // They MUST be classified as adapter-tier so the checker permits the
+    // provider packages there. Combined with the full src/ scan below
+    // (0 violations), this proves the adapter path is real and clean.
+    const pgAdapter = tierFromModulePath("adapters/postgres/postgres-authority-adapter.ts");
+    const pgIndex = tierFromModulePath("adapters/postgres/index.ts");
+    const redisAdapter = tierFromModulePath("adapters/redis/redis-coordination-adapter.ts");
+    const redisIndex = tierFromModulePath("adapters/redis/index.ts");
+    expect(pgAdapter).toBe("adapter");
+    expect(pgIndex).toBe("adapter");
+    expect(redisAdapter).toBe("adapter");
+    expect(redisIndex).toBe("adapter");
+    // The neutral adapter-boundary files (depth-1 port/index/module
+    // under adapters/) remain neutral-tier, NOT adapter-tier.
+    expect(tierFromModulePath("adapters/port.ts")).toBe("neutral");
+    expect(tierFromModulePath("adapters/index.ts")).toBe("neutral");
+    expect(tierFromModulePath("adapters/module.ts")).toBe("neutral");
+    // And the full src/ scan (including the adapters) is clean.
+    const result = await scanArchitecture({ root: SRC, repoSrc: SRC });
+    expect(result.violations).toEqual([]);
+    expect(result.filesScanned).toBeGreaterThan(0);
+  });
+
+  test("the architecture scanner rejects a domain -> provider import (provider leak guard)", async () => {
+    // Architect re-review on PR #6 requirement #5: "Ensure domain
+    // modules remain provider-independent and the architecture checker
+    // continues to reject domain -> provider dependencies." The fixture
+    // at tests/architecture/fixtures/violation/src/identity/provider-leak.ts
+    // is a domain-tier file that imports `pg`. The scanner MUST flag it
+    // with rule `external-provider-package-not-allowed-outside-adapter`.
+    const FIXTURE = join(REPO, "tests/architecture/fixtures/violation/src");
+    const result = await scanArchitecture({ root: FIXTURE, repoSrc: SRC });
+    const leak = result.violations.find(
+      (v) => v.rule === "external-provider-package-not-allowed-outside-adapter",
+    );
+    expect(leak).toBeDefined();
+    expect(leak!.importerTier).toBe("domain");
+    expect(leak!.importerDir).toBe("identity");
+    expect(leak!.specifier).toBe("pg");
   });
 
   test("the architecture check passes with all NET-W003 files (0 violations)", async () => {

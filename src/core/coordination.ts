@@ -14,9 +14,21 @@
  * The non-authority invariant is testable: destroying the coordination
  * state leaves PostgreSQL authority intact.
  *
- * This file defines interfaces ONLY. Concrete implementation lives in
- * src/queues/redis-coordination-shim.ts (a clearly-marked test double
- * that demonstrates the SAME non-authority semantics).
+ * This file defines interfaces ONLY. Concrete implementations sit
+ * behind the adapter boundary:
+ *  - `src/adapters/redis/redis-coordination-adapter.ts` — the REAL
+ *    Redis client integration (the `ioredis` package; SET NX PX locks
+ *    + Lua compare-and-delete release + TTL ephemeral values),
+ *    exercised by `tests/integration/redis-coordination-integration.test.ts`
+ *    against a real Redis (CI service container or `docker compose up`).
+ *  - `src/queues/redis-coordination-shim.ts` — a clearly-marked
+ *    in-process TEST DOUBLE for deterministic unit tests; it
+ *    demonstrates the SAME non-authority semantics.
+ *
+ * The architecture checker permits `ioredis` ONLY in the adapter tier
+ * (`ADAPTER_ALLOWED_EXTERNAL_PACKAGES`); it is never imported from
+ * core/domain/infrastructure, so domain modules remain
+ * provider-independent (frozen architecture §14).
  */
 
 export interface LockHandle {

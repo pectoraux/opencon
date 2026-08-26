@@ -5,8 +5,8 @@
  * AC-02 (Redis non-authority), architecture-lock §16 (Redis/caches/
  * queues are NEVER authoritative state).
  *
- * TEST DOUBLE — clearly marked. This is NOT a real Redis client. It is
- * an in-process coordination store that demonstrates the SAME
+ * TEST DOUBLE — clearly marked. This is NOT the real Redis client.
+ * It is an in-process coordination store that demonstrates the SAME
  * non-authority semantics required by NET-W003:
  *
  *  - Locks and ephemeral values live in process memory only.
@@ -15,9 +15,13 @@
  *    UNAFFECTED — that is the non-authority invariant proven in AC-02.
  *  - Locks are TTL-bounded; a holder MAY release early.
  *
- * A real Redis client (`ioredis` / `node-redis`) is forbidden by the
- * architecture check (only `zod` is an allowed external package) and
- * is an adapter concern for a later work item.
+ * The REAL Redis client integration lives in
+ * `src/adapters/redis/redis-coordination-adapter.ts` (the `ioredis`
+ * package; SET NX PX locks + Lua compare-and-delete release + TTL
+ * ephemeral values), exercised by
+ * `tests/integration/redis-coordination-integration.test.ts` against a
+ * real Redis service. This shim remains for deterministic unit tests
+ * that do not need a real Redis.
  */
 
 import { randomUUID } from "node:crypto";
