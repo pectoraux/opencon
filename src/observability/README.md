@@ -1,22 +1,34 @@
 # `observability` boundary
 
-**Tier:** infrastructure
-**Authority:** structured logging, health/readiness/liveness, correlation
-**Architecture ref:** `spec/architecture.md` §18 (Module ownership)
-**Concrete behaviour:** deferred to NET-W001
+**Tier:** infrastructure  
+**Authority:** structured logging, health/readiness/liveness, correlation,
+trace/span lineage. **NON-AUTHORITATIVE** (coordination, not truth).  
+**Architecture ref:** `spec/architecture.md` §18, §19;
+`spec/architecture-lock.md` §16 (observability is never authoritative)  
+**Concrete behaviour:** NET-W001 (logger + execution context + health) +
+NET-W003 (trace recorder)
 
-## Scope in NET-W001
+## Scope in NET-W003
 
-This boundary is established as an explicit module with a documented
-public interface (see `port.ts`) and a skeletal `Module` registration
-(`module.ts`). **No domain logic is implemented in NET-W001** per the
-work order explicit non-goals (§5). The boundary exists so that:
+NET-W003 extends the NET-W001 structured-logging/execution-context
+boundary with trace/correlation lineage:
 
-- the architecture enforcement check can verify dependency direction;
-- future work items have a stable home for their contracts and rules;
-- the module registry reports the boundary as initialized at startup.
+- **`TraceRecorder` contract** (`src/core/trace.ts`) — provider-neutral
+  span/trace port. A trace is a set of spans sharing a `correlationId`;
+  each span carries its own `executionId`, a `causationId` linking to
+  its parent span, an actor, a name and timing.
+- **`TraceRecorderImpl`** (`src/observability/trace-recorder.ts`) —
+  records spans. Spans propagate across the synchronous→asynchronous
+  boundary (request → enqueue → worker-execute) via the active
+  `ExecutionContext` (AsyncLocalStorage). A request→enqueue→job flow
+  produces a single trace sharing the `correlationId`, with the job
+  span's `causationId` linking to the request span's `executionId`.
 
-## Dependencies
+The NET-W001 structured logger, execution-context, and health aggregator
+are unchanged.
 
-None beyond the shared `core` contracts. Cross-domain access will
-occur through declared interfaces (added in later work items).
+## Non-authority invariant
+
+Observability is coordination, not truth (architecture-lock §16).
+Spans are non-durable and recoverable; losing the trace recorder does
+not lose domain state. The trace recorder is a diagnostic/lineage tool.

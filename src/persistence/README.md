@@ -1,22 +1,46 @@
 # `persistence` boundary
 
-**Tier:** infrastructure
-**Authority:** authoritative state (PostgreSQL in v1.0); transaction boundaries
-**Architecture ref:** `spec/architecture.md` §18 (Module ownership)
-**Concrete behaviour:** deferred to NET-W003
+**Tier:** infrastructure  
+**Authority:** authoritative state (PostgreSQL in v1.0); transaction
+boundaries; recovery; idempotency  
+**Architecture ref:** `spec/architecture.md` §18 (Module ownership),
+§19 (PostgreSQL authoritative); `spec/architecture-lock.md` §3, §16  
+**Concrete behaviour:** NET-W003
 
-## Scope in NET-W001
+## Scope in NET-W003
 
-This boundary is established as an explicit module with a documented
-public interface (see `port.ts`) and a skeletal `Module` registration
-(`module.ts`). **No domain logic is implemented in NET-W001** per the
-work order explicit non-goals (§5). The boundary exists so that:
+NET-W003 promotes this boundary from "skeleton" to "concrete". It ships:
 
-- the architecture enforcement check can verify dependency direction;
-- future work items have a stable home for their contracts and rules;
-- the module registry reports the boundary as initialized at startup.
+- **`PostgresAuthority` contract** (`src/core/postgres-authority.ts`) —
+  the provider-neutral authoritative persistence port: durable records
+  with execution/correlation lineage, transactions with real
+  commit/rollback, and recovery-on-restart.
+- **`PostgresAuthorityShim`** (`src/persistence/postgres-authority-shim.ts`) —
+  a file-backed test double that demonstrates the SAME authority
+  semantics as PostgreSQL: durability across restart, transactional
+  atomicity (buffered writes, atomic apply-on-commit, discard-on-rollback),
+  recovery reporting interrupted (begun-but-not-settled) transactions.
+  Clearly marked as a test double; a real `pg` driver is forbidden by
+  the architecture check (only `zod` is an allowed external package) and
+  is an adapter concern for a later work item.
+- **`TransactionManager`** — the NET-W001 contract is preserved; a new
+  `createDurableTransactionManager` wraps the `PostgresAuthority` so the
+  contract now carries REAL transaction semantics.
+- **`IdempotencyStore`** (`src/core/idempotency.ts` +
+  `src/persistence/idempotency-store.ts`) — exactly-once-per-key
+  material mutation, backed by the authority. The mutation and the
+  idempotency record commit atomically.
+
+## Non-authority
+
+Redis, caches, queues and worker memory are NEVER authoritative state
+(architecture-lock §16). The `persistence` boundary is the ONLY
+authoritative persistence surface. Coordination (locks, ephemeral state)
+lives in the `queues` boundary (`CoordinationService`), which is
+explicitly non-authoritative.
 
 ## Dependencies
 
-None beyond the shared `core` contracts. Cross-domain access will
-occur through declared interfaces (added in later work items).
+`core` contracts only. Domain modules consume persistence through
+declared interfaces (added in later work items) — never a concrete
+driver. The architecture check enforces this.

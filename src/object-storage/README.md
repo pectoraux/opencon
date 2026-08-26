@@ -1,22 +1,42 @@
 # `object-storage` boundary
 
-**Tier:** infrastructure
-**Authority:** large/immutable artifact storage referenced from PostgreSQL
-**Architecture ref:** `spec/architecture.md` §18 (Module ownership)
-**Concrete behaviour:** deferred to NET-W003
+**Tier:** infrastructure  
+**Authority:** large/immutable artifact storage referenced from PostgreSQL  
+**Architecture ref:** `spec/architecture.md` §18, §19 (object storage holds
+large/immutable artifacts referenced from PostgreSQL);
+`spec/architecture-lock.md` §17 (large/immutable artifacts live outside
+core relational rows and are referenced durably)  
+**Concrete behaviour:** NET-W003
 
-## Scope in NET-W001
+## Scope in NET-W003
 
-This boundary is established as an explicit module with a documented
-public interface (see `port.ts`) and a skeletal `Module` registration
-(`module.ts`). **No domain logic is implemented in NET-W001** per the
-work order explicit non-goals (§5). The boundary exists so that:
+NET-W003 promotes this boundary from "skeleton" to "concrete". It ships:
 
-- the architecture enforcement check can verify dependency direction;
-- future work items have a stable home for their contracts and rules;
-- the module registry reports the boundary as initialized at startup.
+- **`ObjectReferenceRepository` contract** (`src/core/object-store.ts`,
+  extended) — durable references to large artifacts, stored in the
+  PostgreSQL authority (NOT opaque giant blobs).
+- **`DurableObjectStore`** (`src/object-storage/durable-object-store.ts`) —
+  a file-backed test double that stores artifact BYTES on the filesystem
+  (content-addressed by SHA-256). The authority holds a durable
+  REFERENCE (key, bucket, size, content hash, created-at, immutable
+  marker) plus metadata — NEVER the bytes themselves.
+- **`createPostgresObjectReferenceRepository`** — authority-backed
+  reference repository. Retrieval verifies content integrity: the
+  recomputed SHA-256 of the retrieved bytes MUST match the stored
+  reference's `contentHash`. A mismatched reference is rejected.
+
+The NET-W001 in-memory `ObjectStore` remains a test double behind the
+same port.
+
+## Integrity invariant
+
+Large/immutable artifacts live OUTSIDE core relational rows
+(architecture-lock §17). The authority records durable references only.
+A reference whose stored `contentHash` does not match the artifact bytes
+is REJECTED on retrieval — evidence integrity is preserved.
 
 ## Dependencies
 
-None beyond the shared `core` contracts. Cross-domain access will
-occur through declared interfaces (added in later work items).
+`core` contracts only. A real object-storage backend (S3/GCS/Azure-Blob)
+is an adapter concern for a later work item and is forbidden by the
+architecture check (only `zod` external package allowed).
