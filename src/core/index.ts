@@ -80,3 +80,14 @@ export * from "./risk.ts";
 // with explicit timestamps). The /disputes domain implements the
 // behaviour; /settlement consumes the stake purpose kinds.
 export * from "./disputes.ts";
+// NET-W011 shared campaign vocabulary (the administrative status
+// machine owned by /campaigns, the closed objective-kind eligibility-
+// attribute/operator/evidence-requirement/clearing vocabularies
+// CAMP-001..005, pure validation against the frozen evidence/outcome/
+// attribution vocabularies, and the deterministic versioned
+// eligibility-policy reference). The /campaigns domain implements the
+// behaviour; /settlement consumes the additive campaign_budget stake
+// purpose kind; later work items (helpful contributions NET-W012,
+// reward integration NET-W014, inventory NET-W019+) consume the
+// references.
+export * from "./campaigns.ts";

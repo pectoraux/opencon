@@ -1073,6 +1073,47 @@ export interface ApiStakeView {
   readonly description: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// NET-W011 campaign views (/campaigns boundary)
+// ---------------------------------------------------------------------------
+
+export interface ApiCampaignView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly ownerPersonId: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly status: string;
+  readonly currentPolicyVersion: number | null;
+  readonly budget: {
+    readonly stakeId: string | null;
+    readonly committedAmount: number | null;
+    readonly committedAt: string | null;
+    readonly releasedAt: string | null;
+  };
+  readonly events: readonly Record<string, unknown>[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ApiCampaignPolicyView {
+  readonly id: string;
+  readonly campaignId: string;
+  readonly organizationScopeId: string;
+  readonly version: number;
+  readonly formatVersion: string;
+  readonly objectives: readonly Record<string, unknown>[];
+  readonly eligibility: Record<string, unknown>;
+  readonly outcomePolicy: Record<string, unknown>;
+  readonly evidencePolicy: Record<string, unknown>;
+  readonly budget: Record<string, unknown>;
+  readonly attributionRules: readonly Record<string, unknown>[];
+  readonly clearingRules: readonly Record<string, unknown>[];
+  readonly opportunitySpecs: readonly Record<string, unknown>[];
+  readonly createdBy: string;
+  readonly createdAt: string;
+}
+
 export interface ApiCommands {
   /** Create a canonical person identity. Returns the public view. */
   createIdentity(
@@ -1897,6 +1938,136 @@ export interface ApiCommands {
 
   /** Fetch a stake record from the settlement authority (public read). */
   getStake(execution: ExecutionContext, id: string): Promise<ApiStakeView | null>;
+
+  // -----------------------------------------------------------------
+  // NET-W011 campaigns (/campaigns boundary)
+  // -----------------------------------------------------------------
+
+  /**
+   * Create a campaign (protected; the person actor becomes the
+   * owner). The record starts DRAFT with an append-only history.
+   */
+  createCampaign(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ campaign: ApiCampaignView; created: boolean }>;
+
+  /**
+   * Define the next immutable campaign policy version (protected;
+   * owner-only): objectives, eligibility, outcome/evidence policy,
+   * budget, attribution rules, clearing rules and opportunity specs
+   * — validated against the frozen vocabularies (CAMP-002).
+   */
+  defineCampaignPolicy(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ policy: ApiCampaignPolicyView; created: boolean }>;
+
+  /**
+   * Activate (protected; owner-only; the CAMP-002 gate: complete
+   * policy + escrowed budget before ACTIVE).
+   */
+  activateCampaign(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiCampaignView>;
+
+  /** Pause (protected; owner-only; ACTIVE → PAUSED). */
+  pauseCampaign(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiCampaignView>;
+
+  /** Resume (protected; owner-only; PAUSED → ACTIVE; re-runs the gate). */
+  resumeCampaign(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiCampaignView>;
+
+  /** Complete (protected; owner-only; → COMPLETED terminal). */
+  completeCampaign(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiCampaignView>;
+
+  /** Cancel (protected; owner-only; → CANCELLED terminal). */
+  cancelCampaign(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiCampaignView>;
+
+  /**
+   * Commit the campaign budget (protected; owner-only): escrows the
+   * declared total through the SETTLEMENT authority's stake commands
+   * (`campaign_budget` purpose) and records the reference on the
+   * campaign. No second economic system (AC-03).
+   */
+  commitCampaignBudget(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ campaign: ApiCampaignView; stake: ApiStakeView }>;
+
+  /**
+   * Release the campaign budget (protected; owner-only; terminal
+   * campaign only): the settlement authority releases the escrow,
+   * then the release is recorded on the campaign.
+   */
+  releaseCampaignBudget(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ campaign: ApiCampaignView; stake: ApiStakeView }>;
+
+  /**
+   * Publish a contribution opportunity from a policy spec (protected;
+   * owner-only; ACTIVE campaign): composes a real Opportunity through
+   * the opportunities boundary carrying the versioned eligibility
+   * reference `campaign_policy:{campaignId}:{version}:{specId}`, then
+   * records the publication. Lifecycle stays with /workflows (AC-04).
+   */
+  publishCampaignOpportunity(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ campaign: ApiCampaignView; opportunity: ApiOpportunityView }>;
+
+  /** Fetch a campaign with its immutable history (public read). */
+  getCampaign(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiCampaignView | null>;
+
+  /** List an org's campaigns, optionally filtered by status (public read). */
+  listCampaigns(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    statuses?: readonly string[],
+  ): Promise<readonly ApiCampaignView[]>;
+
+  /** List a campaign's immutable policy versions (public read). */
+  listCampaignPolicies(
+    execution: ExecutionContext,
+    campaignId: string,
+  ): Promise<readonly ApiCampaignPolicyView[]>;
+
+  /** List a campaign's published opportunities (public read). */
+  listCampaignOpportunities(
+    execution: ExecutionContext,
+    campaignId: string,
+  ): Promise<readonly {
+    opportunityId: string;
+    specId: string;
+    policyVersion: number;
+    publishedAt: string;
+  }[]>;
 }
 
 export type { ExecutionContext };

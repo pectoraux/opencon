@@ -313,12 +313,19 @@ export function isEconomicStakeState(value: string): value is EconomicStakeState
 }
 
 /**
- * The purposes a stake may be committed for. NET-W010 ships exactly
- * one: `dispute_challenge` (challenge/appeal participation, per the
- * NET-W010 work item). The purpose is the linkage the disputes
- * boundary verifies when a stake is bonded to a dispute record.
+ * The purposes a stake may be committed for. NET-W010 shipped
+ * `dispute_challenge` (challenge/appeal participation). NET-W011 adds
+ * `campaign_budget` (additive, non-breaking): a campaign's declared
+ * budget is ESCROWED through the settlement authority's stake
+ * commands before the campaign may activate — the campaign domain
+ * only records the references (no hidden ledger; the /campaigns
+ * boundary carries no economic-unit mutation methods). The purpose
+ * is the linkage each boundary verifies against its own records.
  */
-export const ECONOMIC_STAKE_PURPOSE_KINDS = ["dispute_challenge"] as const;
+export const ECONOMIC_STAKE_PURPOSE_KINDS = [
+  "campaign_budget",
+  "dispute_challenge",
+] as const;
 
 export type EconomicStakePurposeKind = (typeof ECONOMIC_STAKE_PURPOSE_KINDS)[number];
 

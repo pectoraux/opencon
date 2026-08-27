@@ -122,7 +122,21 @@ const NET_W008_DOMAINS = ["settlement"];
 // /workflows; NET-W009 work order §4 invariants 1–2).
 const NET_W009_DOMAINS = ["disputes"];
 
-// Domains still deferred past NET-W009 (must remain skeletons).
+// Domains implemented in NET-W011 (no longer skeletons). The campaigns
+// domain (the Phase-4 Campaign boundary) carries the CAMPAIGN DOMAIN:
+// first-class campaign records with the administrative status machine,
+// immutable versioned campaign policy (objectives, eligibility,
+// outcome/evidence policy, budget declarations, attribution rules,
+// clearing rules, opportunity specs), budget-commitment references
+// through the settlement escrow, and campaign-to-opportunity
+// composition references. It introduces NO economically material
+// behaviour (budgets are declarations; the escrow posts through
+// /settlement at the composition root) and NO lifecycle mutation
+// (opportunity lifecycle stays with /workflows; NET-W011 work order
+// §4 authority separation).
+const NET_W011_DOMAINS = ["campaigns"];
+
+// Domains still deferred past NET-W011 (must remain skeletons).
 const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
   (d) =>
     !NET_W002_DOMAINS.includes(d) &&
@@ -131,7 +145,8 @@ const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
     !NET_W006_DOMAINS.includes(d) &&
     !NET_W007_DOMAINS.includes(d) &&
     !NET_W008_DOMAINS.includes(d) &&
-    !NET_W009_DOMAINS.includes(d),
+    !NET_W009_DOMAINS.includes(d) &&
+    !NET_W011_DOMAINS.includes(d),
 );
 
 // Patterns that would indicate economically/material domain logic,
@@ -324,6 +339,26 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
       // assigns to /disputes).
       expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
       expect(moduleExport.describe?.() ?? "").toMatch(/NET-W009/);
+    }
+  });
+
+  test("NET-W011 domain modules are non-skeletal (tier domain, no 'skeleton' marker, reference NET-W011)", async () => {
+    for (const dir of NET_W011_DOMAINS) {
+      const modulePath = join(SRC, dir, "module.ts");
+      expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
+      const mod = await import(`../../src/${dir}/module.ts`);
+      const moduleExport = Object.values(mod)[0] as {
+        name: string;
+        tier: string;
+        describe?: () => string;
+      };
+      expect(moduleExport.tier).toBe("domain");
+      // NET-W011 modules are no longer skeletons — the campaigns
+      // boundary carries the campaign domain (policy/configuration
+      // authority; economics + lifecycle stay with /settlement and
+      // /workflows per the NET-W011 work order §4).
+      expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
+      expect(moduleExport.describe?.() ?? "").toMatch(/NET-W011/);
     }
   });
 

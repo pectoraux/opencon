@@ -251,6 +251,11 @@ import { createRiskAssessmentService } from "../disputes/assessment-service.ts";
 import { createRiskCaseService } from "../disputes/case-service.ts";
 import { createRiskControlService } from "../disputes/control-service.ts";
 import { createDisputeService } from "../disputes/dispute-service.ts";
+import {
+  createAuthorityCampaignRepository,
+  createAuthorityCampaignPolicyRepository,
+} from "../campaigns/authority-campaign-repository.ts";
+import { createCampaignService } from "../campaigns/campaign-service.ts";
 import type {
   ActivateRiskControlInput,
   AppealDisputeInput,
@@ -271,6 +276,11 @@ import type {
   SupersedeRiskSignalInput,
   DisputeService,
 } from "../disputes/port.ts";
+import type {
+  CampaignPolicySections,
+  CampaignService,
+  DefineCampaignPolicyInput,
+} from "../campaigns/port.ts";
 import type { RiskOperationClass } from "../core/risk.ts";
 
 // Boundary module registrations (composition root imports all).
@@ -406,6 +416,8 @@ export interface Runtime {
   readonly riskControlService: RiskControlService;
   // NET-W010 disputes (challenges/disputes/appeals) service.
   readonly disputeService: DisputeService;
+  // NET-W011 campaigns (campaign policy/configuration) service.
+  readonly campaignService: CampaignService;
   // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
   readonly idempotency: IdempotencyStore;
   initialize(): Promise<readonly { name: string; initialized: boolean }[]>;
@@ -1488,6 +1500,86 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   });
 
   // ------------------------------------------------------------------
+  // NET-W011 campaigns wiring (campaign policy/configuration).
+  //
+  // The campaign lookups are thin read-only adapters over the OWNING
+  // domains' repositories (settlement stakes + reward policies,
+  // opportunities, identity) — the same dependency-inversion pattern
+  // as the dispute lookups above. The /campaigns domain imports core
+  // contracts only; economic EXECUTION (the budget escrow) and
+  // opportunity COMPOSITION happen through the wired services at the
+  // composition-root commands below (never inside the campaigns
+  // domain: no hidden economic or lifecycle authority).
+  // ------------------------------------------------------------------
+  const campaignPersonLookup = {
+    async exists(personId: string) {
+      return identityRepo.exists(personId);
+    },
+  };
+  const campaignStakeLookup = {
+    async resolveStake(id: string) {
+      const stake = await stakeRepo.findById(id);
+      return stake
+        ? {
+            organizationScopeId: stake.organizationScopeId,
+            ownerPersonId: stake.ownerPersonId,
+            amount: stake.amount,
+            unit: stake.unit,
+            state: stake.state,
+            purposeKind: stake.purpose.kind,
+            purposeId: stake.purpose.id,
+            committedAt: stake.committedAt,
+          }
+        : null;
+    },
+  };
+  const campaignRewardPolicyLookup = {
+    async resolvePolicy(policyId: string) {
+      const latest = await rewardPolicyRepo.findLatestVersion(policyId);
+      return latest
+        ? {
+            organizationScopeId: latest.organizationScopeId,
+            latestVersion: latest.version,
+          }
+        : null;
+    },
+  };
+  const campaignOpportunityLookup = {
+    async resolveOpportunity(id: string) {
+      const opportunity = await opportunityRepo.findById(id);
+      return opportunity
+        ? {
+            organizationScopeId: opportunity.organizationScopeId,
+            state: opportunity.state,
+            opportunityType: opportunity.opportunityType,
+            eligibilityPolicyReference: opportunity.eligibilityPolicyReference,
+          }
+        : null;
+    },
+  };
+  const campaignRepo = createAuthorityCampaignRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("campaigns").debug(m, f) },
+  });
+  const campaignPolicyRepo = createAuthorityCampaignPolicyRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("campaigns").debug(m, f) },
+  });
+  const campaignService = createCampaignService({
+    repository: campaignRepo,
+    policyRepository: campaignPolicyRepo,
+    lookups: {
+      person: campaignPersonLookup,
+      stake: campaignStakeLookup,
+      rewardPolicy: campaignRewardPolicyLookup,
+      opportunity: campaignOpportunityLookup,
+    },
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("campaigns"),
+  });
+
+  // ------------------------------------------------------------------
   // NET-W009 §3.7 ECONOMIC GATE (the lock-invariant-21 enforcement
   // point). The composition root — NOT the risk domain, NOT the
   // settlement domain — consults the active-control registry before
@@ -2016,6 +2108,65 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       outcome: stake.outcome as unknown as Record<string, unknown> | null,
       transactionId: stake.transactionId,
       description: stake.description,
+    };
+  }
+  // NET-W011 view helpers (domain entity → API view).
+  function toCampaignView(
+    campaign: import("../campaigns/port.ts").CampaignRecord,
+  ) {
+    return {
+      id: campaign.id,
+      organizationScopeId: campaign.organizationScopeId,
+      ownerPersonId: campaign.ownerPersonId,
+      name: campaign.name,
+      description: campaign.description,
+      status: campaign.status,
+      currentPolicyVersion: campaign.currentPolicyVersion,
+      budget: campaign.budget as unknown as {
+        stakeId: string | null;
+        committedAmount: number | null;
+        committedAt: string | null;
+        releasedAt: string | null;
+      },
+      events: campaign.events as unknown as readonly Record<string, unknown>[],
+      createdAt: campaign.createdAt,
+      updatedAt: campaign.updatedAt,
+    };
+  }
+  function toCampaignPolicyView(
+    policy: import("../campaigns/port.ts").CampaignPolicy,
+  ) {
+    return {
+      id: policy.id,
+      campaignId: policy.campaignId,
+      organizationScopeId: policy.organizationScopeId,
+      version: policy.version,
+      formatVersion: policy.formatVersion,
+      objectives: policy.objectives as unknown as readonly Record<
+        string,
+        unknown
+      >[],
+      eligibility: policy.eligibility as unknown as Record<string, unknown>,
+      outcomePolicy: policy.outcomePolicy as unknown as Record<string, unknown>,
+      evidencePolicy: policy.evidencePolicy as unknown as Record<
+        string,
+        unknown
+      >,
+      budget: policy.budget as unknown as Record<string, unknown>,
+      attributionRules: policy.attributionRules as unknown as readonly Record<
+        string,
+        unknown
+      >[],
+      clearingRules: policy.clearingRules as unknown as readonly Record<
+        string,
+        unknown
+      >[],
+      opportunitySpecs: policy.opportunitySpecs as unknown as readonly Record<
+        string,
+        unknown
+      >[],
+      createdBy: policy.createdBy,
+      createdAt: policy.createdAt,
     };
   }
 
@@ -3965,6 +4116,251 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         return null;
       }
     },
+
+    // -- NET-W011 campaign commands ---------------------------------------
+    //
+    // COMPOSITION-ROOT ORCHESTRATION (the authority-separation
+    // pattern): the campaign domain owns policy/configuration
+    // decisions; the SETTLEMENT authority escrows the budget (the
+    // campaign_budget stake); the OPPORTUNITIES/WORKFLOWS authorities
+    // own opportunity creation + lifecycle. The composition root
+    // sequences them with COMPOUND idempotency keys (`${key}:stake`,
+    // `${key}:record`, `${key}:opportunity`, …) so a retried
+    // composite replays each step idempotently (the NET-W009/010
+    // precedent). The /campaigns domain code never calls /settlement
+    // or /opportunities.
+
+    async createCampaign(execution, _actorPersonId, input) {
+      const result = await campaignService.createCampaign(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+        name: input.name as string,
+        ...(input.description !== undefined
+          ? { description: input.description as string }
+          : {}),
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return { campaign: toCampaignView(result.campaign), created: result.created };
+    },
+
+    async defineCampaignPolicy(execution, _actorPersonId, input) {
+      const result = await campaignService.defineCampaignPolicy(execution, {
+        campaignId: input.campaignId as string,
+        policy: input.policy as unknown as CampaignPolicySections,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return {
+        policy: toCampaignPolicyView(result.policy),
+        created: result.created,
+      };
+    },
+
+    async activateCampaign(execution, _actorPersonId, input) {
+      const updated = await campaignService.activateCampaign(execution, {
+        campaignId: input.campaignId as string,
+        ...(input.reason !== undefined ? { reason: input.reason as string } : {}),
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toCampaignView(updated);
+    },
+
+    async pauseCampaign(execution, _actorPersonId, input) {
+      const updated = await campaignService.pauseCampaign(execution, {
+        campaignId: input.campaignId as string,
+        ...(input.reason !== undefined ? { reason: input.reason as string } : {}),
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toCampaignView(updated);
+    },
+
+    async resumeCampaign(execution, _actorPersonId, input) {
+      const updated = await campaignService.resumeCampaign(execution, {
+        campaignId: input.campaignId as string,
+        ...(input.reason !== undefined ? { reason: input.reason as string } : {}),
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toCampaignView(updated);
+    },
+
+    async completeCampaign(execution, _actorPersonId, input) {
+      const updated = await campaignService.completeCampaign(execution, {
+        campaignId: input.campaignId as string,
+        ...(input.reason !== undefined ? { reason: input.reason as string } : {}),
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toCampaignView(updated);
+    },
+
+    async cancelCampaign(execution, _actorPersonId, input) {
+      const updated = await campaignService.cancelCampaign(execution, {
+        campaignId: input.campaignId as string,
+        ...(input.reason !== undefined ? { reason: input.reason as string } : {}),
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toCampaignView(updated);
+    },
+
+    async commitCampaignBudget(execution, _actorPersonId, input) {
+      // 1. Resolve the campaign + its current declared budget (the
+      //    domain re-verifies everything in-transaction).
+      const campaign = await campaignService.getCampaign(
+        execution,
+        input.campaignId as string,
+      );
+      const versions = await campaignService.listPolicyVersions(
+        execution,
+        campaign.id,
+      );
+      const policy = versions[versions.length - 1];
+      if (policy === undefined || policy.budget.totalAmount <= 0) {
+        const { OpenConError: CampaignError } = await import("../core/errors.ts");
+        throw new CampaignError({
+          code: "CAMPAIGN_VALIDATION",
+          classification: "validation",
+          message: `campaign ${campaign.id} declares no positive budget to commit`,
+          context: { campaignId: campaign.id },
+        });
+      }
+      // 2. THE ESCROW through the settlement authority (the economic
+      //    authority — never the campaigns domain). One COMMITTED
+      //    stake per purpose is enforced by the settlement boundary.
+      const staked = await stakeService.commitStake(execution, {
+        organizationScopeId: campaign.organizationScopeId,
+        ownerPersonId: campaign.ownerPersonId,
+        amount: policy.budget.totalAmount,
+        purpose: { kind: "campaign_budget", id: campaign.id },
+        description: `campaign budget escrow for campaign ${campaign.id}`,
+        idempotencyKey: `${input.idempotencyKey}:stake`,
+      });
+      // 3. Record the commitment on the campaign (verifies
+      //    owner/purpose/state/amount through the read-only stake
+      //    lookup).
+      const updated = await campaignService.recordBudgetCommitment(execution, {
+        campaignId: campaign.id,
+        stakeId: staked.stake.id,
+        idempotencyKey: `${input.idempotencyKey}:record`,
+      });
+      return { campaign: toCampaignView(updated), stake: toStakeView(staked.stake) };
+    },
+
+    async releaseCampaignBudget(execution, _actorPersonId, input) {
+      // 1. The campaign must be terminal with a recorded commitment.
+      const campaign = await campaignService.getCampaign(
+        execution,
+        input.campaignId as string,
+      );
+      if (campaign.budget.stakeId === null) {
+        const { OpenConError: CampaignError } = await import("../core/errors.ts");
+        throw new CampaignError({
+          code: "CAMPAIGN_VALIDATION",
+          classification: "validation",
+          message: `campaign ${campaign.id} carries no budget commitment to release`,
+          context: { campaignId: campaign.id },
+        });
+      }
+      // 2. The release through the settlement authority, then 3.
+      //    record the outcome on the campaign (append-only
+      //    bookkeeping).
+      const released = await stakeService.releaseStake(execution, {
+        stakeId: campaign.budget.stakeId,
+        reason: `campaign ${campaign.id} ${campaign.status.toLowerCase()} — budget release`,
+        idempotencyKey: `${input.idempotencyKey}:release`,
+      });
+      const updated = await campaignService.recordBudgetRelease(execution, {
+        campaignId: campaign.id,
+        stakeId: released.id,
+        idempotencyKey: `${input.idempotencyKey}:record`,
+      });
+      return { campaign: toCampaignView(updated), stake: toStakeView(released) };
+    },
+
+    async publishCampaignOpportunity(execution, _actorPersonId, input) {
+      // 1. Resolve the neutral publish draft (campaign ACTIVE + spec
+      //    in the current policy version + the deterministic
+      //    versioned eligibility reference).
+      const draft = await campaignService.resolveOpportunityDraft(
+        execution,
+        input.campaignId as string,
+        input.specId as string,
+      );
+      // 2. COMPOSE the real opportunity through the opportunities
+      //    boundary (DRAFT, version 0 — every lifecycle transition
+      //    stays with /workflows).
+      const opportunity = await opportunityService.createOpportunity(
+        execution,
+        {
+          organizationScopeId: draft.organizationScopeId,
+          ownerId: (await campaignService.getCampaign(execution, draft.campaignId))
+            .ownerPersonId,
+          opportunityType: draft.opportunityType,
+          title: draft.title,
+          brief: draft.brief,
+          eligibilityPolicyReference: draft.eligibilityPolicyReference,
+          contributionRequirements: draft.contributionRequirements,
+          evidenceReferencePlaceholders: draft.evidenceReferencePlaceholders,
+        },
+      );
+      // 3. Record the publication (verifies the opportunity through
+      //    the read-only lookup: scope, type, exact reference).
+      const updated = await campaignService.recordOpportunityPublication(
+        execution,
+        {
+          campaignId: draft.campaignId,
+          specId: draft.specId,
+          policyVersion: draft.policyVersion,
+          opportunityId: opportunity.id,
+          idempotencyKey: `${input.idempotencyKey}:record`,
+        },
+      );
+      return {
+        campaign: toCampaignView(updated),
+        opportunity: {
+          id: opportunity.id,
+          organizationScopeId: opportunity.organizationScopeId,
+          ownerId: opportunity.ownerId,
+          opportunityType: opportunity.opportunityType,
+          title: opportunity.title,
+          state: opportunity.state,
+          version: opportunity.version,
+          createdAt: opportunity.createdAt,
+        },
+      };
+    },
+
+    async getCampaign(execution, id) {
+      try {
+        const campaign = await campaignService.getCampaign(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toCampaignView(campaign);
+      } catch {
+        return null;
+      }
+    },
+
+    async listCampaigns(execution, organizationScopeId, statuses) {
+      const campaigns = await campaignService.listCampaigns(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        statuses,
+      );
+      return campaigns.map(toCampaignView);
+    },
+
+    async listCampaignPolicies(execution, campaignId) {
+      const policies = await campaignService.listPolicyVersions(
+        getExecutionContext() ?? execution,
+        campaignId,
+      );
+      return policies.map(toCampaignPolicyView);
+    },
+
+    async listCampaignOpportunities(execution, campaignId) {
+      return campaignService.listPublishedOpportunities(
+        getExecutionContext() ?? execution,
+        campaignId,
+      );
+    },
   };
 
   const registry = createModuleRegistry(snapshot, logger);
@@ -4093,6 +4489,8 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     riskControlService,
     // NET-W010 disputes (challenges/disputes/appeals) service.
     disputeService,
+    // NET-W011 campaigns (campaign policy/configuration) service.
+    campaignService,
     // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
     idempotency,
     async initialize() {

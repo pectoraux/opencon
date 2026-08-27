@@ -1,0 +1,455 @@
+/**
+ * Shared campaign vocabulary (core contracts).
+ *
+ * Architecture ref: spec/architecture.md §7 (Farmable contribution
+ * market — campaigns generalize the Farmable model into the protocol),
+ * §18 (module ownership: `/campaigns` owns campaign domain rules —
+ * campaign policy/configuration ONLY); spec/architecture-lock.md §2
+ * (the sixteen frozen core domains — `/campaigns` is the Phase-4
+ * Campaign boundary), §5 (economic authority: every economic
+ * commitment and clearing goes through `/settlement` — campaigns
+ * declare policy, they never move value), §7 (`/workflows` is the
+ * sole lifecycle authority for opportunities/contributions).
+ *
+ * Work order ref: spec/work-orders/NET-W011.md
+ *   §3.1 Campaign records + the administrative status machine.
+ *   §3.2 Versioned campaign policy (objectives, eligibility,
+ *        outcome/evidence policy, budget, attribution rules,
+ *        clearing rules, opportunity specs).
+ *   §3.3 Budget commitments through the settlement authority.
+ *   §3.4 Campaign-to-opportunity composition through /workflows.
+ * Requirements: CAMP-001 (objective kinds), CAMP-002 (policy defined
+ * before activation), CAMP-003 (ad-ecosystem interop — neutral
+ * vocabularies only), CAMP-004 (non-reciprocal cross-promotion),
+ * CAMP-005 (multilateral clearing rules).
+ *
+ * THE KEY RULES (work order §4 — authority separation):
+ *  - `/campaigns` owns campaign POLICY/CONFIGURATION only: objectives,
+ *    eligibility, outcome/evidence policy, budget declarations,
+ *    attribution rules and clearing rules are declared here;
+ *  - `/workflows` remains the lifecycle authority: campaigns compose
+ *    contribution opportunities THROUGH the opportunity/workflow
+ *    services at the composition root — campaign code never mutates a
+ *    lifecycle state;
+ *  - `/settlement` remains the economic authority: budget commitments
+ *    and every clearing consequence execute ONLY through settlement
+ *    commands (the campaign domain carries NO economic-unit mutation
+ *    methods and NO balances — the budget block on a campaign record
+ *    is bookkeeping REFERENCES to settlement records, the exact
+ *    NET-W010 stake-block precedent);
+ *  - `/evidence` remains the truth authority and `/outcomes` the
+ *    measurement authority: campaign policies REFERENCE the frozen
+ *    evidence grades/source types and outcome/attribution
+ *    vocabularies — they never redefine them;
+ *  - provider-specific semantics stay OUTSIDE the campaign domain
+ *    (AC-06): every vocabulary here is closed and provider-neutral.
+ *
+ * This module is data + pure validation ONLY — no I/O, no wall clock
+ * reads inside pure helpers, no lifecycle behaviour (the status
+ * machine validation lives in the campaign service).
+ */
+
+import { OpenConError } from "./errors.ts";
+import {
+  ECONOMIC_DECIMALS,
+  ECONOMIC_MAX_AMOUNT,
+  ECONOMIC_SCALE,
+} from "./economics.ts";
+import { isEvidenceGrade, isEvidenceSourceType } from "./evidence.ts";
+import { isAttributionMode } from "./measurement.ts";
+import { isStandardOutcomeType } from "./evidence.ts";
+
+/**
+ * The campaign administrative status machine (work order §3.1). This
+ * is the CAMPAIGN RECORD's own administrative lifecycle (a policy/
+ * configuration lifecycle owned by /campaigns — the dispute-record
+ * precedent); it is deliberately NOT a `LifecycleSubjectKind`:
+ * contribution OPPORTUNITIES remain the workflow-lifecycle subjects,
+ * owned exclusively by `/workflows`.
+ *
+ * ```text
+ * DRAFT ──activate──→ ACTIVE ⇄ pause/resume ⇄ PAUSED
+ *   │                    │ │
+ *   │                    └──┼── complete ──→ COMPLETED (terminal)
+ *   └── cancel ──────────┴── cancel ──→ CANCELLED (terminal)
+ * ```
+ *
+ *  - `DRAFT` — the campaign exists; policy versions may be defined;
+ *    nothing can be published.
+ *  - `ACTIVE` — the activation gate passed (a complete policy version
+ *    is pinned and the declared budget, if any, is committed through
+ *    the settlement authority); opportunity publication is allowed.
+ *  - `PAUSED` — temporarily not publishable; can be resumed.
+ *  - `COMPLETED` / `CANCELLED` — terminal; no further mutations
+ *    except recording the budget release.
+ */
+export const CAMPAIGN_STATUSES = [
+  "DRAFT",
+  "ACTIVE",
+  "PAUSED",
+  "COMPLETED",
+  "CANCELLED",
+] as const;
+
+export type CampaignStatus = (typeof CAMPAIGN_STATUSES)[number];
+
+export function isCampaignStatus(value: string): value is CampaignStatus {
+  return (CAMPAIGN_STATUSES as readonly string[]).includes(value);
+}
+
+/** The terminal administrative statuses (no forward transitions). */
+export const CAMPAIGN_TERMINAL_STATUSES: readonly CampaignStatus[] = [
+  "COMPLETED",
+  "CANCELLED",
+];
+
+export function isTerminalCampaignStatus(value: string): boolean {
+  return (CAMPAIGN_TERMINAL_STATUSES as readonly string[]).includes(value);
+}
+
+/** The statuses in which contribution opportunities may be published. */
+export const CAMPAIGN_PUBLISHABLE_STATUSES: readonly CampaignStatus[] = [
+  "ACTIVE",
+];
+
+/**
+ * The campaign objective kinds (requirement CAMP-001): the closed,
+ * provider-neutral vocabulary a campaign objective may declare. The
+ * Farmable-derived model generalized into the protocol — awareness,
+ * attention, engagement, intent, conversion, incremental conversion,
+ * creator content, (non-reciprocal) cross-promotion and referral.
+ */
+export const CAMPAIGN_OBJECTIVE_KINDS = [
+  "awareness",
+  "attention",
+  "engagement",
+  "intent",
+  "conversion",
+  "incremental_conversion",
+  "creator_content",
+  "cross_promotion",
+  "referral",
+] as const;
+
+export type CampaignObjectiveKind = (typeof CAMPAIGN_OBJECTIVE_KINDS)[number];
+
+export function isCampaignObjectiveKind(
+  value: string,
+): value is CampaignObjectiveKind {
+  return (CAMPAIGN_OBJECTIVE_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * The closed eligibility-rule attribute vocabulary (AC-06:
+ * provider-neutral). Eligibility rules reference NEUTRAL participant/
+ * contribution/evidence/measurement attributes; provider-specific
+ * targeting semantics (platform accounts, proprietary segments,
+ * publisher inventories) are out of scope for the campaign domain.
+ */
+export const CAMPAIGN_ELIGIBILITY_ATTRIBUTES = [
+  "participant_class",
+  "region",
+  "language",
+  "contribution_type",
+  "evidence_grade",
+  "measurement_kind",
+] as const;
+
+export type CampaignEligibilityAttribute =
+  (typeof CAMPAIGN_ELIGIBILITY_ATTRIBUTES)[number];
+
+export function isCampaignEligibilityAttribute(
+  value: string,
+): value is CampaignEligibilityAttribute {
+  return (CAMPAIGN_ELIGIBILITY_ATTRIBUTES as readonly string[]).includes(value);
+}
+
+/** The closed eligibility-rule operator vocabulary. */
+export const CAMPAIGN_ELIGIBILITY_OPERATORS = [
+  "equals",
+  "not_equals",
+  "in",
+  "not_in",
+  "gte",
+  "lte",
+] as const;
+
+export type CampaignEligibilityOperator =
+  (typeof CAMPAIGN_ELIGIBILITY_OPERATORS)[number];
+
+export function isCampaignEligibilityOperator(
+  value: string,
+): value is CampaignEligibilityOperator {
+  return (
+    (CAMPAIGN_ELIGIBILITY_OPERATORS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * The kinds of authoritative records an evidence requirement may
+ * demand (work order §3.2): each REFERENCES an existing authority —
+ * `proof_of_value` (the /evidence Proof-of-Value object), 
+ * `measured_outcome` (the /outcomes measured record) or
+ * `evidence_record` (a raw /evidence record). The campaign domain
+ * never re-implements their semantics.
+ */
+export const CAMPAIGN_EVIDENCE_REQUIREMENT_KINDS = [
+  "proof_of_value",
+  "measured_outcome",
+  "evidence_record",
+] as const;
+
+export type CampaignEvidenceRequirementKind =
+  (typeof CAMPAIGN_EVIDENCE_REQUIREMENT_KINDS)[number];
+
+export function isCampaignEvidenceRequirementKind(
+  value: string,
+): value is CampaignEvidenceRequirementKind {
+  return (
+    (CAMPAIGN_EVIDENCE_REQUIREMENT_KINDS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * The bases a clearing rule may draw against (CAMP-005): attributed
+ * normalized outcomes, verified evidence, or measured value — all
+ * REFERENCES to authoritative records produced downstream; clearing
+ * EXECUTION is NET-W014 (explicit non-goal here).
+ */
+export const CAMPAIGN_CLEARING_BASES = [
+  "attributed_outcome",
+  "verified_evidence",
+  "measured_value",
+] as const;
+
+export type CampaignClearingBasis = (typeof CAMPAIGN_CLEARING_BASES)[number];
+
+export function isCampaignClearingBasis(
+  value: string,
+): value is CampaignClearingBasis {
+  return (CAMPAIGN_CLEARING_BASES as readonly string[]).includes(value);
+}
+
+/**
+ * The settlement primitives a clearing rule may draw through (CAMP-005
+ * multilateral clearing). These are REFERENCES to the canonical
+ * `/settlement` commands (`reward_allocation`, `credit_issuance`,
+ * `cash_obligation`) — the campaign domain itself never executes
+ * them (NET-W014 will, consuming these declared rules).
+ */
+export const CAMPAIGN_CLEARING_DRAW_KINDS = [
+  "reward_allocation",
+  "credit_issuance",
+  "cash_obligation",
+] as const;
+
+export type CampaignClearingDrawKind =
+  (typeof CAMPAIGN_CLEARING_DRAW_KINDS)[number];
+
+export function isCampaignClearingDrawKind(
+  value: string,
+): value is CampaignClearingDrawKind {
+  return (CAMPAIGN_CLEARING_DRAW_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * The recorded policy-format lineage. Every campaign policy version
+ * carries it; determinism (CAMP-002) requires that the policy that
+ * governed activation is reproducible from the stored version.
+ */
+export const CAMPAIGN_POLICY_FORMAT = "NET-W011:1" as const;
+
+/**
+ * The stake purpose kind campaign budget commitments use (additive to
+ * the NET-W010 `dispute_challenge` purpose). The settlement authority
+ * owns the escrow postings; the campaign domain only records the
+ * references (the stake-block precedent).
+ */
+export const CAMPAIGN_BUDGET_STAKE_PURPOSE_KIND = "campaign_budget" as const;
+
+// ---------------------------------------------------------------------------
+// Pure validation helpers
+// ---------------------------------------------------------------------------
+
+export class InvalidCampaignPolicyError extends OpenConError {
+  constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+  ) {
+    super({
+      code: "CAMPAIGN_POLICY_VALIDATION",
+      classification: "validation",
+      message,
+      context,
+    });
+  }
+}
+
+/**
+ * Validate a campaign budget amount — NON-NEGATIVE (0 allowed: a
+ * zero-budget campaign — e.g. a non-reciprocal cross-promotion,
+ * CAMP-004 — declares no economic encumbrance), ≤ 6 decimals and ≤
+ * the frozen economic maximum. Reuses the frozen arithmetic bounds
+ * (ECONOMIC_SCALE/ECONOMIC_MAX_AMOUNT) so campaign-declared amounts
+ * obey the SAME arithmetic as the ledger, with the campaign-specific
+ * zero allowance (the ledger's own validator demands strictly
+ * positive MOVEMENTS; a declaration may legitimately be empty).
+ */
+export function validateCampaignAmount(
+  field: string,
+  amount: number,
+): number {
+  if (typeof amount !== "number" || !Number.isFinite(amount)) {
+    throw new InvalidCampaignPolicyError(
+      `${field} must be a finite number (got ${String(amount)})`,
+      { field, amount },
+    );
+  }
+  if (amount < 0) {
+    throw new InvalidCampaignPolicyError(
+      `${field} must be >= 0 (got ${String(amount)})`,
+      { field, amount },
+    );
+  }
+  if (amount > ECONOMIC_MAX_AMOUNT) {
+    throw new InvalidCampaignPolicyError(
+      `${field} exceeds the maximum representable amount ${String(ECONOMIC_MAX_AMOUNT)} (got ${String(amount)})`,
+      { field, amount },
+    );
+  }
+  const minor = Math.round(amount * ECONOMIC_SCALE);
+  if (Math.abs(minor / ECONOMIC_SCALE - amount) > Number.EPSILON) {
+    throw new InvalidCampaignPolicyError(
+      `${field} must have at most ${ECONOMIC_DECIMALS} decimals (got ${String(amount)})`,
+      { field, amount },
+    );
+  }
+  return amount;
+}
+
+/** Validate a confidence threshold ∈ [0, 1] (CAMP-002 confidence policy). */
+export function validateCampaignConfidenceThreshold(
+  field: string,
+  value: number,
+): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > 1
+  ) {
+    throw new InvalidCampaignPolicyError(
+      `${field} must be a confidence threshold in [0, 1] (got ${String(value)})`,
+      { field, value },
+    );
+  }
+  return value;
+}
+
+/** Validate a positive whole-day window (attribution/outcome windows). */
+export function validateCampaignWindowDays(
+  field: string,
+  windowDays: number,
+): number {
+  if (
+    typeof windowDays !== "number" ||
+    !Number.isInteger(windowDays) ||
+    windowDays <= 0 ||
+    windowDays > 3650
+  ) {
+    throw new InvalidCampaignPolicyError(
+      `${field} must be a whole number of days in (0, 3650] (got ${String(windowDays)})`,
+      { field, windowDays },
+    );
+  }
+  return windowDays;
+}
+
+/** Validate that an evidence grade reference is a frozen core grade. */
+export function assertCampaignEvidenceGrade(
+  field: string,
+  grade: string,
+): void {
+  if (!isEvidenceGrade(grade)) {
+    throw new InvalidCampaignPolicyError(
+      `${field} must reference a frozen evidence grade (got ${String(grade)})`,
+      { field, grade },
+    );
+  }
+}
+
+/** Validate that evidence source-type references are frozen core types. */
+export function assertCampaignEvidenceSourceTypes(
+  field: string,
+  sourceTypes: readonly string[],
+): void {
+  for (const sourceType of sourceTypes) {
+    if (!isEvidenceSourceType(sourceType)) {
+      throw new InvalidCampaignPolicyError(
+        `${field} must reference frozen evidence source types (got ${String(sourceType)})`,
+        { field, sourceType },
+      );
+    }
+  }
+}
+
+/** Validate that an outcome-type reference is a frozen standard type. */
+export function assertCampaignOutcomeType(
+  field: string,
+  outcomeType: string,
+): void {
+  if (!isStandardOutcomeType(outcomeType)) {
+    throw new InvalidCampaignPolicyError(
+      `${field} must reference a standard outcome type (got ${String(outcomeType)})`,
+      { field, outcomeType },
+    );
+  }
+}
+
+/** Validate that an attribution-mode reference is a frozen core mode. */
+export function assertCampaignAttributionMode(
+  field: string,
+  mode: string,
+): void {
+  if (!isAttributionMode(mode)) {
+    throw new InvalidCampaignPolicyError(
+      `${field} must reference a frozen attribution mode (deterministic, probabilistic or experimental — got ${String(mode)})`,
+      { field, mode },
+    );
+  }
+}
+
+/**
+ * The deterministic incremental-conversion attribution constraint
+ * (CAMP-002 confidence policy): an `incremental_conversion` objective's
+ * attribution rules MUST use the experimental attribution mode with
+ * `requiresExperiment` — incremental claims are only attributable
+ * through controlled experiments (architecture §13).
+ */
+export function assertIncrementalAttributionConstraint(
+  objectiveKind: string,
+  model: string,
+  requiresExperiment: boolean,
+): void {
+  if (objectiveKind === "incremental_conversion") {
+    if (model !== "experimental" || requiresExperiment !== true) {
+      throw new InvalidCampaignPolicyError(
+        "an incremental_conversion objective requires experimental attribution with requiresExperiment=true (incremental claims are only attributable through controlled experiments)",
+        { objectiveKind, model, requiresExperiment },
+      );
+    }
+  }
+}
+
+/**
+ * The stable, versioned eligibility-policy reference a published
+ * opportunity carries (consumed by later enforcement — NET-W012+).
+ * Deterministic: `campaign_policy:{campaignId}:{version}:{specId}`.
+ */
+export function campaignEligibilityPolicyReference(
+  campaignId: string,
+  policyVersion: number,
+  specId: string,
+): string {
+  return `campaign_policy:${campaignId}:${policyVersion}:${specId}`;
+}

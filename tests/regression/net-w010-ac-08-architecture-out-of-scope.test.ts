@@ -282,7 +282,15 @@ describe("NET-W010-AC-08 architecture/out-of-scope regression", () => {
       "RELEASED",
       "FORFEITED",
     ]);
-    expect([...core.ECONOMIC_STAKE_PURPOSE_KINDS]).toEqual(["dispute_challenge"]);
+    // NET-W011 (additive, deliberate amendment — the exact pattern
+    // NET-W010 itself used on the W008 pins): `campaign_budget` joins
+    // the stake purpose vocabulary. Campaign budget escrows post
+    // through the SAME settlement stake commands; the ad-hoc
+    // `ad_campaign` kind remains rejected.
+    expect([...core.ECONOMIC_STAKE_PURPOSE_KINDS]).toEqual([
+      "campaign_budget",
+      "dispute_challenge",
+    ]);
     expect(core.isEconomicStakeState("COMMITTED")).toBe(true);
     expect(core.isEconomicStakePurposeKind("ad_campaign")).toBe(false);
   });
