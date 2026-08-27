@@ -1,22 +1,52 @@
 # `settlement` boundary
 
 **Tier:** domain
-**Authority:** credits, pending/mature value, cash/credit settlement
-**Architecture ref:** `spec/architecture.md` §18 (Module ownership)
-**Concrete behaviour:** deferred to NET-W008
+**Authority:** credits, pending/mature value, cash/credit settlement (architecture §18)
+**Architecture ref:** `spec/architecture.md` §4–§5, §18–§19; `spec/architecture-lock.md` §1 (invariants 3/4/7), §5 (economic authority), §13 (economic safety invariants 19–21), §14 (invariant 25)
+**Concrete behaviour:** NET-W008 (see `spec/work-orders/NET-W008.md`)
 
-## Scope in NET-W001
+## Scope after NET-W008
 
-This boundary is established as an explicit module with a documented
-public interface (see `port.ts`) and a skeletal `Module` registration
-(`module.ts`). **No domain logic is implemented in NET-W001** per the
-work order explicit non-goals (§5). The boundary exists so that:
+The settlement boundary is the protocol's internal accounting
+authority for verified value — a provider-neutral, double-entry
+economic ledger:
 
-- the architecture enforcement check can verify dependency direction;
-- future work items have a stable home for their contracts and rules;
-- the module registry reports the boundary as initialized at startup.
+- **Economic value records** — pending value recognized ONLY from
+  qualifying VERIFIED upstream sources (a VERIFIED Proof-of-Value, a
+  VERIFIED measured outcome, or platform/attested/provider evidence),
+  with an explicit, auditable maturation gate (`immediate` or
+  `fixed_window` settlement windows — SETTLE-002) and append-only
+  reversals.
+- **Participation Credits** — issued ONLY against a MATURE value
+  record carrying a VERIFIED Proof-of-Value reference
+  (architecture-lock invariant 20), at an explicit recorded rate;
+  credits are an earned accounting unit, distinct from cash
+  (invariant 7) and never a speculative asset (ECON-005).
+- **Reward accounting** — immutable versioned allocation policies
+  (the NET-W007 lineage pattern) and deterministic splits of a mature
+  source record among beneficiaries (Σ shares === source exactly).
+- **Cash accounting** — payables/receivables in the `cash` unit with
+  internal settlement state; external payment execution is NET-W030
+  behind the neutral `/payments` port (invariant 25) and never
+  happens here.
+- **Conversions** — the ONLY cash↔credits path: an explicit ledger
+  entry recording both amounts (the rate is recorded, never assumed
+  1:1).
+
+## Conservation model
+
+Every ledger transaction balances per unit (`Σdebit === Σcredit` in
+scaled-integer arithmetic), every posting keeps every account balance
+≥ 0, and balances are always DERIVED from the immutable entry set
+(never stored as mutable counters) — the ledger is reconstructable by
+construction. Concurrent postings serialize per account (sorted lock
+acquisition — see `posting.ts`), the documented monolith stand-in for
+PostgreSQL `SELECT … FOR UPDATE` row locking.
 
 ## Dependencies
 
-None beyond the shared `core` contracts. Cross-domain access will
-occur through declared interfaces (added in later work items).
+`core` contracts only. Upstream record resolution (evidence,
+Proof-of-Value, measured outcomes, persons) arrives through the
+neutral structural lookups declared in `port.ts`, wired by the
+bootstrap composition root. The domain imports no infrastructure, no
+other domain and no payment provider SDK.

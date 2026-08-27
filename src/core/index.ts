@@ -55,3 +55,12 @@ export * from "./measurement.ts";
 // (fraud signals NET-W009, creator reputation NET-W015, portable
 // proofs NET-W031) consume the vocabulary.
 export * from "./reputation.ts";
+// NET-W008 shared economic vocabulary (the frozen unit types ECON-004,
+// qualifying verified value source kinds, value states with explicit
+// maturation strategies SETTLE-002, ledger account kinds with normal
+// balance sides, transaction kinds, and deterministic scaled-integer
+// amount arithmetic ECON-001..003). The /settlement domain implements
+// the behaviour; later work items (fraud holds NET-W009/010, campaigns
+// NET-W011+, benefit pools NET-W028, external settlement NET-W030)
+// consume the vocabulary.
+export * from "./economics.ts";

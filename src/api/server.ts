@@ -1217,6 +1217,513 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // -- NET-W008 settlement routes ----------------------------------------
+
+    // POST /api/settlement/values — record pending economic value
+    // (protected; the verified-source input gate).
+    if (path === "/api/settlement/values" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "economicValue.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseEconomicValueInput(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createEconomicValue(guarded.execution, input),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/settlement/values — a beneficiary's value records
+    // (public; optional state filter).
+    if (path === "/api/settlement/values" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      const beneficiaryPersonId = url.searchParams.get("beneficiaryPersonId");
+      if (!organizationScopeId || !beneficiaryPersonId) {
+        throw apiValidationError(
+          'query parameters "organizationScopeId" and "beneficiaryPersonId" are required',
+        );
+      }
+      const stateParam = url.searchParams.get("state");
+      const states = stateParam !== null ? stateParam.split(",").map((s) => s.trim()) : undefined;
+      const views = await opts.commands.listEconomicValues(
+        ctx,
+        organizationScopeId,
+        beneficiaryPersonId,
+        states,
+      );
+      await send(res, 200, { beneficiaryPersonId, values: views });
+      return true;
+    }
+
+    // POST /api/settlement/values/:id/mature — the explicit maturation
+    // gate (protected).
+    if (
+      path.startsWith("/api/settlement/values/") &&
+      path.endsWith("/mature") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "economicValue.mature", "*", res);
+      if (!guarded) return true;
+      const valueRecordId = path.slice("/api/settlement/values/".length, -"/mature".length);
+      const body = await readBody(req);
+      const input = parseMatureValueInput(body, valueRecordId);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.matureEconomicValue(guarded.execution, input),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/settlement/values/:id/reverse — append-only correction
+    // (protected).
+    if (
+      path.startsWith("/api/settlement/values/") &&
+      path.endsWith("/reverse") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "economicValue.reverse", "*", res);
+      if (!guarded) return true;
+      const valueRecordId = path.slice("/api/settlement/values/".length, -"/reverse".length);
+      const body = await readBody(req);
+      const input = parseReversalInput(body, valueRecordId);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.reverseEconomicValue(guarded.execution, {
+          valueRecordId: input.id,
+          reason: input.reason,
+          idempotencyKey: input.idempotencyKey,
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/settlement/values/:id — fetch a value record (public).
+    if (path.startsWith("/api/settlement/values/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/settlement/values/".length);
+      const view = await opts.commands.getEconomicValue(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `economic value record not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/settlement/credit-issuances — issue Participation
+    // Credits (protected; PoV-gated — architecture-lock invariant 20).
+    if (path === "/api/settlement/credit-issuances" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "creditIssuance.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseIssueCreditsInput(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.issueCredits(guarded.execution, input),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/settlement/credit-issuances — a beneficiary's issuances
+    // (public).
+    if (path === "/api/settlement/credit-issuances" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      const beneficiaryPersonId = url.searchParams.get("beneficiaryPersonId");
+      if (!organizationScopeId || !beneficiaryPersonId) {
+        throw apiValidationError(
+          'query parameters "organizationScopeId" and "beneficiaryPersonId" are required',
+        );
+      }
+      const views = await opts.commands.listCreditIssuances(
+        ctx,
+        organizationScopeId,
+        beneficiaryPersonId,
+      );
+      await send(res, 200, { beneficiaryPersonId, issuances: views });
+      return true;
+    }
+
+    // POST /api/settlement/credit-issuances/:id/reverse — append-only
+    // correction (protected).
+    if (
+      path.startsWith("/api/settlement/credit-issuances/") &&
+      path.endsWith("/reverse") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "creditIssuance.reverse", "*", res);
+      if (!guarded) return true;
+      const issuanceId = path.slice("/api/settlement/credit-issuances/".length, -"/reverse".length);
+      const body = await readBody(req);
+      const input = parseReversalInput(body, issuanceId);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.reverseCreditIssuance(guarded.execution, {
+          issuanceId: input.id,
+          reason: input.reason,
+          idempotencyKey: input.idempotencyKey,
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/settlement/credit-issuances/:id — fetch an issuance
+    // (public).
+    if (path.startsWith("/api/settlement/credit-issuances/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/settlement/credit-issuances/".length);
+      const view = await opts.commands.getCreditIssuance(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `credit issuance not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/settlement/reward-policies — create a reward-policy
+    // version (protected).
+    if (path === "/api/settlement/reward-policies" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "rewardPolicy.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseRewardPolicyInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createRewardPolicy(guarded.execution, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/settlement/reward-policies/:policyId/versions — list a
+    // lineage's versions (public).
+    if (
+      path.startsWith("/api/settlement/reward-policies/") &&
+      path.endsWith("/versions") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const policyId = path.slice("/api/settlement/reward-policies/".length, -"/versions".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId") ?? undefined;
+      const views = await opts.commands.listRewardPolicyVersions(ctx, policyId, organizationScopeId);
+      await send(res, 200, { policyId, versions: views });
+      return true;
+    }
+
+    // GET /api/settlement/reward-policies/:id — fetch a policy version
+    // by record id (public).
+    if (path.startsWith("/api/settlement/reward-policies/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/settlement/reward-policies/".length);
+      const view = await opts.commands.getRewardPolicy(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `reward policy not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/settlement/reward-allocations — allocate rewards from a
+    // mature value record (protected; deterministic split).
+    if (path === "/api/settlement/reward-allocations" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "rewardAllocation.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseAllocateRewardsInput(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.allocateRewards(guarded.execution, input),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/settlement/reward-allocations — an organization's
+    // allocations (public).
+    if (path === "/api/settlement/reward-allocations" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const views = await opts.commands.listRewardAllocations(ctx, organizationScopeId);
+      await send(res, 200, { organizationScopeId, allocations: views });
+      return true;
+    }
+
+    // POST /api/settlement/reward-allocations/:id/reverse — append-only
+    // correction (protected).
+    if (
+      path.startsWith("/api/settlement/reward-allocations/") &&
+      path.endsWith("/reverse") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "rewardAllocation.reverse", "*", res);
+      if (!guarded) return true;
+      const allocationId = path.slice("/api/settlement/reward-allocations/".length, -"/reverse".length);
+      const body = await readBody(req);
+      const input = parseReversalInput(body, allocationId);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.reverseRewardAllocation(guarded.execution, {
+          allocationId: input.id,
+          reason: input.reason,
+          idempotencyKey: input.idempotencyKey,
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/settlement/reward-allocations/:id — fetch an allocation
+    // (public).
+    if (path.startsWith("/api/settlement/reward-allocations/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/settlement/reward-allocations/".length);
+      const view = await opts.commands.getRewardAllocation(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `reward allocation not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/settlement/cash-obligations — record a cash obligation
+    // (protected).
+    if (path === "/api/settlement/cash-obligations" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "cashObligation.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseCashObligationInput(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recordCashObligation(guarded.execution, input),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/settlement/cash-obligations — an organization's
+    // obligations (public).
+    if (path === "/api/settlement/cash-obligations" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const views = await opts.commands.listCashObligations(ctx, organizationScopeId);
+      await send(res, 200, { organizationScopeId, obligations: views });
+      return true;
+    }
+
+    // POST /api/settlement/cash-obligations/:id/settle — internal
+    // settlement (protected; external rails are NET-W030).
+    if (
+      path.startsWith("/api/settlement/cash-obligations/") &&
+      path.endsWith("/settle") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "cashObligation.settle", "*", res);
+      if (!guarded) return true;
+      const obligationId = path.slice("/api/settlement/cash-obligations/".length, -"/settle".length);
+      const body = await readBody(req);
+      const idempotencyKey = bodyIdempotencyKey(body);
+      const reference =
+        body && typeof body === "object" && typeof (body as Record<string, unknown>).reference === "string"
+          ? (body as Record<string, unknown>).reference as string
+          : undefined;
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.settleCashObligation(guarded.execution, {
+          obligationId,
+          ...(reference !== undefined ? { reference } : {}),
+          idempotencyKey,
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/settlement/cash-obligations/:id/reverse — append-only
+    // correction (protected).
+    if (
+      path.startsWith("/api/settlement/cash-obligations/") &&
+      path.endsWith("/reverse") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "cashObligation.reverse", "*", res);
+      if (!guarded) return true;
+      const obligationId = path.slice("/api/settlement/cash-obligations/".length, -"/reverse".length);
+      const body = await readBody(req);
+      const input = parseReversalInput(body, obligationId);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.reverseCashObligation(guarded.execution, {
+          obligationId: input.id,
+          reason: input.reason,
+          idempotencyKey: input.idempotencyKey,
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/settlement/cash-obligations/:id — fetch an obligation
+    // (public).
+    if (path.startsWith("/api/settlement/cash-obligations/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/settlement/cash-obligations/".length);
+      const view = await opts.commands.getCashObligation(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `cash obligation not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/settlement/conversions — record an explicit cash↔credits
+    // conversion (protected; the ONLY path between the two concepts).
+    if (path === "/api/settlement/conversions" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "conversion.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseConversionInput(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recordConversion(guarded.execution, input),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/settlement/conversions — an organization's conversions
+    // (public).
+    if (path === "/api/settlement/conversions" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const views = await opts.commands.listConversions(ctx, organizationScopeId);
+      await send(res, 200, { organizationScopeId, conversions: views });
+      return true;
+    }
+
+    // POST /api/settlement/conversions/:id/reverse — append-only
+    // correction (protected).
+    if (
+      path.startsWith("/api/settlement/conversions/") &&
+      path.endsWith("/reverse") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "conversion.reverse", "*", res);
+      if (!guarded) return true;
+      const conversionId = path.slice("/api/settlement/conversions/".length, -"/reverse".length);
+      const body = await readBody(req);
+      const input = parseReversalInput(body, conversionId);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.reverseConversion(guarded.execution, {
+          conversionId: input.id,
+          reason: input.reason,
+          idempotencyKey: input.idempotencyKey,
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/settlement/conversions/:id — fetch a conversion (public).
+    if (path.startsWith("/api/settlement/conversions/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/settlement/conversions/".length);
+      const view = await opts.commands.getConversion(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `conversion not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/settlement/ledger/transactions — every ledger transaction
+    // for an economic record (public; AUD-003 settlement lineage).
+    if (path === "/api/settlement/ledger/transactions" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const subjectKind = url.searchParams.get("subjectKind");
+      const subjectId = url.searchParams.get("subjectId");
+      if (!subjectKind || !subjectId) {
+        throw apiValidationError(
+          'query parameters "subjectKind" and "subjectId" are required',
+        );
+      }
+      const views = await opts.commands.listLedgerTransactionsBySubject(ctx, subjectKind, subjectId);
+      await send(res, 200, { subjectKind, subjectId, transactions: views });
+      return true;
+    }
+
+    // GET /api/settlement/ledger/transactions/:id — fetch a ledger
+    // transaction (public).
+    if (
+      path.startsWith("/api/settlement/ledger/transactions/") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/settlement/ledger/transactions/".length);
+      const view = await opts.commands.getLedgerTransaction(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `ledger transaction not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/settlement/ledger/accounts — account balances for an
+    // organization (public; balances derived from the immutable entry
+    // set).
+    if (path === "/api/settlement/ledger/accounts" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const views = await opts.commands.listLedgerAccountBalances(ctx, organizationScopeId);
+      await send(res, 200, { organizationScopeId, accounts: views });
+      return true;
+    }
+
+    // GET /api/settlement/participants/:personId/summary — a
+    // participant's economic summary (public).
+    if (
+      path.startsWith("/api/settlement/participants/") &&
+      path.endsWith("/summary") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const personId = path.slice("/api/settlement/participants/".length, -"/summary".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const view = await opts.commands.getParticipantEconomicSummary(ctx, organizationScopeId, personId);
+      await send(res, 200, view);
+      return true;
+    }
+
     return false;
   }
 
@@ -1640,6 +2147,197 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       policyId: strField(obj, "policyId"),
       ...(version !== undefined ? { version } : {}),
       referenceAt: strField(obj, "referenceAt"),
+      idempotencyKey: strField(obj, "idempotencyKey"),
+    };
+  }
+
+  // NET-W008: parse a pending-value record input. sources is REQUIRED
+  // (≥1 verified upstream reference — spend/wealth/activity/reputation
+  // cannot enter the economic ledger).
+  function parseEconomicValueInput(body: unknown): import("./port.ts").ApiRecordEconomicValueInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const sources = obj.sources;
+    if (!Array.isArray(sources) || sources.length === 0) {
+      throw apiValidationError(
+        'field "sources" must be a non-empty array of { kind, id } upstream references (proof of value, measured outcome or evidence)',
+      );
+    }
+    for (const source of sources) {
+      if (!source || typeof source !== "object") {
+        throw apiValidationError('each entry of "sources" must be an object with kind and id');
+      }
+      const s = source as Record<string, unknown>;
+      if (typeof s.kind !== "string" || !s.kind.trim()) {
+        throw apiValidationError('each entry of "sources" requires a non-empty "kind"');
+      }
+      if (typeof s.id !== "string" || !s.id.trim()) {
+        throw apiValidationError('each entry of "sources" requires a non-empty "id"');
+      }
+    }
+    const amount = numField(obj, "amount");
+    let maturation: Record<string, unknown> | undefined;
+    if (obj.maturation !== undefined) {
+      if (!obj.maturation || typeof obj.maturation !== "object") {
+        throw apiValidationError('field "maturation" must be an object with strategy and optional windowEndAt');
+      }
+      maturation = obj.maturation as Record<string, unknown>;
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      beneficiaryPersonId: strField(obj, "beneficiaryPersonId"),
+      amount,
+      sources: sources as Record<string, unknown>[],
+      ...(maturation !== undefined ? { maturation } : {}),
+      description: typeof obj.description === "string" ? obj.description : undefined,
+      idempotencyKey: strField(obj, "idempotencyKey"),
+    };
+  }
+
+  // NET-W008: parse the maturation input (effectiveAt is the explicit
+  // deterministic reference for fixed_window policies).
+  function parseMatureValueInput(
+    body: unknown,
+    valueRecordId: string,
+  ): import("./port.ts").ApiMatureEconomicValueInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const effectiveAt =
+      typeof obj.effectiveAt === "string" ? obj.effectiveAt : undefined;
+    return {
+      valueRecordId,
+      ...(effectiveAt !== undefined ? { effectiveAt } : {}),
+      idempotencyKey: strField(obj, "idempotencyKey"),
+    };
+  }
+
+  // NET-W008: parse the shared reversal input shape (reason REQUIRED).
+  function parseReversalInput(body: unknown, id: string): { id: string; reason: string; idempotencyKey: string } {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    return {
+      id,
+      reason: strField(obj, "reason"),
+      idempotencyKey: strField(obj, "idempotencyKey"),
+    };
+  }
+
+  function bodyIdempotencyKey(body: unknown): string {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    return strField(body as Record<string, unknown>, "idempotencyKey");
+  }
+
+  // NET-W008: parse the credit-issuance input (creditsPerValueUnit is
+  // the explicit recorded rate).
+  function parseIssueCreditsInput(body: unknown): import("./port.ts").ApiIssueCreditsInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      beneficiaryPersonId: strField(obj, "beneficiaryPersonId"),
+      sourceValueRecordId: strField(obj, "sourceValueRecordId"),
+      creditsPerValueUnit: numField(obj, "creditsPerValueUnit"),
+      description: typeof obj.description === "string" ? obj.description : undefined,
+      idempotencyKey: strField(obj, "idempotencyKey"),
+    };
+  }
+
+  // NET-W008: parse the reward-policy input (allocations REQUIRED).
+  function parseRewardPolicyInput(body: unknown): import("./port.ts").ApiCreateRewardPolicyInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const allocations = obj.allocations;
+    if (!Array.isArray(allocations) || allocations.length === 0) {
+      throw apiValidationError(
+        'field "allocations" must be a non-empty array of { beneficiaryPersonId, weight } entries',
+      );
+    }
+    for (const allocation of allocations) {
+      if (!allocation || typeof allocation !== "object") {
+        throw apiValidationError('each entry of "allocations" must be an object with beneficiaryPersonId and weight');
+      }
+      const a = allocation as Record<string, unknown>;
+      if (typeof a.beneficiaryPersonId !== "string" || !a.beneficiaryPersonId.trim()) {
+        throw apiValidationError('each entry of "allocations" requires a non-empty "beneficiaryPersonId"');
+      }
+      if (typeof a.weight !== "number" || !Number.isFinite(a.weight)) {
+        throw apiValidationError('each entry of "allocations" requires a finite numeric "weight"');
+      }
+    }
+    const version = obj.version;
+    if (typeof version !== "number" || !Number.isInteger(version) || version < 1) {
+      throw apiValidationError('field "version" must be a positive integer');
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      policyId: strField(obj, "policyId"),
+      version,
+      description: typeof obj.description === "string" ? obj.description : undefined,
+      allocations: allocations as Record<string, unknown>[],
+    };
+  }
+
+  // NET-W008: parse the reward-allocation input.
+  function parseAllocateRewardsInput(body: unknown): import("./port.ts").ApiAllocateRewardsInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const version = obj.version;
+    if (version !== undefined && (typeof version !== "number" || !Number.isInteger(version) || version < 1)) {
+      throw apiValidationError('field "version" must be a positive integer when provided');
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      sourceValueRecordId: strField(obj, "sourceValueRecordId"),
+      policyId: strField(obj, "policyId"),
+      ...(version !== undefined ? { version } : {}),
+      idempotencyKey: strField(obj, "idempotencyKey"),
+    };
+  }
+
+  // NET-W008: parse the cash-obligation input.
+  function parseCashObligationInput(body: unknown): import("./port.ts").ApiRecordCashObligationInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      kind: strField(obj, "kind"),
+      counterpartyPersonId: strField(obj, "counterpartyPersonId"),
+      amount: numField(obj, "amount"),
+      description: typeof obj.description === "string" ? obj.description : undefined,
+      idempotencyKey: strField(obj, "idempotencyKey"),
+    };
+  }
+
+  // NET-W008: parse the conversion input (BOTH amounts explicit — the
+  // rate is recorded, never assumed 1:1).
+  function parseConversionInput(body: unknown): import("./port.ts").ApiRecordConversionInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      personId: strField(obj, "personId"),
+      direction: strField(obj, "direction"),
+      cashAmount: numField(obj, "cashAmount"),
+      creditsAmount: numField(obj, "creditsAmount"),
+      description: typeof obj.description === "string" ? obj.description : undefined,
       idempotencyKey: strField(obj, "idempotencyKey"),
     };
   }

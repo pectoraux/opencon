@@ -189,6 +189,43 @@ import type {
   ReputationPolicyService,
   ReputationSnapshotService,
 } from "../reputation/port.ts";
+// NET-W008 settlement boundary: the economic ledger — pending/mature
+// value with an explicit maturation gate (verified-source input gate:
+// a VERIFIED PoV / VERIFIED measured outcome / platform-attested-
+// provider evidence), PoV-gated Participation Credit issuance
+// (architecture-lock invariant 20), deterministic versioned reward
+// allocation, cash obligations with internal settlement state, and
+// explicit cash↔credits conversions — all on a double-entry ledger
+// whose every transaction balances per unit (conservation) and whose
+// balances derive from the immutable entry set (reconstructable).
+import { createAuthorityEconomicLedgerRepository } from "../settlement/authority-ledger-repository.ts";
+import { createAuthorityEconomicValueRepository } from "../settlement/authority-value-repository.ts";
+import { createAuthorityCreditIssuanceRepository } from "../settlement/authority-credit-repository.ts";
+import { createAuthorityRewardPolicyRepository } from "../settlement/authority-reward-policy-repository.ts";
+import { createAuthorityRewardAllocationRepository } from "../settlement/authority-reward-repository.ts";
+import { createAuthorityCashObligationRepository } from "../settlement/authority-cash-repository.ts";
+import { createAuthorityConversionRepository } from "../settlement/authority-conversion-repository.ts";
+import { createEconomicValueService } from "../settlement/value-service.ts";
+import { createCreditService } from "../settlement/credit-service.ts";
+import { createRewardPolicyService, createRewardService } from "../settlement/reward-service.ts";
+import { createCashService } from "../settlement/cash-service.ts";
+import { createConversionService } from "../settlement/conversion-service.ts";
+import { createEconomicLedgerService } from "../settlement/ledger-service.ts";
+import type {
+  AllocateRewardsInput,
+  CashService,
+  ConversionService,
+  CreateRewardPolicyInput,
+  CreditService,
+  EconomicLedgerService,
+  EconomicValueService,
+  IssueCreditsInput,
+  RecordCashObligationInput,
+  RecordConversionInput,
+  RecordPendingValueInput,
+  RewardPolicyService,
+  RewardService,
+} from "../settlement/port.ts";
 
 // Boundary module registrations (composition root imports all).
 import { identityModule } from "../identity/module.ts";
@@ -305,6 +342,14 @@ export interface Runtime {
   readonly reputationPolicyService: ReputationPolicyService;
   readonly reputationInputService: ReputationInputService;
   readonly reputationSnapshotService: ReputationSnapshotService;
+  // NET-W008 domain services (exposed for integration/security tests).
+  readonly economicValueService: EconomicValueService;
+  readonly creditService: CreditService;
+  readonly rewardPolicyService: RewardPolicyService;
+  readonly rewardService: RewardService;
+  readonly cashService: CashService;
+  readonly conversionService: ConversionService;
+  readonly economicLedgerService: EconomicLedgerService;
   // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
   readonly idempotency: IdempotencyStore;
   initialize(): Promise<readonly { name: string; initialized: boolean }[]>;
@@ -887,6 +932,138 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     logger: logger.forModule("reputation"),
   });
 
+  // -- NET-W008 settlement domain wiring --------------------------------
+  // The economic ledger: pending/mature value with an explicit
+  // maturation gate, PoV-gated Participation Credit issuance,
+  // deterministic reward allocation, cash obligations with internal
+  // settlement state and explicit conversions. Upstream record
+  // resolution arrives as thin adapters over the ALREADY-WIRED
+  // repositories of the owning domains (identity/evidence/outcomes) —
+  // the same dependency-inversion pattern as NET-W005/006/007; the
+  // settlement domain imports core only. Reputation is deliberately
+  // NOT consulted here: it is a trust signal, never an economic
+  // input (architecture-lock §1.8 / NET-W007 §2).
+  const economicSubjectLookup = {
+    async exists(personId: string) {
+      return identityRepo.exists(personId);
+    },
+  };
+  const economicEvidenceLookup = {
+    async resolve(id: string) {
+      const evidence = await evidenceRepo.findById(id);
+      return evidence
+        ? {
+            organizationScopeId: evidence.organizationScopeId,
+            sourceType: evidence.provenance.sourceType,
+          }
+        : null;
+    },
+  };
+  const economicProofOfValueLookup = {
+    async resolve(id: string) {
+      const pov = await proofOfValueRepo.findById(id);
+      return pov
+        ? { organizationScopeId: pov.organizationScopeId, state: pov.state }
+        : null;
+    },
+  };
+  const economicMeasuredOutcomeLookup = {
+    async resolve(id: string) {
+      const measurement = await measuredOutcomeRepo.findById(id);
+      return measurement
+        ? {
+            organizationScopeId: measurement.organizationScopeId,
+            state: measurement.state,
+          }
+        : null;
+    },
+  };
+  const economicLedgerRepo = createAuthorityEconomicLedgerRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
+  });
+  const economicValueRepo = createAuthorityEconomicValueRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
+  });
+  const creditIssuanceRepo = createAuthorityCreditIssuanceRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
+  });
+  const rewardPolicyRepo = createAuthorityRewardPolicyRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
+  });
+  const rewardAllocationRepo = createAuthorityRewardAllocationRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
+  });
+  const cashObligationRepo = createAuthorityCashObligationRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
+  });
+  const conversionRepo = createAuthorityConversionRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
+  });
+  const economicValueService = createEconomicValueService({
+    repository: economicValueRepo,
+    ledgerRepository: economicLedgerRepo,
+    subjectLookup: economicSubjectLookup,
+    proofOfValueLookup: economicProofOfValueLookup,
+    measuredOutcomeLookup: economicMeasuredOutcomeLookup,
+    evidenceLookup: economicEvidenceLookup,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("settlement"),
+  });
+  const creditService = createCreditService({
+    issuanceRepository: creditIssuanceRepo,
+    valueRepository: economicValueRepo,
+    ledgerRepository: economicLedgerRepo,
+    subjectLookup: economicSubjectLookup,
+    proofOfValueLookup: economicProofOfValueLookup,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("settlement"),
+  });
+  const rewardPolicyService = createRewardPolicyService({
+    policyRepository: rewardPolicyRepo,
+    ledgerRepository: economicLedgerRepo,
+    subjectLookup: economicSubjectLookup,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("settlement"),
+  });
+  const rewardService = createRewardService({
+    policyRepository: rewardPolicyRepo,
+    allocationRepository: rewardAllocationRepo,
+    valueRepository: economicValueRepo,
+    ledgerRepository: economicLedgerRepo,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("settlement"),
+  });
+  const cashService = createCashService({
+    repository: cashObligationRepo,
+    ledgerRepository: economicLedgerRepo,
+    subjectLookup: economicSubjectLookup,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("settlement"),
+  });
+  const conversionService = createConversionService({
+    repository: conversionRepo,
+    ledgerRepository: economicLedgerRepo,
+    subjectLookup: economicSubjectLookup,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("settlement"),
+  });
+  const economicLedgerService = createEconomicLedgerService({
+    repository: economicLedgerRepo,
+  });
+
   // API auth + commands adapter (dependency inversion: the API server
   // consumes ApiAuth/ApiCommands; we bridge to the real domain services).
   const apiAuth: ApiAuth = {
@@ -1046,6 +1223,138 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       inputIds: snapshot.inputIds,
       digest: snapshot.digest,
       idempotencyKey: snapshot.idempotencyKey,
+    };
+  }
+
+  // NET-W008 view helpers (domain entity → API view).
+  function toEconomicValueView(
+    value: import("../settlement/port.ts").EconomicValueRecord,
+  ) {
+    return {
+      id: value.id,
+      organizationScopeId: value.organizationScopeId,
+      beneficiaryPersonId: value.beneficiaryPersonId,
+      state: value.state,
+      version: value.version,
+      amount: value.amount,
+      unit: "value",
+      sources: value.sources as unknown as readonly Record<string, unknown>[],
+      maturation: value.maturation as unknown as Record<string, unknown>,
+      description: value.description,
+      recordedAt: value.recordedAt,
+      maturedAt: value.maturedAt,
+      consumedBy: value.consumedBy as unknown as Record<string, unknown> | null,
+      reversal: value.reversal as unknown as Record<string, unknown> | null,
+      recognitionTransactionId: value.recognitionTransactionId,
+      maturationTransactionId: value.maturationTransactionId,
+      idempotencyKey: value.idempotencyKey,
+    };
+  }
+  function toCreditIssuanceView(
+    issuance: import("../settlement/port.ts").CreditIssuance,
+  ) {
+    return {
+      id: issuance.id,
+      organizationScopeId: issuance.organizationScopeId,
+      beneficiaryPersonId: issuance.beneficiaryPersonId,
+      creditAmount: issuance.creditAmount,
+      sourceValueRecordId: issuance.sourceValueRecordId,
+      sourceValueAmount: issuance.sourceValueAmount,
+      proofOfValueId: issuance.proofOfValueId,
+      creditsPerValueUnit: issuance.creditsPerValueUnit,
+      status: issuance.status,
+      reversal: issuance.reversal as unknown as Record<string, unknown> | null,
+      transactionId: issuance.transactionId,
+      issuedAt: issuance.issuedAt,
+      description: issuance.description,
+      idempotencyKey: issuance.idempotencyKey,
+    };
+  }
+  function toRewardPolicyView(
+    policy: import("../settlement/port.ts").RewardAllocationPolicy,
+  ) {
+    return {
+      id: policy.id,
+      policyId: policy.policyId,
+      version: policy.version,
+      organizationScopeId: policy.organizationScopeId,
+      description: policy.description,
+      allocations: policy.allocations as unknown as readonly Record<string, unknown>[],
+      createdBy: policy.createdBy,
+      createdAt: policy.createdAt,
+    };
+  }
+  function toRewardAllocationView(
+    allocation: import("../settlement/port.ts").RewardAllocation,
+  ) {
+    return {
+      id: allocation.id,
+      organizationScopeId: allocation.organizationScopeId,
+      sourceValueRecordId: allocation.sourceValueRecordId,
+      sourceValueAmount: allocation.sourceValueAmount,
+      sourceBeneficiaryPersonId: allocation.sourceBeneficiaryPersonId,
+      policyId: allocation.policyId,
+      policyVersion: allocation.policyVersion,
+      totalAllocated: allocation.totalAllocated,
+      shares: allocation.shares as unknown as readonly Record<string, unknown>[],
+      status: allocation.status,
+      reversal: allocation.reversal as unknown as Record<string, unknown> | null,
+      transactionId: allocation.transactionId,
+      allocatedAt: allocation.allocatedAt,
+      idempotencyKey: allocation.idempotencyKey,
+    };
+  }
+  function toCashObligationView(
+    obligation: import("../settlement/port.ts").CashObligation,
+  ) {
+    return {
+      id: obligation.id,
+      organizationScopeId: obligation.organizationScopeId,
+      kind: obligation.kind,
+      counterpartyPersonId: obligation.counterpartyPersonId,
+      amount: obligation.amount,
+      unit: "cash",
+      status: obligation.status,
+      settledAt: obligation.settledAt,
+      settlementReference: obligation.settlementReference,
+      reversal: obligation.reversal as unknown as Record<string, unknown> | null,
+      transactionId: obligation.transactionId,
+      description: obligation.description,
+      recordedAt: obligation.recordedAt,
+      idempotencyKey: obligation.idempotencyKey,
+    };
+  }
+  function toConversionView(
+    conversion: import("../settlement/port.ts").EconomicConversion,
+  ) {
+    return {
+      id: conversion.id,
+      organizationScopeId: conversion.organizationScopeId,
+      personId: conversion.personId,
+      direction: conversion.direction,
+      cashAmount: conversion.cashAmount,
+      creditsAmount: conversion.creditsAmount,
+      rate: conversion.rate,
+      status: conversion.status,
+      reversal: conversion.reversal as unknown as Record<string, unknown> | null,
+      transactionId: conversion.transactionId,
+      convertedAt: conversion.convertedAt,
+      description: conversion.description,
+      idempotencyKey: conversion.idempotencyKey,
+    };
+  }
+  function toLedgerTransactionView(
+    transaction: import("../settlement/port.ts").EconomicLedgerTransaction,
+  ) {
+    return {
+      id: transaction.id,
+      organizationScopeId: transaction.organizationScopeId,
+      kind: transaction.kind,
+      description: transaction.description,
+      subject: transaction.subject as unknown as Record<string, unknown> | null,
+      entries: transaction.entries as unknown as readonly Record<string, unknown>[],
+      recordedAt: transaction.recordedAt,
+      idempotencyKey: transaction.idempotencyKey,
     };
   }
 
@@ -1941,6 +2250,338 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       );
       return latest ? toReputationSnapshotView(latest) : null;
     },
+
+    // -- NET-W008 settlement commands ------------------------------------
+
+    async createEconomicValue(execution, input) {
+      const result = await economicValueService.recordPendingValue(execution, {
+        organizationScopeId: input.organizationScopeId,
+        beneficiaryPersonId: input.beneficiaryPersonId,
+        amount: input.amount,
+        sources: input.sources as unknown as RecordPendingValueInput["sources"],
+        maturation: input.maturation as unknown as
+          | RecordPendingValueInput["maturation"]
+          | undefined,
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        idempotencyKey: input.idempotencyKey,
+      });
+      return { value: toEconomicValueView(result.value), created: result.created };
+    },
+
+    async getEconomicValue(execution, id) {
+      try {
+        const value = await economicValueService.getValue(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toEconomicValueView(value);
+      } catch {
+        return null;
+      }
+    },
+
+    async listEconomicValues(execution, organizationScopeId, beneficiaryPersonId, states) {
+      const values = await economicValueService.listValues(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        beneficiaryPersonId,
+        states,
+      );
+      return values.map(toEconomicValueView);
+    },
+
+    async matureEconomicValue(execution, input) {
+      const value = await economicValueService.matureValue(execution, {
+        valueRecordId: input.valueRecordId,
+        ...(input.effectiveAt !== undefined
+          ? { effectiveAt: input.effectiveAt }
+          : {}),
+        idempotencyKey: input.idempotencyKey,
+      });
+      return toEconomicValueView(value);
+    },
+
+    async reverseEconomicValue(execution, input) {
+      const value = await economicValueService.reverseValue(execution, {
+        valueRecordId: input.valueRecordId,
+        reason: input.reason,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return toEconomicValueView(value);
+    },
+
+    async issueCredits(execution, input) {
+      const result = await creditService.issueCredits(execution, {
+        organizationScopeId: input.organizationScopeId,
+        beneficiaryPersonId: input.beneficiaryPersonId,
+        sourceValueRecordId: input.sourceValueRecordId,
+        creditsPerValueUnit: input.creditsPerValueUnit,
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        idempotencyKey: input.idempotencyKey,
+      });
+      return {
+        issuance: toCreditIssuanceView(result.issuance),
+        created: result.created,
+      };
+    },
+
+    async getCreditIssuance(execution, id) {
+      try {
+        const issuance = await creditService.getIssuance(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toCreditIssuanceView(issuance);
+      } catch {
+        return null;
+      }
+    },
+
+    async listCreditIssuances(execution, organizationScopeId, beneficiaryPersonId) {
+      const issuances = await creditService.listIssuances(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        beneficiaryPersonId,
+      );
+      return issuances.map(toCreditIssuanceView);
+    },
+
+    async reverseCreditIssuance(execution, input) {
+      const issuance = await creditService.reverseIssuance(execution, {
+        issuanceId: input.issuanceId,
+        reason: input.reason,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return toCreditIssuanceView(issuance);
+    },
+
+    async createRewardPolicy(execution, input) {
+      const policy = await rewardPolicyService.createPolicyVersion(execution, {
+        organizationScopeId: input.organizationScopeId,
+        policyId: input.policyId,
+        version: input.version,
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        allocations: input.allocations as unknown as CreateRewardPolicyInput["allocations"],
+      });
+      return toRewardPolicyView(policy);
+    },
+
+    async getRewardPolicy(execution, id) {
+      try {
+        const policy = await rewardPolicyService.getPolicy(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toRewardPolicyView(policy);
+      } catch {
+        return null;
+      }
+    },
+
+    async listRewardPolicyVersions(execution, policyId, organizationScopeId) {
+      const versions = await rewardPolicyService.listPolicyVersions(
+        getExecutionContext() ?? execution,
+        policyId,
+        organizationScopeId,
+      );
+      return versions.map(toRewardPolicyView);
+    },
+
+    async allocateRewards(execution, input) {
+      const result = await rewardService.allocateRewards(execution, {
+        organizationScopeId: input.organizationScopeId,
+        sourceValueRecordId: input.sourceValueRecordId,
+        policyId: input.policyId,
+        ...(input.version !== undefined ? { version: input.version } : {}),
+        idempotencyKey: input.idempotencyKey,
+      });
+      return {
+        allocation: toRewardAllocationView(result.allocation),
+        created: result.created,
+      };
+    },
+
+    async getRewardAllocation(execution, id) {
+      try {
+        const allocation = await rewardService.getAllocation(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toRewardAllocationView(allocation);
+      } catch {
+        return null;
+      }
+    },
+
+    async listRewardAllocations(execution, organizationScopeId) {
+      const allocations = await rewardService.listAllocations(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+      );
+      return allocations.map(toRewardAllocationView);
+    },
+
+    async reverseRewardAllocation(execution, input) {
+      const allocation = await rewardService.reverseAllocation(execution, {
+        allocationId: input.allocationId,
+        reason: input.reason,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return toRewardAllocationView(allocation);
+    },
+
+    async recordCashObligation(execution, input) {
+      const result = await cashService.recordCashObligation(execution, {
+        organizationScopeId: input.organizationScopeId,
+        kind: input.kind,
+        counterpartyPersonId: input.counterpartyPersonId,
+        amount: input.amount,
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        idempotencyKey: input.idempotencyKey,
+      });
+      return {
+        obligation: toCashObligationView(result.obligation),
+        created: result.created,
+      };
+    },
+
+    async getCashObligation(execution, id) {
+      try {
+        const obligation = await cashService.getObligation(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toCashObligationView(obligation);
+      } catch {
+        return null;
+      }
+    },
+
+    async listCashObligations(execution, organizationScopeId) {
+      const obligations = await cashService.listObligations(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+      );
+      return obligations.map(toCashObligationView);
+    },
+
+    async settleCashObligation(execution, input) {
+      const obligation = await cashService.settleCashObligation(execution, {
+        obligationId: input.obligationId,
+        ...(input.reference !== undefined ? { reference: input.reference } : {}),
+        idempotencyKey: input.idempotencyKey,
+      });
+      return toCashObligationView(obligation);
+    },
+
+    async reverseCashObligation(execution, input) {
+      const obligation = await cashService.reverseCashObligation(execution, {
+        obligationId: input.obligationId,
+        reason: input.reason,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return toCashObligationView(obligation);
+    },
+
+    async recordConversion(execution, input) {
+      const result = await conversionService.recordConversion(execution, {
+        organizationScopeId: input.organizationScopeId,
+        personId: input.personId,
+        direction: input.direction,
+        cashAmount: input.cashAmount,
+        creditsAmount: input.creditsAmount,
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        idempotencyKey: input.idempotencyKey,
+      });
+      return {
+        conversion: toConversionView(result.conversion),
+        created: result.created,
+      };
+    },
+
+    async getConversion(execution, id) {
+      try {
+        const conversion = await conversionService.getConversion(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toConversionView(conversion);
+      } catch {
+        return null;
+      }
+    },
+
+    async listConversions(execution, organizationScopeId) {
+      const conversions = await conversionService.listConversions(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+      );
+      return conversions.map(toConversionView);
+    },
+
+    async reverseConversion(execution, input) {
+      const conversion = await conversionService.reverseConversion(execution, {
+        conversionId: input.conversionId,
+        reason: input.reason,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return toConversionView(conversion);
+    },
+
+    async getLedgerTransaction(execution, id) {
+      try {
+        const transaction = await economicLedgerService.getTransaction(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toLedgerTransactionView(transaction);
+      } catch {
+        return null;
+      }
+    },
+
+    async listLedgerTransactionsBySubject(execution, subjectKind, subjectId) {
+      const kind = subjectKind as
+        import("../settlement/port.ts").EconomicLedgerSubjectRef["kind"];
+      const transactions = await economicLedgerService.listTransactionsBySubject(
+        getExecutionContext() ?? execution,
+        { kind, id: subjectId },
+      );
+      return transactions.map(toLedgerTransactionView);
+    },
+
+    async listLedgerAccountBalances(execution, organizationScopeId) {
+      const balances = await economicLedgerService.listAccountBalances(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+      );
+      return balances.map((balance) => ({
+        accountId: balance.accountId,
+        organizationScopeId: balance.organizationScopeId,
+        ownerPersonId: balance.ownerPersonId,
+        kind: balance.kind,
+        unit: balance.unit,
+        balance: balance.balance,
+      }));
+    },
+
+    async getParticipantEconomicSummary(execution, organizationScopeId, personId) {
+      const summary = await economicLedgerService.getParticipantSummary(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        personId,
+      );
+      return {
+        organizationScopeId: summary.organizationScopeId,
+        personId: summary.personId,
+        pendingValue: summary.pendingValue,
+        matureValue: summary.matureValue,
+        credits: summary.credits,
+        rewards: summary.rewards,
+        cashPayable: summary.cashPayable,
+        cashReceivable: summary.cashReceivable,
+      };
+    },
   };
 
   const registry = createModuleRegistry(snapshot, logger);
@@ -2051,6 +2692,14 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     reputationPolicyService,
     reputationInputService,
     reputationSnapshotService,
+    // NET-W008 domain services.
+    economicValueService,
+    creditService,
+    rewardPolicyService,
+    rewardService,
+    cashService,
+    conversionService,
+    economicLedgerService,
     // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
     idempotency,
     async initialize() {

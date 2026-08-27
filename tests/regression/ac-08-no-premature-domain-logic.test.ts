@@ -90,14 +90,32 @@ const NET_W006_DOMAINS = ["outcomes"];
 // reputation cannot be spent (NET-W007 work order §5 non-goals).
 const NET_W007_DOMAINS = ["reputation"];
 
-// Domains still deferred past NET-W007 (must remain skeletons).
+// Domains implemented in NET-W008 (no longer skeletons). The
+// settlement domain introduces the ECONOMIC LEDGER — the protocol's
+// internal accounting authority: pending/mature value with an
+// explicit maturation gate, PoV-gated Participation Credit issuance,
+// deterministic reward allocation, cash obligations with internal
+// settlement state, and explicit cash↔credits conversions, all on a
+// double-entry ledger that balances per unit and derives every
+// balance from the immutable entry set (NET-W008 work order). Credit
+// issuance and settlement are THE legitimate behaviours of this
+// domain — the /issueCredit/ pattern exception below mirrors the
+// NET-W005 PoV exception: those patterns remain forbidden in every
+// OTHER domain. The out-of-scope guard for settlement (fraud/staking/
+// disputes/campaigns/benefit pools/external payment execution/
+// blockchain) lives in net-w008-ac-08 with identifier-precise
+// patterns.
+const NET_W008_DOMAINS = ["settlement"];
+
+// Domains still deferred past NET-W008 (must remain skeletons).
 const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
   (d) =>
     !NET_W002_DOMAINS.includes(d) &&
     !NET_W004_DOMAINS.includes(d) &&
     !NET_W005_DOMAINS.includes(d) &&
     !NET_W006_DOMAINS.includes(d) &&
-    !NET_W007_DOMAINS.includes(d),
+    !NET_W007_DOMAINS.includes(d) &&
+    !NET_W008_DOMAINS.includes(d),
 );
 
 // Patterns that would indicate economically/material domain logic,
@@ -254,15 +272,39 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
     }
   });
 
+  test("NET-W008 domain modules are non-skeletal (tier domain, no 'skeleton' marker, reference NET-W008)", async () => {
+    for (const dir of NET_W008_DOMAINS) {
+      const modulePath = join(SRC, dir, "module.ts");
+      expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
+      const mod = await import(`../../src/${dir}/module.ts`);
+      const moduleExport = Object.values(mod)[0] as {
+        name: string;
+        tier: string;
+        describe?: () => string;
+      };
+      expect(moduleExport.tier).toBe("domain");
+      // NET-W008 modules are no longer skeletons — they carry the
+      // economic ledger (the accounting authority frozen architecture
+      // §18 assigns to /settlement).
+      expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
+      expect(moduleExport.describe?.() ?? "").toMatch(/NET-W008/);
+    }
+  });
+
   test("domain source contains no forbidden material-operation patterns", async () => {
     for (const dir of DOMAIN_DIRS) {
       const files = await listTsFiles(join(SRC, dir));
       // The Proof-of-Value patterns are permitted ONLY in the evidence
-      // domain (its first-class object, NET-W005); every other domain
-      // is scanned for them too.
-      const patterns = NET_W005_DOMAINS.includes(dir)
+      // domain (its first-class object, NET-W005); the credit-issuance
+      // pattern is permitted ONLY in the settlement domain (its
+      // legitimate accounting authority, NET-W008); every other
+      // domain is scanned for both sets too.
+      let patterns = NET_W005_DOMAINS.includes(dir)
         ? FORBIDDEN_PATTERNS
         : [...FORBIDDEN_PATTERNS, ...PROOF_OF_VALUE_PATTERNS];
+      if (NET_W008_DOMAINS.includes(dir)) {
+        patterns = patterns.filter((p) => !/issueCredit/i.test(String(p)));
+      }
       for (const file of files) {
         const content = await readFile(file, "utf8");
         for (const pattern of patterns) {

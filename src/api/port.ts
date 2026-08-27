@@ -657,6 +657,255 @@ export interface ApiReputationSnapshotView {
   readonly idempotencyKey: string;
 }
 
+// -- NET-W008 settlement views/inputs ----------------------------------
+
+/** The public view of an economic value record (pending/mature value). */
+export interface ApiEconomicValueView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly beneficiaryPersonId: string;
+  readonly state: string;
+  readonly version: number;
+  readonly amount: number;
+  readonly unit: string;
+  readonly sources: readonly Record<string, unknown>[];
+  readonly maturation: Record<string, unknown>;
+  readonly description: string | null;
+  readonly recordedAt: string;
+  readonly maturedAt: string | null;
+  readonly consumedBy: Record<string, unknown> | null;
+  readonly reversal: Record<string, unknown> | null;
+  readonly recognitionTransactionId: string;
+  readonly maturationTransactionId: string | null;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to record pending economic value (NET-W008 §3.3). */
+export interface ApiRecordEconomicValueInput {
+  readonly organizationScopeId: string;
+  readonly beneficiaryPersonId: string;
+  readonly amount: number;
+  readonly sources: readonly Record<string, unknown>[];
+  readonly maturation?: Record<string, unknown>;
+  readonly description?: string;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to mature a value record (the explicit maturation gate). */
+export interface ApiMatureEconomicValueInput {
+  readonly valueRecordId: string;
+  readonly effectiveAt?: string;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to reverse a value record (append-only correction). */
+export interface ApiReverseEconomicValueInput {
+  readonly valueRecordId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+/** The public view of a Participation Credit issuance. */
+export interface ApiCreditIssuanceView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly beneficiaryPersonId: string;
+  readonly creditAmount: number;
+  readonly sourceValueRecordId: string;
+  readonly sourceValueAmount: number;
+  readonly proofOfValueId: string;
+  readonly creditsPerValueUnit: number;
+  readonly status: string;
+  readonly reversal: Record<string, unknown> | null;
+  readonly transactionId: string;
+  readonly issuedAt: string;
+  readonly description: string | null;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to issue Participation Credits (NET-W008 §3.4). */
+export interface ApiIssueCreditsInput {
+  readonly organizationScopeId: string;
+  readonly beneficiaryPersonId: string;
+  readonly sourceValueRecordId: string;
+  readonly creditsPerValueUnit: number;
+  readonly description?: string;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to reverse a credit issuance. */
+export interface ApiReverseCreditIssuanceInput {
+  readonly issuanceId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+/** The public view of a reward allocation policy version. */
+export interface ApiRewardPolicyView {
+  readonly id: string;
+  readonly policyId: string;
+  readonly version: number;
+  readonly organizationScopeId: string;
+  readonly description: string | null;
+  readonly allocations: readonly Record<string, unknown>[];
+  readonly createdBy: string;
+  readonly createdAt: string;
+}
+
+/** Inputs to create a reward-policy version (NET-W008 §3.5). */
+export interface ApiCreateRewardPolicyInput {
+  readonly organizationScopeId: string;
+  readonly policyId: string;
+  readonly version: number;
+  readonly description?: string;
+  readonly allocations: readonly Record<string, unknown>[];
+}
+
+/** The public view of a reward allocation. */
+export interface ApiRewardAllocationView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly sourceValueRecordId: string;
+  readonly sourceValueAmount: number;
+  readonly sourceBeneficiaryPersonId: string;
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly totalAllocated: number;
+  readonly shares: readonly Record<string, unknown>[];
+  readonly status: string;
+  readonly reversal: Record<string, unknown> | null;
+  readonly transactionId: string;
+  readonly allocatedAt: string;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to allocate rewards from a mature value record. */
+export interface ApiAllocateRewardsInput {
+  readonly organizationScopeId: string;
+  readonly sourceValueRecordId: string;
+  readonly policyId: string;
+  readonly version?: number;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to reverse a reward allocation. */
+export interface ApiReverseRewardAllocationInput {
+  readonly allocationId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+/** The public view of a cash obligation. */
+export interface ApiCashObligationView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly kind: string;
+  readonly counterpartyPersonId: string;
+  readonly amount: number;
+  readonly unit: string;
+  readonly status: string;
+  readonly settledAt: string | null;
+  readonly settlementReference: string | null;
+  readonly reversal: Record<string, unknown> | null;
+  readonly transactionId: string;
+  readonly description: string | null;
+  readonly recordedAt: string;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to record a cash obligation (NET-W008 §3.6). */
+export interface ApiRecordCashObligationInput {
+  readonly organizationScopeId: string;
+  readonly kind: string;
+  readonly counterpartyPersonId: string;
+  readonly amount: number;
+  readonly description?: string;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to internally settle a cash obligation. */
+export interface ApiSettleCashObligationInput {
+  readonly obligationId: string;
+  readonly reference?: string;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to reverse a cash obligation. */
+export interface ApiReverseCashObligationInput {
+  readonly obligationId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+/** The public view of a cash↔credits conversion. */
+export interface ApiConversionView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly personId: string;
+  readonly direction: string;
+  readonly cashAmount: number;
+  readonly creditsAmount: number;
+  readonly rate: number;
+  readonly status: string;
+  readonly reversal: Record<string, unknown> | null;
+  readonly transactionId: string;
+  readonly convertedAt: string;
+  readonly description: string | null;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to record an explicit conversion (NET-W008 §3.6). */
+export interface ApiRecordConversionInput {
+  readonly organizationScopeId: string;
+  readonly personId: string;
+  readonly direction: string;
+  readonly cashAmount: number;
+  readonly creditsAmount: number;
+  readonly description?: string;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to reverse a conversion. */
+export interface ApiReverseConversionInput {
+  readonly conversionId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+/** The public view of a ledger transaction (AUD-003 lineage). */
+export interface ApiLedgerTransactionView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly kind: string;
+  readonly description: string | null;
+  readonly subject: Record<string, unknown> | null;
+  readonly entries: readonly Record<string, unknown>[];
+  readonly recordedAt: string;
+  readonly idempotencyKey: string;
+}
+
+/** The public view of an account balance (derived from entries). */
+export interface ApiLedgerAccountBalanceView {
+  readonly accountId: string;
+  readonly organizationScopeId: string;
+  readonly ownerPersonId: string | null;
+  readonly kind: string;
+  readonly unit: string;
+  readonly balance: number;
+}
+
+/** A participant's economic summary (balances derived from entries). */
+export interface ApiParticipantEconomicSummaryView {
+  readonly organizationScopeId: string;
+  readonly personId: string;
+  readonly pendingValue: number;
+  readonly matureValue: number;
+  readonly credits: number;
+  readonly rewards: number;
+  readonly cashPayable: number;
+  readonly cashReceivable: number;
+}
+
 /**
  * ApiCommands — the protected mutation surface the API server consumes
  * (after the {@link ApiAuth} guard has authorized the request). The
@@ -1076,6 +1325,188 @@ export interface ApiCommands {
     organizationScopeId: string,
     subjectPersonId: string,
   ): Promise<ApiReputationSnapshotView | null>;
+
+  // -- NET-W008 settlement commands --------------------------------------
+
+  /** Record pending economic value (protected; the verified-source gate). */
+  createEconomicValue(
+    execution: ExecutionContext,
+    input: ApiRecordEconomicValueInput,
+  ): Promise<{ value: ApiEconomicValueView; created: boolean }>;
+
+  /** Fetch an economic value record (public read). */
+  getEconomicValue(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiEconomicValueView | null>;
+
+  /** List a beneficiary's value records, optionally filtered by state. */
+  listEconomicValues(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    beneficiaryPersonId: string,
+    states?: readonly string[],
+  ): Promise<readonly ApiEconomicValueView[]>;
+
+  /** Mature a pending value record (protected; the explicit gate). */
+  matureEconomicValue(
+    execution: ExecutionContext,
+    input: ApiMatureEconomicValueInput,
+  ): Promise<ApiEconomicValueView>;
+
+  /** Reverse a value record (protected; append-only correction). */
+  reverseEconomicValue(
+    execution: ExecutionContext,
+    input: ApiReverseEconomicValueInput,
+  ): Promise<ApiEconomicValueView>;
+
+  /** Issue Participation Credits (protected; PoV-gated). */
+  issueCredits(
+    execution: ExecutionContext,
+    input: ApiIssueCreditsInput,
+  ): Promise<{ issuance: ApiCreditIssuanceView; created: boolean }>;
+
+  /** Fetch a credit issuance (public read). */
+  getCreditIssuance(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiCreditIssuanceView | null>;
+
+  /** List a beneficiary's credit issuances (public read). */
+  listCreditIssuances(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    beneficiaryPersonId: string,
+  ): Promise<readonly ApiCreditIssuanceView[]>;
+
+  /** Reverse a credit issuance (protected; append-only correction). */
+  reverseCreditIssuance(
+    execution: ExecutionContext,
+    input: ApiReverseCreditIssuanceInput,
+  ): Promise<ApiCreditIssuanceView>;
+
+  /** Create a reward-policy version (protected). */
+  createRewardPolicy(
+    execution: ExecutionContext,
+    input: ApiCreateRewardPolicyInput,
+  ): Promise<ApiRewardPolicyView>;
+
+  /** Fetch a reward policy version by record id (public read). */
+  getRewardPolicy(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiRewardPolicyView | null>;
+
+  /** List a reward-policy lineage's versions (public read). */
+  listRewardPolicyVersions(
+    execution: ExecutionContext,
+    policyId: string,
+    organizationScopeId?: string,
+  ): Promise<readonly ApiRewardPolicyView[]>;
+
+  /** Allocate rewards from a mature value record (protected). */
+  allocateRewards(
+    execution: ExecutionContext,
+    input: ApiAllocateRewardsInput,
+  ): Promise<{ allocation: ApiRewardAllocationView; created: boolean }>;
+
+  /** Fetch a reward allocation (public read). */
+  getRewardAllocation(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiRewardAllocationView | null>;
+
+  /** List an organization's reward allocations (public read). */
+  listRewardAllocations(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+  ): Promise<readonly ApiRewardAllocationView[]>;
+
+  /** Reverse a reward allocation (protected; append-only correction). */
+  reverseRewardAllocation(
+    execution: ExecutionContext,
+    input: ApiReverseRewardAllocationInput,
+  ): Promise<ApiRewardAllocationView>;
+
+  /** Record a cash obligation (protected). */
+  recordCashObligation(
+    execution: ExecutionContext,
+    input: ApiRecordCashObligationInput,
+  ): Promise<{ obligation: ApiCashObligationView; created: boolean }>;
+
+  /** Fetch a cash obligation (public read). */
+  getCashObligation(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiCashObligationView | null>;
+
+  /** List an organization's cash obligations (public read). */
+  listCashObligations(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+  ): Promise<readonly ApiCashObligationView[]>;
+
+  /** Internally settle a cash obligation (protected). */
+  settleCashObligation(
+    execution: ExecutionContext,
+    input: ApiSettleCashObligationInput,
+  ): Promise<ApiCashObligationView>;
+
+  /** Reverse a cash obligation (protected; append-only correction). */
+  reverseCashObligation(
+    execution: ExecutionContext,
+    input: ApiReverseCashObligationInput,
+  ): Promise<ApiCashObligationView>;
+
+  /** Record an explicit cash↔credits conversion (protected). */
+  recordConversion(
+    execution: ExecutionContext,
+    input: ApiRecordConversionInput,
+  ): Promise<{ conversion: ApiConversionView; created: boolean }>;
+
+  /** Fetch a conversion (public read). */
+  getConversion(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiConversionView | null>;
+
+  /** List an organization's conversions (public read). */
+  listConversions(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+  ): Promise<readonly ApiConversionView[]>;
+
+  /** Reverse a conversion (protected; append-only correction). */
+  reverseConversion(
+    execution: ExecutionContext,
+    input: ApiReverseConversionInput,
+  ): Promise<ApiConversionView>;
+
+  /** Fetch a ledger transaction (public read; AUD-003 lineage). */
+  getLedgerTransaction(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<ApiLedgerTransactionView | null>;
+
+  /** List every ledger transaction for an economic record (public read). */
+  listLedgerTransactionsBySubject(
+    execution: ExecutionContext,
+    subjectKind: string,
+    subjectId: string,
+  ): Promise<readonly ApiLedgerTransactionView[]>;
+
+  /** List account balances for an organization (public read). */
+  listLedgerAccountBalances(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+  ): Promise<readonly ApiLedgerAccountBalanceView[]>;
+
+  /** A participant's economic summary (public read). */
+  getParticipantEconomicSummary(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    personId: string,
+  ): Promise<ApiParticipantEconomicSummaryView>;
 }
 
 export type { ExecutionContext };
