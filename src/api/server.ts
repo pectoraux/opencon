@@ -2772,6 +2772,106 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // ------------------------------------------------------------------
+    // NET-W016 — creator matching (deterministic eligibility +
+    // explicit-signal ranking; matching is SELECTION, not authority).
+    // ------------------------------------------------------------------
+
+    // POST /api/creators/matching — run a creator match (protected;
+    // guard action creators.matching.run; idempotent).
+    if (path === "/api/creators/matching" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "creators.matching.run", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const campaign = obj.campaign as
+        | { campaignId?: unknown; policyVersion?: unknown }
+        | undefined
+        | null;
+      const advisory = obj.advisory as
+        | { enabled?: unknown; maxWeight?: unknown }
+        | undefined
+        | null;
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.runCreatorMatch(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          ...(campaign !== null && campaign !== undefined
+            ? {
+                campaign: {
+                  campaignId: campaign.campaignId,
+                  ...(campaign.policyVersion !== undefined
+                    ? { policyVersion: campaign.policyVersion }
+                    : {}),
+                },
+              }
+            : {}),
+          requirements: objField(obj, "requirements"),
+          ...(obj.candidateProfileIds !== undefined
+            ? { candidateProfileIds: obj.candidateProfileIds }
+            : {}),
+          ...(obj.weights !== undefined && obj.weights !== null
+            ? { weights: obj.weights }
+            : {}),
+          ...(advisory !== null && advisory !== undefined
+            ? {
+                advisory: {
+                  enabled: advisory.enabled === true,
+                  ...(advisory.maxWeight !== undefined
+                    ? { maxWeight: advisory.maxWeight }
+                    : {}),
+                },
+              }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/creators/matching — an org's match runs, optionally
+    // narrowed by campaign (public; tenant-scoped).
+    if (path === "/api/creators/matching" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const campaignId = url.searchParams.get("campaignId") ?? undefined;
+      const views = await opts.commands.listCreatorMatchRuns(
+        ctx,
+        organizationScopeId,
+        campaignId,
+      );
+      await send(res, 200, { organizationScopeId, runs: views });
+      return true;
+    }
+
+    // GET /api/creators/matching/:id — one match run (public;
+    // tenant-scoped; a cross-scope run id is not found).
+    if (
+      path.startsWith("/api/creators/matching/") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/creators/matching/".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      // A cross-scope or nonexistent run id throws NotFoundError —
+      // the global handler maps the not_found classification to 404.
+      const view = await opts.commands.getCreatorMatchRun(
+        ctx,
+        organizationScopeId,
+        id,
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
     // GET /api/creators/by-person?organizationScopeId&creatorPersonId —
     // the profile anchored to a person in an org (public).
     if (path === "/api/creators/by-person" && method === "GET" && opts.commands) {

@@ -63,12 +63,14 @@
  *    references; external platform adapters are composition-root
  *    integration points for later work items.
  *
- * Out of scope (work order §5): creator matching/ranking (NET-W016),
- * UGC production workflow / rights EXECUTION (NET-W017),
- * sponsorship/disclosure EXECUTION (NET-W018), ad inventory or
- * optimization (NET-W019+), external platform EXECUTION, direct
- * reputation scoring, payment execution, blockchain consensus, and
- * any AI/model-driven eligibility decision.
+ * Out of scope (work order §5 of NET-W015; NET-W016 now ships the
+ * matching service in this SAME port below): UGC production
+ * workflow / rights EXECUTION (NET-W017), sponsorship/disclosure
+ * EXECUTION (NET-W018), ad inventory or optimization (NET-W019+),
+ * external platform EXECUTION, direct reputation scoring, payment
+ * execution, blockchain consensus, and any AI/model-driven
+ * ELIGIBILITY decision (the NET-W016 advisory is ranking-only,
+ * bounded and never flips a hard gate).
  */
 
 import type { ExecutionContext } from "../core/execution-context.ts";
@@ -89,6 +91,9 @@ import type {
   CreatorAudienceSizeBand,
   CreatorAudienceAgeBand,
   CreatorRateUnit,
+  CreatorMatchSignal,
+  CreatorMatchGateReason,
+  CreatorMatchWeightsShape,
 } from "../core/creators.ts";
 
 // ---------------------------------------------------------------------------
@@ -613,6 +618,377 @@ export interface CreatorService {
 }
 
 // ---------------------------------------------------------------------------
+// NET-W016 — Creator matching (matching is SELECTION, not authority)
+// ---------------------------------------------------------------------------
+
+/**
+ * The declared rate ceiling — a provider-neutral hard constraint on
+ * the price signal (work order §3.1). DECLARED DATA ONLY: it creates
+ * no economic state (the campaign-budget declaration precedent).
+ */
+export interface CreatorMatchRateCeiling {
+  readonly amount: number;
+  readonly currency: string;
+  readonly unit: CreatorRateUnit;
+}
+
+/**
+ * The campaign-side creator requirements (work order §3.1/§3.4):
+ * explicit, provider-neutral, closed-vocabulary hard constraints.
+ * When a campaign is linked, the language/territory rules derived
+ * from the pinned campaign policy version are UNIONED into these.
+ */
+export interface CreatorMatchRequirements {
+  /** Every required format must be offered (and not restricted). */
+  readonly requiredFormats: readonly CreatorContentFormat[];
+  /** Every required language must be published by a connection. */
+  readonly requiredLanguages: readonly string[];
+  /** Target territories (ISO 3166-1 alpha-2); audience must intersect. */
+  readonly targetTerritories: readonly string[];
+  /** Campaign topics; an exact (case-insensitive) restricted-topic match gates. */
+  readonly campaignTopics: readonly string[];
+  /** Every required rights kind must be granted. */
+  readonly requiredRightsKinds: readonly CreatorRightsKind[];
+  /** The hard price constraint (null = unconstrained). */
+  readonly rateCeiling: CreatorMatchRateCeiling | null;
+  /** The minimum audience size band (null = unconstrained). */
+  readonly minimumAudienceSizeBand: CreatorAudienceSizeBand | null;
+  /** Minimum canonical reputation scores per CRE-005 role (null = unconstrained). */
+  readonly minimumReputation: {
+    readonly audienceInfluence: number | null;
+    readonly production: number | null;
+  };
+  /** The notice window the campaign can provide (days; null = unconstrained). */
+  readonly noticeWindowDays: number | null;
+}
+
+/** The explicit six-signal weight profile (integers, sum = 100). */
+export type CreatorMatchWeights = CreatorMatchWeightsShape;
+
+/** The campaign linkage (resolved read-only through the neutral lookup). */
+export interface CreatorMatchCampaignRef {
+  readonly campaignId: string;
+  /** Omitted → the campaign's latest policy version. */
+  readonly policyVersion?: number;
+}
+
+/**
+ * The provider-neutral view of a campaign policy version derived by
+ * the neutral campaign lookup (work order §2: /campaigns stays the
+ * campaign policy authority — the matching engine never imports
+ * campaign semantics).
+ */
+export interface ResolvedCampaignCreatorRequirements {
+  readonly campaignId: string;
+  readonly policyVersion: number;
+  readonly organizationScopeId: string;
+  /** Languages required by the campaign's language eligibility rules. */
+  readonly requiredLanguages: readonly string[];
+  /** Territories targeted by the campaign's region eligibility rules. */
+  readonly targetTerritories: readonly string[];
+  readonly objectiveKinds: readonly string[];
+  readonly budgetUnit: "credits";
+  readonly budgetTotalAmount: number;
+}
+
+/**
+ * CreatorMatchCampaignLookup — structural interface over the
+ * campaigns domain's policy repository (existence + org scope +
+ * pinned version + the derived creator-requirements view). A
+ * cross-scope or nonexistent campaign resolves to null (no
+ * existence oracle).
+ */
+export interface CreatorMatchCampaignLookup {
+  resolve(
+    campaignId: string,
+    policyVersion?: number,
+  ): Promise<ResolvedCampaignCreatorRequirements | null>;
+}
+
+/**
+ * The canonical reputation score view the matching boundary needs
+ * (reference + the RESOLVED dimension score, read-only through the
+ * neutral lookup). The score is the canonical /reputation snapshot
+ * value for the reference's dimension — matching never computes,
+ * stores or mutates it.
+ */
+export interface ResolvedCreatorReputationScore {
+  readonly snapshotId: string;
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string;
+  readonly dimension: ReputationDimension;
+  readonly digest: string;
+  /** The canonical snapshot's dimension score (0–100). */
+  readonly score: number;
+}
+
+/**
+ * CreatorMatchReputationLookup — structural interface over the
+ * NET-W007 reputation snapshot repository (read-only score
+ * resolution). /reputation stays the trust-signal authority.
+ */
+export interface CreatorMatchReputationLookup {
+  /**
+   * Resolve a snapshot's canonical score for ONE frozen dimension
+   * (a canonical snapshot carries all eight; the reference's
+   * `dimension` selects which one matching reads). Read-only.
+   */
+  resolveScore(
+    snapshotId: string,
+    dimension: ReputationDimension,
+  ): Promise<ResolvedCreatorReputationScore | null>;
+}
+
+/** The provider-neutral safety view (the risk-control gate read). */
+export interface CreatorMatchSafetyView {
+  readonly held: boolean;
+  readonly controlId: string | null;
+  readonly action: string | null;
+}
+
+/**
+ * CreatorMatchSafetyLookup — structural interface over the disputes
+ * domain's active-control registry (`participant_eligibility` gate
+ * read). /disputes stays the risk-control authority; matching only
+ * READS (an active HOLD/BLOCK is a hard eligibility gate).
+ */
+export interface CreatorMatchSafetyLookup {
+  activeHold(
+    organizationScopeId: string,
+    creatorPersonId: string,
+  ): Promise<CreatorMatchSafetyView>;
+}
+
+/** One neutral fact in an advisory request (label + value strings). */
+export interface CreatorMatchAdvisoryFact {
+  readonly label: string;
+  readonly value: string;
+}
+
+/**
+ * The privacy-minimized advisory request (work order §3.3): record-
+ * level neutral facts ONLY — campaign requirement labels + creator
+ * PUBLIC aggregate facts. NO rates, NO restricted topics, NO
+ * reputation scores, NO identity material (the W013
+ * mention-exclusion precedent, regression-pinned).
+ */
+export interface CreatorMatchAdvisoryInput {
+  readonly rubricRef: string;
+  readonly neutralFacts: readonly CreatorMatchAdvisoryFact[];
+}
+
+/** An advisory assessment (0–100) with provider identity preserved. */
+export interface CreatorMatchAdvisoryAssessment {
+  readonly score: number;
+  readonly provider: string;
+  readonly modelRef: string;
+}
+
+/**
+ * CreatorMatchAdvisory — the provider-neutral advisory port
+ * (AI-002, wired at the composition root over `LlmPort.score` with
+ * purpose "matching"). AI output is ADVISORY EVIDENCE ONLY: it can
+ * never flip eligibility and only blends (bounded) into the
+ * relevance ranking signal.
+ */
+export interface CreatorMatchAdvisory {
+  assess(
+    input: CreatorMatchAdvisoryInput,
+  ): Promise<CreatorMatchAdvisoryAssessment>;
+}
+
+export interface CreatorMatchLookups {
+  readonly campaign: CreatorMatchCampaignLookup;
+  readonly reputation: CreatorMatchReputationLookup;
+  readonly safety: CreatorMatchSafetyLookup;
+}
+
+// ---------------------------------------------------------------------------
+// Eligibility / ranking / explanation (the deterministic contract)
+// ---------------------------------------------------------------------------
+
+/**
+ * One hard-gate evaluation. `gate` is the closed gate/reason
+ * identifier; `passed` records the outcome; `detail` carries the
+ * deterministic context (e.g. the offending value). The trace is
+ * complete over every APPLICABLE gate.
+ */
+export interface CreatorMatchGateEvaluation {
+  readonly gate: CreatorMatchGateReason;
+  readonly passed: boolean;
+  readonly detail: string | null;
+}
+
+export interface CreatorMatchEligibility {
+  readonly eligible: boolean;
+  readonly gates: readonly CreatorMatchGateEvaluation[];
+  readonly failedReasons: readonly CreatorMatchGateReason[];
+}
+
+/** One explicit-signal score with its weight and input trace. */
+export interface CreatorMatchSignalScore {
+  readonly signal: CreatorMatchSignal;
+  /** 0–100 (1-decimal rounding for deterministic digests). */
+  readonly score: number;
+  /** The explicit weight (0–100). */
+  readonly weight: number;
+  /** score × weight / 100 (1-decimal rounding). */
+  readonly contribution: number;
+  /** The deterministic inputs used (machine-readable explanation). */
+  readonly inputs: Readonly<Record<string, unknown>>;
+}
+
+/** One ranked candidate (eligible only — hard gates never overridden). */
+export interface CreatorMatchCandidateResult {
+  readonly profileId: string;
+  readonly creatorPersonId: string;
+  readonly displayName: string;
+  readonly profileVersion: number;
+  readonly rank: number;
+  readonly totalScore: number;
+  readonly signals: readonly CreatorMatchSignalScore[];
+  /** The advisory assessment used (null when the advisory was disabled). */
+  readonly advisory: {
+    readonly score: number;
+    readonly provider: string;
+    readonly modelRef: string;
+  } | null;
+}
+
+/** One excluded candidate with the complete failure explanation. */
+export interface CreatorMatchExcludedCandidate {
+  readonly profileId: string;
+  readonly creatorPersonId: string;
+  readonly displayName: string;
+  readonly profileVersion: number | null;
+  readonly failedReasons: readonly CreatorMatchGateReason[];
+}
+
+/** The advisory metadata pinned on the run (provider independence). */
+export interface CreatorMatchAdvisoryMeta {
+  readonly used: boolean;
+  /** The blend applied into relevance (0 ≤ blend ≤ 0.25). */
+  readonly blend: number;
+  readonly provider: string | null;
+  readonly modelRef: string | null;
+}
+
+/**
+ * A CreatorMatchRunRecord — an immutable, append-only decision
+ * record for ONE match execution (work order §3.4). It pins the
+ * exact requirements, weights, advisory metadata, ranked results,
+ * excluded candidates and a deterministic digest — so the selection
+ * is reproducible and auditable. It carries NO status machine (a
+ * completed decision, not a lifecycle subject) and NO economic,
+ * reputation, risk or workflow mutation (matching is selection, not
+ * authority).
+ */
+export interface CreatorMatchRunRecord {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly formatVersion: string;
+  readonly campaign: {
+    readonly campaignId: string;
+    readonly policyVersion: number;
+  } | null;
+  /** The EFFECTIVE requirements (explicit ∪ campaign-derived). */
+  readonly requirements: CreatorMatchRequirements;
+  readonly weights: CreatorMatchWeights;
+  readonly advisory: CreatorMatchAdvisoryMeta;
+  readonly candidateCount: number;
+  readonly eligibleCount: number;
+  readonly results: readonly CreatorMatchCandidateResult[];
+  readonly excluded: readonly CreatorMatchExcludedCandidate[];
+  /** SHA-256 over the canonical serialization (deterministic). */
+  readonly digest: string;
+  readonly createdBy: string;
+  readonly createdAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// The match-run repository (persistence port; PostgreSQL authority)
+// ---------------------------------------------------------------------------
+
+export interface CreatorMatchRunRepository {
+  save(
+    run: CreatorMatchRunRecord,
+    execution: ExecutionContext,
+  ): Promise<CreatorMatchRunRecord>;
+  findById(id: string): Promise<CreatorMatchRunRecord | null>;
+  listByOrganization(
+    organizationScopeId: string,
+    campaignId?: string,
+  ): Promise<readonly CreatorMatchRunRecord[]>;
+  createWithinTx(
+    run: CreatorMatchRunRecord,
+    tx: AuthorityTransaction,
+  ): Promise<CreatorMatchRunRecord>;
+}
+
+// ---------------------------------------------------------------------------
+// The matching domain service
+// ---------------------------------------------------------------------------
+
+export interface RunCreatorMatchInput {
+  readonly organizationScopeId: string;
+  /** Optional campaign linkage (resolved read-only, tenant-scoped). */
+  readonly campaign?: CreatorMatchCampaignRef | null;
+  readonly requirements: CreatorMatchRequirements;
+  /** Explicit candidate narrowing (tenant-scoped profile ids). */
+  readonly candidateProfileIds?: readonly string[] | null;
+  /** null/omitted → the canonical default weight profile. */
+  readonly weights?: CreatorMatchWeights | null;
+  /** null/omitted → advisory disabled (pure deterministic ranking). */
+  readonly advisory?: {
+    readonly enabled: boolean;
+    readonly maxWeight?: number;
+  } | null;
+  readonly idempotencyKey: string;
+}
+
+export interface RunCreatorMatchResult {
+  readonly run: CreatorMatchRunRecord;
+  /** false when a run with the same idempotency key already existed. */
+  readonly created: boolean;
+}
+
+/**
+ * The matching service (work order §3.4). `runMatch` is the ONLY
+ * material command: it evaluates deterministic eligibility, ranks
+ * the eligible candidate set by explicit signals (optionally blended
+ * with the bounded advisory), and persists ONE append-only,
+ * idempotent, tenant-scoped run record with the
+ * `creator_match.recorded` audit event. It mutates NOTHING else —
+ * no workflow, settlement, reputation or risk state (AC-04).
+ */
+export interface CreatorMatchingService {
+  runMatch(
+    execution: ExecutionContext,
+    input: RunCreatorMatchInput,
+  ): Promise<RunCreatorMatchResult>;
+  /**
+   * Fetch one match run WITHIN an organization scope (tenant-scoped
+   * read: a cross-scope id is indistinguishable from a nonexistent
+   * one — NotFoundError, no existence oracle).
+   */
+  getMatchRun(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    id: string,
+  ): Promise<CreatorMatchRunRecord>;
+  /** List an org's runs (optionally narrowed by campaign). */
+  listMatchRuns(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    campaignId?: string,
+  ): Promise<readonly CreatorMatchRunRecord[]>;
+}
+
+// ---------------------------------------------------------------------------
 // The boundary port
 // ---------------------------------------------------------------------------
 
@@ -620,7 +996,9 @@ export interface CreatorService {
  * The CreatorsPort describes the boundary's readiness. After
  * NET-W015 it is `"ready"` (the boundary carries the creator
  * identity/preference domain: profile anchors, versioned sections,
- * privacy/secret guards, reputation references).
+ * privacy/secret guards, reputation references). NET-W016 adds the
+ * matching service (deterministic eligibility + explicit-signal
+ * ranking + bounded advisory) inside the SAME frozen boundary.
  */
 export interface CreatorsPort {
   readonly boundary: "creators";
@@ -633,6 +1011,8 @@ export interface CreatorsPort {
     readonly profilePaused: "creator_profile.paused";
     readonly profileResumed: "creator_profile.resumed";
     readonly profileArchived: "creator_profile.archived";
+    /** NET-W016: the (only) material matching mutation — the run record. */
+    readonly matchRunRecorded: "creator_match.recorded";
   };
 }
 
@@ -652,4 +1032,7 @@ export type {
   CreatorAudienceSizeBand,
   CreatorAudienceAgeBand,
   CreatorRateUnit,
+  CreatorMatchSignal,
+  CreatorMatchGateReason,
+  CreatorMatchWeightsShape,
 };

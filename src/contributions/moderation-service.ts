@@ -230,7 +230,31 @@ export function createModerationService(
                 },
               );
             }
-            const now = new Date().toISOString();
+            // DETERMINISTIC ORDERING FIX (NET-W016 CI flake root
+            // cause): the moderation status derives "latest" from
+            // `decidedAt`, whose same-millisecond tie-break compared
+            // RANDOM record ids — two decisions in the same
+            // millisecond could derive the WRONG latest status
+            // (flaky, order-dependent). Make `decidedAt` STRICTLY
+            // monotonic per contribution: the new decision's
+            // timestamp is always > the prior latest's (serialized
+            // under the contribution moderation mutex, so this
+            // in-tx read observes all prior committed decisions).
+            const priorDecisions =
+              await decisionRepository.listByContributionWithinTx(
+                input.contributionId,
+                tx,
+              );
+            const priorLatest =
+              priorDecisions.length > 0
+                ? priorDecisions[priorDecisions.length - 1]!
+                : null;
+            let decidedAt = new Date().toISOString();
+            if (priorLatest !== null && decidedAt <= priorLatest.decidedAt) {
+              decidedAt = new Date(
+                Date.parse(priorLatest.decidedAt) + 1,
+              ).toISOString();
+            }
             const record: ModerationDecisionRecord = Object.freeze({
               id: randomUUID(),
               organizationScopeId: input.organizationScopeId,
@@ -240,7 +264,7 @@ export function createModerationService(
               notes: input.notes ?? null,
               qualityEvaluationIds: Object.freeze([...citedIds]),
               decidedBy: actor,
-              decidedAt: now,
+              decidedAt,
               idempotencyKey: input.idempotencyKey,
               executionId: execution.executionId,
               correlationId: execution.correlationId,

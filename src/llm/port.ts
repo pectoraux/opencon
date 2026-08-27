@@ -46,7 +46,9 @@ export interface LlmCompletionOutput {
 }
 
 /**
- * A provider-neutral ADVISORY scoring request (NET-W013, AI-004).
+ * A provider-neutral ADVISORY scoring request (NET-W013, AI-004;
+ * NET-W016 extends the purpose union with "matching" for AI-002 —
+ * the creator-matching advisory path).
  *
  * `neutralFacts` carries RECORD-LEVEL neutral facts (labels + values
  * assembled by the composition root from authoritative records) — never
@@ -55,7 +57,7 @@ export interface LlmCompletionOutput {
  * against (e.g. a pinned quality-policy version reference).
  */
 export interface LlmScoringInput {
-  readonly purpose: "content_scoring" | "safety";
+  readonly purpose: "content_scoring" | "safety" | "matching";
   readonly rubricRef: string;
   readonly neutralFacts: readonly {
     readonly label: string;

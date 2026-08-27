@@ -291,6 +291,8 @@ import {
   createAuthorityCreatorProfileVersionRepository,
 } from "../creators/authority-creator-repository.ts";
 import { createCreatorService } from "../creators/creator-service.ts";
+import { createAuthorityCreatorMatchRunRepository } from "../creators/authority-match-run-repository.ts";
+import { createCreatorMatchingService } from "../creators/matching-service.ts";
 import type {
   ActivateRiskControlInput,
   AppealDisputeInput,
@@ -317,10 +319,13 @@ import type {
   DefineCampaignPolicyInput,
 } from "../campaigns/port.ts";
 import type {
+  CreatorMatchRunRecord,
   CreatorProfileRecord,
   CreatorProfileSections,
   CreatorProfileVersion,
   CreatorService,
+  CreatorMatchingService,
+  RunCreatorMatchInput,
 } from "../creators/port.ts";
 import type { RiskOperationClass } from "../core/risk.ts";
 
@@ -461,6 +466,8 @@ export interface Runtime {
   readonly campaignService: CampaignService;
   // NET-W015 creators (creator identity and preferences) service.
   readonly creatorService: CreatorService;
+  // NET-W016 creator matching (deterministic eligibility + ranking).
+  readonly creatorMatchingService: CreatorMatchingService;
   // NET-W012 helpful contributions (Proof-of-Helpfulness) service.
   readonly helpfulnessService: HelpfulnessService;
   // NET-W013 quality/moderation/anti-spam services.
@@ -1735,6 +1742,160 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   });
 
   // ------------------------------------------------------------------
+  // NET-W016 creator matching wiring (deterministic eligibility +
+  // explicit-signal ranking + bounded advisory).
+  //
+  // MATCHING IS SELECTION, NOT AUTHORITY: the matching lookups are
+  // thin READ-ONLY adapters over the OWNING domains' repositories
+  // (campaigns policy, reputation snapshots, disputes risk-control
+  // registry) — the same dependency-inversion pattern as every
+  // lookup above. The /creators domain imports core contracts only:
+  // /campaigns stays the campaign policy authority (requirements
+  // derived read-only from a pinned policy version), /reputation
+  // stays the trust-signal authority (references verified + scores
+  // resolved read-only), /disputes stays the risk-control authority
+  // (an active participant_eligibility control is a hard gate).
+  // The advisory is the provider-neutral LlmPort (AI-002 — purpose
+  // "matching"); AI output is advisory evidence only: it never
+  // flips eligibility and only blends (capped) into the relevance
+  // ranking signal. The ONLY mutation is the append-only,
+  // idempotent, tenant-scoped match-run record + its audit event.
+  // ------------------------------------------------------------------
+  const creatorMatchCampaignLookup = {
+    async resolve(campaignId: string, policyVersion?: number) {
+      // The pinned policy version (or the lineage's latest when
+      // omitted). /campaigns stays the campaign policy authority.
+      let policy =
+        policyVersion === undefined
+          ? null
+          : await campaignPolicyRepo.findVersion(campaignId, policyVersion);
+      if (policyVersion === undefined) {
+        const versions = await campaignPolicyRepo.listByCampaign(campaignId);
+        const latest =
+          versions.length > 0
+            ? versions.reduce((a, b) => (b.version > a.version ? b : a))
+            : null;
+        policy = latest;
+      }
+      if (!policy) return null;
+      // Derive the creator-relevant requirements from the policy's
+      // closed eligibility vocabulary: language rules → required
+      // languages; region rules → target territories (the operators
+      // equals/not_equals/in/not_in map to requires/excludes; for
+      // creator matching only the positive requirement side is a
+      // hard gate — the W011 eligibility contract remains owned by
+      // /campaigns and enforced on contributions downstream).
+      const requiredLanguages: string[] = [];
+      const targetTerritories: string[] = [];
+      for (const rule of policy.eligibility.rules) {
+        if (rule.attribute !== "language" && rule.attribute !== "region") {
+          continue;
+        }
+        const positive =
+          rule.operator === "equals" || rule.operator === "in";
+        if (!positive) continue;
+        for (const value of rule.values) {
+          if (rule.attribute === "language") {
+            requiredLanguages.push(value);
+          } else {
+            targetTerritories.push(value);
+          }
+        }
+      }
+      return {
+        campaignId: policy.campaignId,
+        policyVersion: policy.version,
+        organizationScopeId: policy.organizationScopeId,
+        requiredLanguages: [...new Set(requiredLanguages)],
+        targetTerritories: [...new Set(targetTerritories)],
+        objectiveKinds: policy.objectives.map((o) => o.kind),
+        budgetUnit: policy.budget.unit,
+        budgetTotalAmount: policy.budget.totalAmount,
+      };
+    },
+  };
+  const creatorMatchReputationLookup = {
+    async resolveScore(snapshotId: string, dimension: string) {
+      const snapshot = await reputationSnapshotRepo.findById(snapshotId);
+      if (!snapshot) return null;
+      const score = snapshot.scores.find(
+        (s) => s.dimension === dimension,
+      );
+      if (!score) return null;
+      return {
+        snapshotId: snapshot.id,
+        organizationScopeId: snapshot.organizationScopeId,
+        subjectPersonId: snapshot.subjectPersonId,
+        dimension: score.dimension,
+        digest: snapshot.digest,
+        score: score.score,
+      };
+    },
+  };
+  const creatorMatchSafetyLookup = {
+    async activeHold(organizationScopeId: string, creatorPersonId: string) {
+      // The active-control registry read (the composition-root gate
+      // read): ACTIVE participant_eligibility controls covering the
+      // creator person. Read-only — /disputes stays the authority.
+      const controls = await riskControlRepo.findActiveControls(
+        organizationScopeId,
+        "participant_eligibility",
+        creatorPersonId,
+      );
+      const control = controls.find(
+        (c) => c.action === "HOLD" || c.action === "BLOCK",
+      );
+      return {
+        held: control !== undefined,
+        controlId: control?.id ?? null,
+        action: control?.action ?? null,
+      };
+    },
+  };
+  // The advisory adapter over the provider-neutral LlmPort (AI-002):
+  // [0,1] → 0–100 with provider identity preserved. Deterministic
+  // per provider for identical inputs (the echo reference provider
+  // is bit-reproducible; any external provider enters identically).
+  const creatorMatchAdvisory = {
+    async assess(input: {
+      readonly rubricRef: string;
+      readonly neutralFacts: readonly {
+        readonly label: string;
+        readonly value: string;
+      }[];
+    }) {
+      const scored = await llmProvider.score({
+        purpose: "matching",
+        rubricRef: input.rubricRef,
+        neutralFacts: input.neutralFacts,
+      });
+      return {
+        score: Math.round(scored.score * 1000) / 10,
+        provider: scored.provider,
+        modelRef: scored.modelRef,
+      };
+    },
+  };
+  const creatorMatchRunRepo = createAuthorityCreatorMatchRunRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
+  });
+  const creatorMatchingService = createCreatorMatchingService({
+    profileRepository: creatorProfileRepo,
+    versionRepository: creatorProfileVersionRepo,
+    runRepository: creatorMatchRunRepo,
+    lookups: {
+      campaign: creatorMatchCampaignLookup,
+      reputation: creatorMatchReputationLookup,
+      safety: creatorMatchSafetyLookup,
+    },
+    advisory: creatorMatchAdvisory,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("creators"),
+  });
+
+  // ------------------------------------------------------------------
   // NET-W012 helpful contributions wiring (Proof-of-Helpfulness).
   //
   // The helpfulness lookups are thin READ-ONLY adapters over the
@@ -2535,6 +2696,24 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       sections: version.sections as unknown as Record<string, unknown>,
       createdBy: version.createdBy,
       createdAt: version.createdAt,
+    };
+  }
+  function toCreatorMatchRunView(run: CreatorMatchRunRecord) {
+    return {
+      id: run.id,
+      organizationScopeId: run.organizationScopeId,
+      formatVersion: run.formatVersion,
+      campaign: run.campaign,
+      requirements: run.requirements as unknown as Record<string, unknown>,
+      weights: run.weights,
+      advisory: run.advisory,
+      candidateCount: run.candidateCount,
+      eligibleCount: run.eligibleCount,
+      results: run.results as unknown as readonly Record<string, unknown>[],
+      excluded: run.excluded as unknown as readonly Record<string, unknown>[],
+      digest: run.digest,
+      createdBy: run.createdBy,
+      createdAt: run.createdAt,
     };
   }
   function toHelpfulnessPolicyView(
@@ -5110,6 +5289,45 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       };
     },
 
+    // -- NET-W016 creator-matching commands ------------------------------
+    // Composition-root orchestration (the authority-separation
+    // pattern): the /creators domain owns the matching rules
+    // (deterministic eligibility + explicit-signal ranking); the
+    // campaign/reputation/safety lookups are thin read-only adapters
+    // over the OWNING domains; the advisory is the provider-neutral
+    // LlmPort (AI-002 — advisory evidence only, never the
+    // eligibility authority). Matching is SELECTION, not authority:
+    // the only mutation is the append-only match-run record.
+
+    async runCreatorMatch(execution, _actorPersonId, input) {
+      const result = await creatorMatchingService.runMatch(
+        execution,
+        input as unknown as RunCreatorMatchInput,
+      );
+      return {
+        run: toCreatorMatchRunView(result.run),
+        created: result.created,
+      };
+    },
+
+    async getCreatorMatchRun(execution, organizationScopeId, id) {
+      const run = await creatorMatchingService.getMatchRun(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        id,
+      );
+      return toCreatorMatchRunView(run);
+    },
+
+    async listCreatorMatchRuns(execution, organizationScopeId, campaignId) {
+      const runs = await creatorMatchingService.listMatchRuns(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        campaignId,
+      );
+      return runs.map(toCreatorMatchRunView);
+    },
+
     // -- NET-W012 helpful-contribution commands -------------------------
     async defineHelpfulnessPolicy(execution, _actorPersonId, input) {
       const result = await helpfulnessService.defineHelpfulnessPolicy(
@@ -6268,6 +6486,8 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     campaignService,
     // NET-W015 creators (creator identity and preferences) service.
     creatorService,
+    // NET-W016 creator matching (deterministic eligibility + ranking).
+    creatorMatchingService,
     helpfulnessService,
     // NET-W013 quality/moderation/anti-spam services + LLM providers.
     qualityService,

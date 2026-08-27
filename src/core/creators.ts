@@ -546,3 +546,244 @@ export function requireCreatorString(
   }
   return value.trim();
 }
+
+// ---------------------------------------------------------------------------
+// NET-W016 — creator matching vocabulary (matching is SELECTION, not
+// authority; every constant here is data + pure validation only)
+// ---------------------------------------------------------------------------
+
+/**
+ * The six explicit CRE-002 matching signals. Ranking is BY these
+ * signals with explicit weights — the advisory AI path may only
+ * blend (bounded) into `relevance` and can never flip eligibility.
+ */
+export const CREATOR_MATCH_SIGNALS = [
+  "relevance",
+  "audience_quality",
+  "historic_outcomes",
+  "safety",
+  "price",
+  "availability",
+] as const;
+
+export type CreatorMatchSignal = (typeof CREATOR_MATCH_SIGNALS)[number];
+
+export function isCreatorMatchSignal(
+  value: string,
+): value is CreatorMatchSignal {
+  return (CREATOR_MATCH_SIGNALS as readonly string[]).includes(value);
+}
+
+/**
+ * The closed hard-gate reason vocabulary (NET-W016 §3.1). An
+ * ineligible candidate carries one or more of these reasons — the
+ * complete, machine-readable explanation. Hard restrictions can
+ * NEVER be overridden by model ranking (structural).
+ */
+export const CREATOR_MATCH_GATE_REASONS = [
+  "no_profile_version",
+  "profile_not_active",
+  "not_accepting_work",
+  "no_capacity",
+  "notice_window_exceeded",
+  "direct_campaigns_not_accepted",
+  "invitation_required",
+  "format_unsupported",
+  "format_restricted",
+  "language_unsupported",
+  "territory_unsupported",
+  "territory_restricted",
+  "topic_restricted",
+  "rights_not_granted",
+  "rate_exceeds_ceiling",
+  "audience_band_below_minimum",
+  "reputation_reference_unresolvable",
+  "reputation_below_minimum",
+  "active_risk_control",
+] as const;
+
+export type CreatorMatchGateReason =
+  (typeof CREATOR_MATCH_GATE_REASONS)[number];
+
+export function isCreatorMatchGateReason(
+  value: string,
+): value is CreatorMatchGateReason {
+  return (CREATOR_MATCH_GATE_REASONS as readonly string[]).includes(value);
+}
+
+/**
+ * The frozen matching-run format lineage (the campaign-policy
+ * format precedent): pinned on every match-run record so the
+ * contract shape stays reproducible.
+ */
+export const CREATOR_MATCH_FORMAT = "NET-W016:1" as const;
+
+/** Match weights are integers 0–100 summing to EXACTLY this. */
+export const CREATOR_MATCH_WEIGHT_SUM = 100;
+
+/**
+ * The maximum advisory blend into the relevance signal
+ * (advisoryMaxWeight/100 ≤ 0.25 — AI is advisory, never the
+ * eligibility authority, and never dominant in ranking).
+ */
+export const CREATOR_MATCH_ADVISORY_MAX_BLEND = 0.25;
+
+/** The maximum number of candidates a single match run may rank. */
+export const CREATOR_MATCH_MAX_CANDIDATES = 200;
+
+/**
+ * Ordinal rank of an audience size band (lt_1k = 0 … gt_10m = 5) —
+ * the privacy-preserving scale order used by the audience-band hard
+ * gate (a BAND comparison, never an exact-count comparison).
+ */
+export function creatorAudienceSizeBandRank(
+  band: CreatorAudienceSizeBand,
+): number {
+  const rank = CREATOR_AUDIENCE_SIZE_BANDS.indexOf(band);
+  if (rank < 0) {
+    throw new InvalidCreatorProfileError(
+      `unknown audience size band: ${String(band)}`,
+      { band },
+    );
+  }
+  return rank;
+}
+
+/** Ordinal rank of an engagement band (low = 0 … very_high = 3). */
+export function creatorEngagementBandRank(
+  band: CreatorEngagementBand,
+): number {
+  const rank = CREATOR_ENGAGEMENT_BANDS.indexOf(band);
+  if (rank < 0) {
+    throw new InvalidCreatorProfileError(
+      `unknown engagement band: ${String(band)}`,
+      { band },
+    );
+  }
+  return rank;
+}
+
+/** Validation error for matching-request violations (NET-W016). */
+export class InvalidCreatorMatchError extends OpenConError {
+  constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+  ) {
+    super({
+      code: "CREATOR_MATCH_VALIDATION",
+      classification: "validation",
+      message,
+      context,
+    });
+  }
+}
+
+/**
+ * The canonical default weight profile (integers, sum = 100):
+ * relevance 30, audienceQuality 20, historicOutcomes 20, safety 10,
+ * price 10, availability 10. Explicit weights may override it but
+ * must satisfy the same constraints.
+ */
+export const CREATOR_MATCH_DEFAULT_WEIGHTS = Object.freeze({
+  relevance: 30,
+  audienceQuality: 20,
+  historicOutcomes: 20,
+  safety: 10,
+  price: 10,
+  availability: 10,
+} as const);
+
+export interface CreatorMatchWeightsShape {
+  readonly relevance: number;
+  readonly audienceQuality: number;
+  readonly historicOutcomes: number;
+  readonly safety: number;
+  readonly price: number;
+  readonly availability: number;
+}
+
+/**
+ * Validate a weight profile: six integers 0–100 (inclusive), each
+ * signal present, summing to EXACTLY {@link CREATOR_MATCH_WEIGHT_SUM}.
+ * Ranking is by explicit signals — the weights are part of the
+ * reproducible decision record.
+ */
+export function validateCreatorMatchWeights(
+  weights: CreatorMatchWeightsShape,
+): CreatorMatchWeightsShape {
+  const entries: readonly (readonly [keyof CreatorMatchWeightsShape, number])[] =
+    [
+      ["relevance", weights.relevance],
+      ["audienceQuality", weights.audienceQuality],
+      ["historicOutcomes", weights.historicOutcomes],
+      ["safety", weights.safety],
+      ["price", weights.price],
+      ["availability", weights.availability],
+    ];
+  let sum = 0;
+  for (const [field, value] of entries) {
+    if (
+      typeof value !== "number" ||
+      !Number.isInteger(value) ||
+      value < 0 ||
+      value > 100
+    ) {
+      throw new InvalidCreatorMatchError(
+        `weights.${field} must be an integer between 0 and 100 (got ${String(value)})`,
+        { field, value },
+      );
+    }
+    sum += value;
+  }
+  if (sum !== CREATOR_MATCH_WEIGHT_SUM) {
+    throw new InvalidCreatorMatchError(
+      `match weights must sum to exactly ${String(CREATOR_MATCH_WEIGHT_SUM)} (got ${String(sum)})`,
+      { sum },
+    );
+  }
+  return weights;
+}
+
+/**
+ * Validate the advisory blend bound: 0 ≤ maxWeight ≤
+ * CREATOR_MATCH_ADVISORY_MAX_BLEND × 100. The advisory is advisory —
+ * its influence on ranking is structurally capped.
+ */
+export function validateCreatorMatchAdvisoryMaxWeight(
+  maxWeight: number,
+): number {
+  const bound = CREATOR_MATCH_ADVISORY_MAX_BLEND * 100;
+  if (
+    typeof maxWeight !== "number" ||
+    !Number.isFinite(maxWeight) ||
+    maxWeight < 0 ||
+    maxWeight > bound
+  ) {
+    throw new InvalidCreatorMatchError(
+      `advisory maxWeight must be between 0 and ${String(bound)} (got ${String(maxWeight)}) — AI-assisted matching is bounded, never the ranking authority`,
+      { maxWeight, bound },
+    );
+  }
+  return maxWeight;
+}
+
+/**
+ * Validate a reputation threshold (a minimum canonical score, 0–100).
+ */
+export function validateCreatorMatchReputationThreshold(
+  field: string,
+  threshold: number,
+): number {
+  if (
+    typeof threshold !== "number" ||
+    !Number.isFinite(threshold) ||
+    threshold < 0 ||
+    threshold > 100
+  ) {
+    throw new InvalidCreatorMatchError(
+      `${field} must be a number between 0 and 100 (got ${String(threshold)})`,
+      { field, threshold },
+    );
+  }
+  return threshold;
+}
