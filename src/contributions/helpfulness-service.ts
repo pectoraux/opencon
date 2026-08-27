@@ -57,6 +57,7 @@ import {
   type PohBasisResolution,
   type PohPolicyView,
 } from "./poh-engine.ts";
+import type { AuthorityTransaction } from "../core/postgres-authority.ts";
 import type {
   CommercialDisclosureRecord,
   CommercialDisclosureRepository,
@@ -73,6 +74,7 @@ import type {
   HelpfulnessPolicyRepository,
   HelpfulnessPolicySections,
   HelpfulnessService,
+  HelpfulMention,
   HelpfulSubmission,
   PrepareRecommendationInput,
   ProofOfHelpfulness,
@@ -389,26 +391,31 @@ export function createHelpfulnessService(
    * relationship key must resolve to a DECLARED (non-retracted)
    * disclosure on the same contribution, same organization, filed by
    * the contributor, whose relationshipRef equals the key.
+   *
+   * The decision itself is PURE over (mentions, disclosures) so the
+   * pre-flight check and the authoritative in-transaction re-check
+   * compute EXACTLY the same predicate over as-of-their-moment
+   * disclosure state (the publication TOCTOU closure).
    */
-  async function computeDisclosureCompliance(
-    poh: ProofOfHelpfulness,
-  ): Promise<{ compliant: boolean; hasCommercialMentions: boolean; missing: readonly string[] }> {
-    const commercialKeys = poh.mentions
+  function disclosureComplianceFor(
+    mentions: readonly HelpfulMention[],
+    disclosures: readonly CommercialDisclosureRecord[],
+    organizationScopeId: string,
+    contributorId: string,
+  ): { compliant: boolean; hasCommercialMentions: boolean; missing: readonly string[] } {
+    const commercialKeys = mentions
       .map((m) => m.commercialRelationshipRef)
       .filter((k): k is string => k !== null);
     if (commercialKeys.length === 0) {
       return { compliant: true, hasCommercialMentions: false, missing: [] };
     }
-    const disclosures = await disclosureRepository.listByContribution(
-      poh.contributionId,
-    );
     const active = new Set(
       disclosures
         .filter(
           (d) =>
             d.state === "DECLARED" &&
-            d.organizationScopeId === poh.organizationScopeId &&
-            d.contributorId === poh.contributorId,
+            d.organizationScopeId === organizationScopeId &&
+            d.contributorId === contributorId,
         )
         .map((d) => d.relationshipRef),
     );
@@ -418,6 +425,44 @@ export function createHelpfulnessService(
       hasCommercialMentions: true,
       missing,
     };
+  }
+
+  /** Pre-flight disclosure compliance (over committed state). */
+  async function computeDisclosureCompliance(
+    poh: ProofOfHelpfulness,
+  ): Promise<{ compliant: boolean; hasCommercialMentions: boolean; missing: readonly string[] }> {
+    const disclosures = await disclosureRepository.listByContribution(
+      poh.contributionId,
+    );
+    return disclosureComplianceFor(
+      poh.mentions,
+      disclosures,
+      poh.organizationScopeId,
+      poh.contributorId,
+    );
+  }
+
+  /**
+   * The authoritative in-transaction disclosure compliance re-check:
+   * disclosure state (DECLARED vs RETRACTED) is re-resolved INSIDE
+   * the mutation's transaction — a disclosure retracted between the
+   * pre-flight check and the commit is seen as RETRACTED here and
+   * blocks the mutation.
+   */
+  async function computeDisclosureComplianceWithinTx(
+    poh: ProofOfHelpfulness,
+    tx: AuthorityTransaction,
+  ): Promise<{ compliant: boolean; hasCommercialMentions: boolean; missing: readonly string[] }> {
+    const disclosures = await disclosureRepository.listByContributionWithinTx(
+      poh.contributionId,
+      tx,
+    );
+    return disclosureComplianceFor(
+      poh.mentions,
+      disclosures,
+      poh.organizationScopeId,
+      poh.contributorId,
+    );
   }
 
   /** Resolve one basis into the engine's resolution view (lookup). */
@@ -717,8 +762,14 @@ export function createHelpfulnessService(
         }
       }
 
-      // The helpfulness policy must exist in the same org; the LATEST
-      // version is pinned at creation (re-read in-tx below).
+      // PRE-FLIGHT (fail fast only): the lineage must exist and hold
+      // at least one version in this organization. The AUTHORITATIVE
+      // same-scope check happens inside the transaction below — the
+      // NET-W007 lesson: organization lineage is verified at the
+      // authoritative transaction boundary, never only in a
+      // pre-flight read (a concurrent or previously existing
+      // foreign-scope head of the lineage must fail the create, not
+      // be silently pinned).
       const latestPolicy = await policyRepository.listByPolicyId(
         input.helpfulnessPolicyId,
       );
@@ -738,13 +789,41 @@ export function createHelpfulnessService(
         async (ctx) => {
           const tx = ctx.transaction;
           const now = new Date().toISOString();
-          // Pin the policy version in-tx (consistency under racing
-          // policy definitions).
-          const pinned =
-            (await policyRepository.findLatestWithinTx(
-              input.helpfulnessPolicyId,
-              tx,
-            )) ?? sameOrg;
+          // Pin the policy version IN-TX — the authoritative boundary:
+          //   latest === null                          → fail
+          //   latest.organizationScopeId !== scope      → fail (cross-
+          //     tenant policy pin is impossible)
+          //   otherwise                               → pin latest
+          // A foreign-scope head of the lineage (concurrent or
+          // previously existing) can NEVER be pinned to a
+          // contribution in another organization.
+          const latest = await policyRepository.findLatestWithinTx(
+            input.helpfulnessPolicyId,
+            tx,
+          );
+          if (latest === null) {
+            throw validationError(
+              `helpfulness policy ${input.helpfulnessPolicyId} does not resolve at the creation transaction boundary (fail-closed)`,
+              {
+                policyId: input.helpfulnessPolicyId,
+                organizationScopeId: input.organizationScopeId,
+              },
+            );
+          }
+          if (latest.organizationScopeId !== input.organizationScopeId) {
+            throw helpfulnessError(
+              "HELPFULNESS_POLICY_SCOPE_MISMATCH",
+              "validation",
+              `helpfulness policy ${input.helpfulnessPolicyId} v${String(latest.version)} belongs to organization scope ${latest.organizationScopeId}, not ${input.organizationScopeId} (cross-tenant policy pin rejected at the authoritative transaction boundary)`,
+              {
+                policyId: input.helpfulnessPolicyId,
+                latestVersion: latest.version,
+                latestOrganizationScopeId: latest.organizationScopeId,
+                contributionScope: input.organizationScopeId,
+              },
+            );
+          }
+          const pinned = latest;
           const contributionId = randomUUID();
           const submissionPayload = Object.freeze({
             kind: "helpful",
@@ -1509,6 +1588,11 @@ export function createHelpfulnessService(
       }
       const poh = await loadPoh(contributionId);
       const policy = await loadPinnedPolicy(poh);
+      // PRE-FLIGHT compliance only — necessary, NOT sufficient: the
+      // authoritative mutation (recordPublication) RE-RESOLVES the
+      // pinned policy and the active disclosures INSIDE its own
+      // transaction, so a disclosure retracted between this check
+      // and the publication commit still blocks the publication.
       if (policy.sections.requiresDisclosure) {
         const disclosure = await computeDisclosureCompliance(poh);
         if (!disclosure.compliant) {
@@ -1555,6 +1639,63 @@ export function createHelpfulnessService(
           if (inTx.publication !== null) {
             // Replay tolerance: publication already recorded.
             return inTx;
+          }
+          // ------------------------------------------------------------------
+          // TOCTOU closure (PR #24 review remediation): the publication
+          // authorization is RE-RESOLVED inside THIS authoritative
+          // transaction. assertPublishable()'s pre-flight compliance
+          // is necessary but NOT sufficient — the pinned policy and
+          // the ACTIVE disclosures are re-read as-of this commit, so
+          // a disclosure retracted mid-flight (after the pre-flight
+          // check, before this commit) blocks the publication and no
+          // publication record is persisted. Undisclosed/retracted
+          // commercial relationships can never be published.
+          // ------------------------------------------------------------------
+          const pinnedPolicy = await policyRepository.findVersionWithinTx(
+            inTx.helpfulnessPolicyId,
+            inTx.helpfulnessPolicyVersion,
+            tx,
+          );
+          if (pinnedPolicy === null) {
+            throw new NotFoundError(
+              `pinned helpfulness policy ${inTx.helpfulnessPolicyId}:v${String(inTx.helpfulnessPolicyVersion)} not found at the publication transaction boundary`,
+              {
+                policyId: inTx.helpfulnessPolicyId,
+                version: inTx.helpfulnessPolicyVersion,
+                proofOfHelpfulnessId: inTx.id,
+              },
+            );
+          }
+          if (pinnedPolicy.organizationScopeId !== inTx.organizationScopeId) {
+            // Defense-in-depth (the pinned version is immutable and
+            // same-scope-checked at creation): the publication
+            // boundary independently refuses a cross-scope pin.
+            throw helpfulnessError(
+              "HELPFULNESS_POLICY_SCOPE_MISMATCH",
+              "validation",
+              `pinned helpfulness policy ${inTx.helpfulnessPolicyId}:v${String(inTx.helpfulnessPolicyVersion)} belongs to organization scope ${pinnedPolicy.organizationScopeId}, not ${inTx.organizationScopeId} (cross-tenant publication rejected)`,
+              {
+                policyId: inTx.helpfulnessPolicyId,
+                policyVersion: inTx.helpfulnessPolicyVersion,
+                policyOrganizationScopeId: pinnedPolicy.organizationScopeId,
+                proofOfHelpfulnessScope: inTx.organizationScopeId,
+              },
+            );
+          }
+          if (pinnedPolicy.sections.requiresDisclosure) {
+            const disclosure = await computeDisclosureComplianceWithinTx(
+              inTx,
+              tx,
+            );
+            if (!disclosure.compliant) {
+              throw validationError(
+                `contribution ${inTx.contributionId} cannot be published: commercial mentions without compliant active disclosures at the publication transaction boundary (missing relationship keys: ${disclosure.missing.join(", ")})`,
+                {
+                  contributionId: inTx.contributionId,
+                  missingRelationshipRefs: disclosure.missing,
+                },
+              );
+            }
           }
           const updated: ProofOfHelpfulness = Object.freeze({
             ...inTx,

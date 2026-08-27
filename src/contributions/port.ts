@@ -642,6 +642,16 @@ export interface CommercialDisclosureRepository {
     id: string,
     tx: AuthorityTransaction,
   ): Promise<CommercialDisclosureRecord | null>;
+  /**
+   * The transaction-boundary twin of listByContribution: re-resolves
+   * the contribution's disclosure records INSIDE the authoritative
+   * transaction (the publication TOCTOU closure — retraction state is
+   * read as-of the mutation, never from a pre-flight snapshot).
+   */
+  listByContributionWithinTx(
+    contributionId: string,
+    tx: AuthorityTransaction,
+  ): Promise<readonly CommercialDisclosureRecord[]>;
   createWithinTx(
     record: CommercialDisclosureRecord,
     tx: AuthorityTransaction,

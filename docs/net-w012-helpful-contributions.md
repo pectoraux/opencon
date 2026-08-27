@@ -114,9 +114,9 @@ through the composition root only.
 | 2. Helpfulness is evidenced | `minimumQualifyingBases`+`minimumIndependentSources` over re-resolved authority facts; `net-w012-ac-02`/`ac-03` |
 | 3. AI is advisory | Qualifying-source-type rule; grade floor; advisory never counted; `net-w012-ac-04` |
 | 4. Publication user-controlled | Person-actor==contributor gate; prepare never transitions; composite-only path; `net-w012-ac-05` |
-| 5. Disclosure explicit/auditable | First-class records, append-only, publication+evaluation gates; `net-w012-ac-05` |
+| 5. Disclosure explicit/auditable | First-class records, append-only, publication+evaluation gates; in-tx publication re-check; `net-w012-ac-05` + `net-w012-transaction-boundary-races` |
 | 6. Authority separation | Denylist + domain-import regressions; composition-root pins; `net-w012-ac-07` |
-| 7. Atomicity/tenancy | IdempotencyStore exactly-once; mutexes; org scope everywhere; `net-w012-ac-06` |
+| 7. Atomicity/tenancy | IdempotencyStore exactly-once; mutexes; org scope everywhere — INCLUDING in-tx at the authoritative boundaries; `net-w012-ac-06` + `net-w012-transaction-boundary-races` |
 
 ## API surface
 
@@ -143,9 +143,54 @@ through the composition root only.
 | NET-W012-AC-02 | explicit deterministic evidence-backed criteria | `tests/contributions/net-w012-ac-02-policy-and-engine.test.ts` (14) |
 | NET-W012-AC-03 | mention alone has no reward authority | `tests/contributions/net-w012-ac-03-mention-not-helpfulness.test.ts` (5) |
 | NET-W012-AC-04 | advisory scoring cannot bypass | `tests/contributions/net-w012-ac-04-advisory.test.ts` (7) |
-| NET-W012-AC-05 | user-controlled publication + explicit disclosure | `tests/contributions/net-w012-ac-05-publication-disclosure.test.ts` (10) |
-| NET-W012-AC-06 | atomicity/idempotency/concurrency/tenancy/audit | `tests/contributions/net-w012-ac-06-atomicity-tenancy.test.ts` (7) |
+| NET-W012-AC-05 | user-controlled publication + explicit disclosure | `tests/contributions/net-w012-ac-05-publication-disclosure.test.ts` (10) + `net-w012-transaction-boundary-races.test.ts` (publication TOCTOU) |
+| NET-W012-AC-06 | atomicity/idempotency/concurrency/tenancy/audit | `tests/contributions/net-w012-ac-06-atomicity-tenancy.test.ts` (7) + `net-w012-transaction-boundary-races.test.ts` (policy-pin tenancy races) |
 | NET-W012-AC-07 | architecture/out-of-scope regression | `tests/regression/net-w012-ac-07-architecture-out-of-scope.test.ts` (12) |
+
+## PR #24 review remediation — transaction-boundary hardening
+
+The architect review identified two transaction-boundary correctness
+gaps; both were remediated on the same branch (single canonical PR):
+
+1. **Policy-pin tenant isolation (in-tx).**
+   `createHelpfulContribution` previously pinned
+   `findLatestWithinTx(policyId) ?? sameOrg` — the in-transaction
+   latest was never re-validated against the contribution's
+   organization scope, so a concurrent or previously existing
+   foreign-scope head of the lineage could be pinned cross-tenant.
+   The authoritative rule is now exactly:
+   `latest === null → fail`;
+   `latest.organizationScopeId ≠ contributionScope → fail
+   (HELPFULNESS_POLICY_SCOPE_MISMATCH)`; otherwise pin `latest`.
+   The persisted Contribution/PoH provably carry a same-scope policy
+   (regression asserts the pinned version's scope on the happy
+   path). This is the NET-W007 lesson applied at this boundary:
+   organization lineage is checked at the authoritative transaction,
+   not just in a pre-flight read.
+
+2. **Publication authorization TOCTOU closure.** `assertPublishable`
+   is a PRE-FLIGHT gate (necessary, not sufficient). A disclosure
+   retracted between that check and the publication commit used to
+   pass `recordPublication` (which only re-checked the actor).
+   `recordPublication` now re-resolves the pinned policy
+   (`findVersionWithinTx` + same-scope defense-in-depth) and the
+   ACTIVE disclosures (`listByContributionWithinTx`, the new WithinTx
+   twin) INSIDE its authoritative transaction, computing the SAME
+   pure compliance predicate (`disclosureComplianceFor`) over
+   as-of-the-commit state. A retracted disclosure rejects the
+   mutation and persists NO publication record; an active one still
+   records normally (no over-blocking).
+
+Regression coverage: `tests/contributions/net-w012-transaction-boundary-races.test.ts`
+— (a) Org A contribution + Org B latest lineage head → rejected
+(pre-existing); (b) Org B v2 committed between pre-flight and the
+tx (simulated via an authority `begin` interposition) → rejected,
+nothing persisted; (c) successful create → pinned policy proven
+same-scope; (d) disclosure compliant → retracted before publication
+commit → `recordPublication` rejected, `publication === null`, no
+`published` event; (e) active disclosure → records normally; (f) the
+full composite still refuses pre-flight when the disclosure is
+already retracted.
 
 No shared regression baselines required amendment: `contributions`
 was already non-skeletal (NET-W004) and remains in

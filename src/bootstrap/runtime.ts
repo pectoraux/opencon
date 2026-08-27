@@ -4715,7 +4715,11 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         );
         void transition;
       }
-      // 3. Record the publication (domain bookkeeping + audit).
+      // 3. Record the publication (domain bookkeeping + audit). This
+      //    step RE-RESOLVES the pinned policy and the active
+      //    disclosures INSIDE its authoritative transaction — a
+      //    disclosure retracted after step 1's pre-flight check
+      //    blocks the publication here (TOCTOU closure).
       const poh = await helpfulnessService.recordPublication(execution, {
         contributionId,
         workflowState: current.contribution.state,

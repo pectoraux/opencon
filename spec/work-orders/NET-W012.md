@@ -192,8 +192,8 @@ or any other domain's internals.
 | NET-W012-AC-02 | explicit deterministic evidence-backed criteria | `tests/contributions/net-w012-ac-02-policy-and-engine.test.ts` | core/contributions.ts, poh-engine.ts, helpfulness-service.ts |
 | NET-W012-AC-03 | mention alone has no reward authority | `tests/contributions/net-w012-ac-03-mention-not-helpfulness.test.ts` | poh-engine.ts |
 | NET-W012-AC-04 | advisory scoring cannot bypass policy | `tests/contributions/net-w012-ac-04-advisory.test.ts` | core/contributions.ts, poh-engine.ts, helpfulness-service.ts |
-| NET-W012-AC-05 | user-controlled publication + explicit disclosure | `tests/contributions/net-w012-ac-05-publication-disclosure.test.ts` | helpfulness-service.ts, runtime.ts, server.ts |
-| NET-W012-AC-06 | tenancy/idempotency/concurrency/audit | `tests/contributions/net-w012-ac-06-atomicity-tenancy.test.ts` | helpfulness-service.ts, authority-helpfulness-repository.ts |
+| NET-W012-AC-05 | user-controlled publication + explicit disclosure | `tests/contributions/net-w012-ac-05-publication-disclosure.test.ts`, `tests/contributions/net-w012-transaction-boundary-races.test.ts` | helpfulness-service.ts, runtime.ts, server.ts |
+| NET-W012-AC-06 | tenancy/idempotency/concurrency/audit | `tests/contributions/net-w012-ac-06-atomicity-tenancy.test.ts`, `tests/contributions/net-w012-transaction-boundary-races.test.ts` | helpfulness-service.ts, authority-helpfulness-repository.ts |
 | NET-W012-AC-07 | architecture/out-of-scope regression | `tests/regression/net-w012-ac-07-architecture-out-of-scope.test.ts` | (this work item's full file set) |
 
 ## 7. Verification

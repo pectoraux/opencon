@@ -246,6 +246,16 @@ export function createAuthorityCommercialDisclosureRepository(
       return rec ? rec.value : null;
     },
 
+    async listByContributionWithinTx(contributionId, tx) {
+      const records = await tx.scan<CommercialDisclosureRecord>(
+        COMMERCIAL_DISCLOSURES_COLLECTION,
+      );
+      return records
+        .map((r) => r.value)
+        .filter((d) => d.contributionId === contributionId)
+        .sort(byCreatedAt);
+    },
+
     async createWithinTx(record, tx) {
       await tx.put(COMMERCIAL_DISCLOSURES_COLLECTION, record.id, record);
       logger?.debug("commercial_disclosure.created_within_tx", {

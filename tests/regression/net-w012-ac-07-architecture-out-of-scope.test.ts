@@ -361,6 +361,7 @@ describe("NET-W012-AC-07 architecture/out-of-scope regression", () => {
       "tests/contributions/net-w012-ac-04-advisory.test.ts",
       "tests/contributions/net-w012-ac-05-publication-disclosure.test.ts",
       "tests/contributions/net-w012-ac-06-atomicity-tenancy.test.ts",
+      "tests/contributions/net-w012-transaction-boundary-races.test.ts",
       "tests/regression/net-w012-ac-07-architecture-out-of-scope.test.ts",
     ];
     for (const rel of expected) {
