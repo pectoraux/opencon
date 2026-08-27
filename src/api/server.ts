@@ -2653,6 +2653,319 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // ------------------------------------------------------------------
+    // NET-W012 — helpful contributions (Proof-of-Helpfulness).
+    // ------------------------------------------------------------------
+
+    // POST /api/helpfulness-policies — define the next immutable
+    // helpfulness policy version (protected; person actor).
+    if (path === "/api/helpfulness-policies" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "helpfulness.policy", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.defineHelpfulnessPolicy(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          policyId: strField(obj, "policyId"),
+          sections: objField(obj, "sections"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/helpfulness-policies/:policyId — list the lineage's
+    // immutable versions (public).
+    if (
+      path.startsWith("/api/helpfulness-policies/") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const policyId = path.slice("/api/helpfulness-policies/".length);
+      const versions = await opts.commands.listHelpfulnessPolicies(ctx, policyId);
+      await send(res, 200, { policies: versions });
+      return true;
+    }
+
+    // POST /api/helpful-contributions — create a helpful contribution
+    // + its Proof-of-Helpfulness record atomically (protected; the
+    // person actor IS the contributor; fail-closed eligibility).
+    if (path === "/api/helpful-contributions" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "helpful_contribution.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createHelpfulContribution(guarded.execution, guarded.personId, {
+          opportunityId: strField(obj, "opportunityId"),
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          contributionType: strField(obj, "contributionType"),
+          submission: objField(obj, "submission"),
+          helpfulnessPolicyId: strField(obj, "helpfulnessPolicyId"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/helpful-contributions/:id/recommendation — record a
+    // protocol-prepared recommendation (protected; NEVER publishes).
+    if (
+      path.startsWith("/api/helpful-contributions/") &&
+      path.endsWith("/recommendation") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "helpful_recommendation.prepare", "*", res);
+      if (!guarded) return true;
+      const contributionId = path.slice(
+        "/api/helpful-contributions/".length,
+        -"/recommendation".length,
+      );
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.prepareHelpfulRecommendation(guarded.execution, guarded.personId, {
+          contributionId,
+          preparedContentRef: strField(obj, "preparedContentRef"),
+          ...(obj.rationale !== undefined ? { rationale: String(obj.rationale) } : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/helpful-contributions/:id/publish — the USER-CONTROLLED
+    // publication composite (protected; person actor MUST be the
+    // contributor; walks /workflows to SUBMITTED; records publication).
+    if (
+      path.startsWith("/api/helpful-contributions/") &&
+      path.endsWith("/publish") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "helpful_contribution.publish", "*", res);
+      if (!guarded) return true;
+      const contributionId = path.slice(
+        "/api/helpful-contributions/".length,
+        -"/publish".length,
+      );
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.publishHelpfulContribution(guarded.execution, guarded.personId, {
+          contributionId,
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/helpful-contributions/:id/disclosures — declare a
+    // commercial disclosure (protected; contributor-only).
+    if (
+      path.startsWith("/api/helpful-contributions/") &&
+      path.endsWith("/disclosures") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "helpful_disclosure.declare", "*", res);
+      if (!guarded) return true;
+      const contributionId = path.slice(
+        "/api/helpful-contributions/".length,
+        -"/disclosures".length,
+      );
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.declareCommercialDisclosure(guarded.execution, guarded.personId, {
+          contributionId,
+          relationshipKind: strField(obj, "relationshipKind"),
+          relationshipRef: strField(obj, "relationshipRef"),
+          ...(obj.productRef !== undefined ? { productRef: String(obj.productRef) } : {}),
+          counterpartyRef: strField(obj, "counterpartyRef"),
+          ...(obj.description !== undefined ? { description: String(obj.description) } : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/helpful-contributions/:id/disclosures/:disclosureId/retract
+    // — retract a disclosure (protected; contributor-only; terminal).
+    if (
+      path.startsWith("/api/helpful-contributions/") &&
+      path.includes("/disclosures/") &&
+      path.endsWith("/retract") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "helpful_disclosure.retract", "*", res);
+      if (!guarded) return true;
+      const middle = path.slice(
+        "/api/helpful-contributions/".length,
+        -"/retract".length,
+      );
+      const sep = middle.indexOf("/disclosures/");
+      if (sep === -1) {
+        await send(res, 404, { error: "not_found", message: "invalid retract path" });
+        return true;
+      }
+      const contributionId = middle.slice(0, sep);
+      const disclosureId = middle.slice(sep + "/disclosures/".length);
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.retractCommercialDisclosure(guarded.execution, guarded.personId, {
+          disclosureId,
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      void contributionId;
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/helpful-contributions/:id/advisory-scores — attach an
+    // advisory model/heuristic score (protected; advisory ONLY).
+    if (
+      path.startsWith("/api/helpful-contributions/") &&
+      path.endsWith("/advisory-scores") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "helpful_advisory.record", "*", res);
+      if (!guarded) return true;
+      const contributionId = path.slice(
+        "/api/helpful-contributions/".length,
+        -"/advisory-scores".length,
+      );
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.attachHelpfulAdvisoryScore(guarded.execution, guarded.personId, {
+          contributionId,
+          kind: strField(obj, "kind"),
+          methodRef: strField(obj, "methodRef"),
+          methodVersion: strField(obj, "methodVersion"),
+          score: numField(obj, "score"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/helpful-contributions/:id/bases — attach a
+    // qualifying-basis reference (protected; lookup-verified).
+    if (
+      path.startsWith("/api/helpful-contributions/") &&
+      path.endsWith("/bases") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "helpful_poh.basis", "*", res);
+      if (!guarded) return true;
+      const contributionId = path.slice(
+        "/api/helpful-contributions/".length,
+        -"/bases".length,
+      );
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.attachHelpfulnessBasis(guarded.execution, guarded.personId, {
+          contributionId,
+          kind: strField(obj, "kind"),
+          referenceId: strField(obj, "referenceId"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/helpful-contributions/:id/evaluate — evaluate the
+    // Proof-of-Helpfulness deterministically (protected).
+    if (
+      path.startsWith("/api/helpful-contributions/") &&
+      path.endsWith("/evaluate") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "helpful_poh.evaluate", "*", res);
+      if (!guarded) return true;
+      const contributionId = path.slice(
+        "/api/helpful-contributions/".length,
+        -"/evaluate".length,
+      );
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.evaluateHelpfulness(guarded.execution, guarded.personId, {
+          contributionId,
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // GET /api/helpful-contributions/:id/disclosures — list a
+    // contribution's commercial disclosures (public).
+    if (
+      path.startsWith("/api/helpful-contributions/") &&
+      path.endsWith("/disclosures") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const contributionId = path.slice(
+        "/api/helpful-contributions/".length,
+        -"/disclosures".length,
+      );
+      const disclosures = await opts.commands.listCommercialDisclosures(
+        ctx,
+        contributionId,
+      );
+      await send(res, 200, { disclosures });
+      return true;
+    }
+
+    // GET /api/helpful-contributions/:id — fetch a helpful
+    // contribution + its Proof-of-Helpfulness (public).
+    if (
+      path.startsWith("/api/helpful-contributions/") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/helpful-contributions/".length);
+      if (id.includes("/")) {
+        await send(res, 404, { error: "not_found", message: `unknown helpful-contribution route: ${path}` });
+        return true;
+      }
+      const view = await opts.commands.getHelpfulContribution(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `helpful contribution not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
     return false;
   }
 
