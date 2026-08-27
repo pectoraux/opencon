@@ -143,6 +143,12 @@ export interface TransitionAuthorizer {
  * the SAME machinery — finalization is explicit, authorized,
  * idempotent and auditable, and delayed outcomes can never silently
  * become final.
+ * NET-W017 adds the ENGAGEMENT lifecycle repository: the creator
+ * engagement production lifecycle (DRAFT → READY → ASSIGNED →
+ * IN_PROGRESS → SUBMITTED → VERIFIED + REJECTED/CANCELLED,
+ * spec/work-orders/NET-W017.md §3.1) transitions through the SAME
+ * machinery — acceptance/production execute through the canonical
+ * workflow authority, never a second lifecycle engine.
  */
 export interface WorkflowServiceDeps {
   /** Opportunity lifecycle repository (used for opportunity transitions). */
@@ -153,6 +159,8 @@ export interface WorkflowServiceDeps {
   readonly proofOfValueRepository: LifecycleRepository;
   /** Measured-outcome lifecycle repository (used for outcome_measurement transitions). */
   readonly outcomeMeasurementRepository: LifecycleRepository;
+  /** Engagement lifecycle repository (used for engagement transitions). */
+  readonly engagementRepository: LifecycleRepository;
   /** Server-side authorization (deny-by-default). */
   readonly authorizer: TransitionAuthorizer;
   /**
@@ -223,7 +231,8 @@ export interface WorkflowService {
 /**
  * The WorkflowsPort describes the boundary's readiness. After NET-W004
  * it is `"ready"` (the boundary now carries the authoritative workflow
- * service + transition table).
+ * service + transition table). NET-W017 adds the engagement audit
+ * namespace (additive).
  */
 export interface WorkflowsPort {
   readonly boundary: "workflows";
@@ -233,6 +242,7 @@ export interface WorkflowsPort {
     readonly contribution: "contribution.transition";
     readonly proofOfValue: "proof_of_value.transition";
     readonly outcomeMeasurement: "outcome_measurement.transition";
+    readonly engagement: "engagement.transition";
   };
 }
 

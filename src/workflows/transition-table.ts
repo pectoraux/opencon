@@ -421,6 +421,122 @@ export const OUTCOME_MEASUREMENT_TRANSITION_TABLE: readonly TransitionRule[] = [
 ];
 
 /**
+ * The exhaustive transition table for creator ENGAGEMENTS
+ * (NET-W017 §3.1). The engagement is the workflow-mediated
+ * creator↔campaign work object; its lifecycle reuses the canonical
+ * state vocabulary with production semantics:
+ *
+ *   DRAFT       — offer recorded (campaign + creator + requested
+ *                 rights + optional match/opportunity lineage)
+ *   READY       — offer tendered to the creator (campaign ACTIVE)
+ *   ASSIGNED    — engagement accepted (creator manual acceptance OR
+ *                 the deterministic auto-accept policy evaluation)
+ *   IN_PROGRESS — production opened (the UGC production record)
+ *   SUBMITTED   — deliverables + canonical evidence tendered
+ *   VERIFIED    — terminal: submission verified
+ *   REJECTED    — terminal: submission rejected (evaluation outcome)
+ *   CANCELLED   — terminal: withdrawn before verification
+ *
+ * Domain preconditions validated by the creators domain service
+ * BEFORE the transition is requested (the workflow remains the sole
+ * lifecycle mutator):
+ *  - DRAFT → READY requires the referenced campaign to be ACTIVE
+ *    (the publishable-status precedent, resolved read-only through
+ *    the neutral campaign lookup).
+ *  - READY → ASSIGNED requires an explicit usage-rights grant
+ *    (manual acceptance input or the auto-accept policy's
+ *    auto-grantable envelope) — rights are explicit, never implicit.
+ *  - ASSIGNED → IN_PROGRESS requires the UGC production record
+ *    (openProduction composes record + transition).
+ *  - IN_PROGRESS → SUBMITTED requires ≥1 recorded deliverable
+ *    version + ≥1 canonical evidence reference, every reference
+ *    subject-bound to the production (submitProduction composes
+ *    submission record + transition).
+ *
+ * No BLOCKED/FRAUD_REVIEW/DISPUTED states for the engagement: risk
+ * escalation is a /disputes case referencing the engagement, not a
+ * local lifecycle branch (the PoV/measured-outcome precedent).
+ */
+export const ENGAGEMENT_TRANSITION_TABLE: readonly TransitionRule[] = [
+  {
+    from: "DRAFT",
+    to: "READY",
+    policyAction: policyActionFor("engagement", "DRAFT", "READY"),
+    auditEventName: auditEventFor("engagement", "DRAFT", "READY"),
+  },
+  {
+    from: "READY",
+    to: "ASSIGNED",
+    policyAction: policyActionFor("engagement", "READY", "ASSIGNED"),
+    auditEventName: auditEventFor("engagement", "READY", "ASSIGNED"),
+  },
+  {
+    from: "ASSIGNED",
+    to: "IN_PROGRESS",
+    policyAction: policyActionFor("engagement", "ASSIGNED", "IN_PROGRESS"),
+    auditEventName: auditEventFor("engagement", "ASSIGNED", "IN_PROGRESS"),
+  },
+  {
+    from: "IN_PROGRESS",
+    to: "SUBMITTED",
+    policyAction: policyActionFor("engagement", "IN_PROGRESS", "SUBMITTED"),
+    auditEventName: auditEventFor("engagement", "IN_PROGRESS", "SUBMITTED"),
+    // Requires ≥1 recorded deliverable + ≥1 subject-bound canonical
+    // evidence reference (validated by the creators domain service
+    // before the transition is requested — work order §3.4).
+    requiresEvidenceReference: true,
+  },
+  {
+    from: "SUBMITTED",
+    to: "VERIFIED",
+    policyAction: policyActionFor("engagement", "SUBMITTED", "VERIFIED"),
+    auditEventName: auditEventFor("engagement", "SUBMITTED", "VERIFIED"),
+    requiresEvidenceReference: true,
+  },
+  {
+    from: "SUBMITTED",
+    to: "REJECTED",
+    policyAction: policyActionFor("engagement", "SUBMITTED", "REJECTED"),
+    auditEventName: auditEventFor("engagement", "SUBMITTED", "REJECTED"),
+  },
+  {
+    from: "DRAFT",
+    to: "CANCELLED",
+    policyAction: policyActionFor("engagement", "DRAFT", "CANCELLED"),
+    auditEventName: auditEventFor("engagement", "DRAFT", "CANCELLED"),
+  },
+  {
+    from: "READY",
+    to: "CANCELLED",
+    policyAction: policyActionFor("engagement", "READY", "CANCELLED"),
+    auditEventName: auditEventFor("engagement", "READY", "CANCELLED"),
+  },
+  {
+    from: "ASSIGNED",
+    to: "CANCELLED",
+    policyAction: policyActionFor("engagement", "ASSIGNED", "CANCELLED"),
+    auditEventName: auditEventFor("engagement", "ASSIGNED", "CANCELLED"),
+  },
+  {
+    from: "IN_PROGRESS",
+    to: "CANCELLED",
+    policyAction: policyActionFor("engagement", "IN_PROGRESS", "CANCELLED"),
+    auditEventName: auditEventFor("engagement", "IN_PROGRESS", "CANCELLED"),
+  },
+  {
+    from: "SUBMITTED",
+    to: "CANCELLED",
+    policyAction: policyActionFor("engagement", "SUBMITTED", "CANCELLED"),
+    auditEventName: auditEventFor("engagement", "SUBMITTED", "CANCELLED"),
+  },
+  // VERIFIED / REJECTED / CANCELLED are terminal: the table
+  // intentionally contains no rule whose source is a terminal state.
+  // Note: SUBMITTED → REJECTED requires no evidence reference —
+  // rejection is an evaluation outcome, not an evidence act; the
+  // rejection REASON rides the transition metadata + audit event.
+];
+
+/**
  * Look up the transition table for a subject kind.
  */
 export function transitionTableFor(
@@ -429,7 +545,10 @@ export function transitionTableFor(
   if (subjectKind === "opportunity") return OPPORTUNITY_TRANSITION_TABLE;
   if (subjectKind === "contribution") return CONTRIBUTION_TRANSITION_TABLE;
   if (subjectKind === "proof_of_value") return PROOF_OF_VALUE_TRANSITION_TABLE;
-  return OUTCOME_MEASUREMENT_TRANSITION_TABLE;
+  if (subjectKind === "outcome_measurement") {
+    return OUTCOME_MEASUREMENT_TRANSITION_TABLE;
+  }
+  return ENGAGEMENT_TRANSITION_TABLE;
 }
 
 /**

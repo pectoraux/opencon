@@ -132,6 +132,13 @@ export function auditEventFor(
  * VERIFIED with CANCELLED exceptional states — see
  * spec/work-orders/NET-W006.md §3.5; finalization is explicit and
  * auditable, delayed outcomes cannot silently become final).
+ * NET-W017 adds the creator ENGAGEMENT (the workflow-mediated
+ * creator↔campaign engagement whose production lifecycle is
+ * DRAFT → READY → ASSIGNED → IN_PROGRESS → SUBMITTED → VERIFIED with
+ * REJECTED/CANCELLED exceptional states — see
+ * spec/work-orders/NET-W017.md §3.1; acceptance/production execute
+ * through the SAME workflow machinery, never a second lifecycle
+ * authority).
  * Later work items (campaigns, disputes, etc.) may add more. The
  * transition table is parameterized by subject kind so each subject
  * can have its own legal-transition set.
@@ -140,7 +147,8 @@ export type LifecycleSubjectKind =
   | "opportunity"
   | "contribution"
   | "proof_of_value"
-  | "outcome_measurement";
+  | "outcome_measurement"
+  | "engagement";
 
 /**
  * The minimal shape of an authoritative lifecycle subject. Domain

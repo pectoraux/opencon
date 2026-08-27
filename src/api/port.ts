@@ -207,7 +207,8 @@ export interface ApiRequestTransitionInput {
     | "opportunity"
     | "contribution"
     | "proof_of_value"
-    | "outcome_measurement";
+    | "outcome_measurement"
+    | "engagement";
   readonly targetState: string;
   readonly expectedVersion: number;
   readonly idempotencyKey: string;
@@ -2356,6 +2357,185 @@ export interface ApiCommands {
     execution: ExecutionContext,
     organizationScopeId: string,
     campaignId?: string,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  // -----------------------------------------------------------------
+  // NET-W017 — UGC workflow and rights (creator engagements). The
+  // engagement is a canonical /workflows lifecycle subject: composed
+  // commands (accept / auto-accept / production open / submit) are
+  // guarded here; pure lifecycle transitions (tender / verify /
+  // reject / cancel) go through the EXISTING
+  // `requestTransition` command with subjectKind "engagement".
+  // -----------------------------------------------------------------
+
+  /**
+   * Create an engagement offer (protected; guard action
+   * `creators.engagements.create`): DRAFT record with the explicit
+   * requested-rights envelope + campaign/match/opportunity lineage,
+   * serialized by the advisory-lock unique anchor (one non-terminal
+   * engagement per org/campaign/creator).
+   */
+  createEngagement(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ engagement: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Auto-match batch (protected; guard action
+   * `creators.engagements.createFromMatch`): turn ONE match run's
+   * eligible candidates into DRAFT offers with the template terms;
+   * per-candidate outcomes are recorded in the batch record.
+   */
+  createEngagementsFromMatch(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ batch: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Manual acceptance (protected; guard action
+   * `creators.engagements.accept`): validates the granted rights
+   * against the requested envelope, records the usage-rights grant
+   * (creator-retained ownership), then requests the READY → ASSIGNED
+   * transition through /workflows.
+   */
+  acceptEngagement(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * Deterministic auto-accept (protected; guard action
+   * `creators.engagements.autoAccept`): evaluates the creator's
+   * acceptance policy (closed gate vocabulary, full trace); a
+   * qualifying evaluation records the auto-grant + requests the
+   * transition; a non-qualifying evaluation mutates NOTHING.
+   */
+  autoAcceptEngagement(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * Revoke a usage-rights grant (protected; guard action
+   * `creators.usageRights.revoke`; grantor-only).
+   */
+  revokeUsageRights(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * Set the next acceptance-policy version (protected; guard action
+   * `creators.acceptancePolicy.set`).
+   */
+  setCreatorAcceptancePolicy(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ policy: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Open UGC production (protected; guard action
+   * `creators.productions.open`): the production record + the
+   * ASSIGNED → IN_PROGRESS transition.
+   */
+  openUgcProduction(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * Record a deliverable version (protected; guard action
+   * `creators.productions.deliverable`): immutable, deterministic
+   * monotonic version per (production, deliverableKey).
+   */
+  recordUgcDeliverable(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ deliverable: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Submit the production (protected; guard action
+   * `creators.productions.submit`): the submission record + the
+   * IN_PROGRESS → SUBMITTED transition; every evidence reference is
+   * validated against the canonical /evidence authority.
+   */
+  submitUgcProduction(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /** Fetch one engagement (public read; tenant-scoped). */
+  getEngagement(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    id: string,
+  ): Promise<Record<string, unknown>>;
+
+  /** List an org's engagements, optionally filtered (public read). */
+  listEngagements(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    campaignId?: string,
+    creatorPersonId?: string,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /** Fetch the creator's effective acceptance policy (public read). */
+  getCreatorAcceptancePolicy(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    creatorPersonId: string,
+  ): Promise<Record<string, unknown> | null>;
+
+  /** Fetch one usage-rights grant view (public read; tenant-scoped). */
+  getUsageRights(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    grantId: string,
+    asOf?: string | null,
+  ): Promise<Record<string, unknown>>;
+
+  /** List an org's usage-rights grants (public read; tenant-scoped). */
+  listUsageRights(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    engagementId?: string,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /** Fetch one UGC production (public read; tenant-scoped). */
+  getUgcProduction(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    id: string,
+  ): Promise<Record<string, unknown>>;
+
+  /** List an org's UGC productions (public read; tenant-scoped). */
+  listUgcProductions(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    engagementId?: string,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /** List a production's deliverable versions (public read). */
+  listUgcDeliverables(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    productionId: string,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /** List a production's submissions (public read). */
+  listUgcSubmissions(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    productionId: string,
   ): Promise<readonly Record<string, unknown>[]>;
 
   // -----------------------------------------------------------------

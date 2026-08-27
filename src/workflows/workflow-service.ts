@@ -122,6 +122,7 @@ export function createWorkflowService(
     contributionRepository,
     proofOfValueRepository,
     outcomeMeasurementRepository,
+    engagementRepository,
     authorizer,
     auditWriter,
     idempotency,
@@ -132,7 +133,8 @@ export function createWorkflowService(
     if (kind === "opportunity") return opportunityRepository;
     if (kind === "contribution") return contributionRepository;
     if (kind === "proof_of_value") return proofOfValueRepository;
-    return outcomeMeasurementRepository;
+    if (kind === "outcome_measurement") return outcomeMeasurementRepository;
+    return engagementRepository;
   }
 
   /**

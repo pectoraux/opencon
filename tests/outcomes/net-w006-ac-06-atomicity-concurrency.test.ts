@@ -25,6 +25,7 @@ import type { ExecutionContext } from "../../src/core/execution-context.ts";
 import { createTransactionalAuditWriter } from "../../src/audit/transactional-audit-writer.ts";
 import { createWorkflowService } from "../../src/workflows/workflow-service.ts";
 import { createLifecycleRepository } from "../../src/workflows/lifecycle-repository.ts";
+import { createAuthorityEngagementRepository } from "../../src/creators/authority-engagement-repositories.ts";
 import { createAuthorityOpportunityRepository } from "../../src/opportunities/authority-opportunity-repository.ts";
 import { createAuthorityContributionRepository } from "../../src/contributions/authority-contribution-repository.ts";
 import { createAuthorityProofOfValueRepository } from "../../src/evidence/authority-proof-of-value-repository.ts";
@@ -378,6 +379,9 @@ describe("NET-W006-AC-06 atomicity/idempotency/concurrency", () => {
       ),
       proofOfValueRepository: createLifecycleRepository(
         createAuthorityProofOfValueRepository({ authority: failingAuthority }),
+      ),
+      engagementRepository: createLifecycleRepository(
+        createAuthorityEngagementRepository({ authority: harness.runtime.postgresAuthority }),
       ),
       outcomeMeasurementRepository: createLifecycleRepository(
         createAuthorityMeasuredOutcomeRepository({ authority: failingAuthority }),
