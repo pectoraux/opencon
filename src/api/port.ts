@@ -1114,6 +1114,58 @@ export interface ApiCampaignPolicyView {
   readonly createdAt: string;
 }
 
+/** The API view of a helpfulness policy version (NET-W012). */
+export interface ApiHelpfulnessPolicyView {
+  readonly id: string;
+  readonly policyId: string;
+  readonly organizationScopeId: string;
+  readonly version: number;
+  readonly formatVersion: string;
+  readonly sections: Record<string, unknown>;
+  readonly createdBy: string;
+  readonly createdAt: string;
+}
+
+/** The API view of a Proof-of-Helpfulness record (NET-W012). */
+export interface ApiProofOfHelpfulnessView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly contributionId: string;
+  readonly contributorId: string;
+  readonly helpfulnessPolicyId: string;
+  readonly helpfulnessPolicyVersion: number;
+  readonly formatVersion: string;
+  readonly eligibility: Record<string, unknown> | null;
+  readonly mentions: readonly Record<string, unknown>[];
+  readonly disclosureIds: readonly string[];
+  readonly advisoryScores: readonly Record<string, unknown>[];
+  readonly bases: readonly Record<string, unknown>[];
+  readonly evaluations: readonly Record<string, unknown>[];
+  readonly recommendations: readonly Record<string, unknown>[];
+  readonly publication: Record<string, unknown> | null;
+  readonly state: string;
+  readonly events: readonly string[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** The API view of a commercial disclosure record (NET-W012). */
+export interface ApiCommercialDisclosureView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly contributionId: string;
+  readonly contributorId: string;
+  readonly relationshipKind: string;
+  readonly relationshipRef: string;
+  readonly productRef: string | null;
+  readonly counterpartyRef: string;
+  readonly description: string | null;
+  readonly state: string;
+  readonly events: readonly string[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
 export interface ApiCommands {
   /** Create a canonical person identity. Returns the public view. */
   createIdentity(
@@ -2068,6 +2120,124 @@ export interface ApiCommands {
     policyVersion: number;
     publishedAt: string;
   }[]>;
+
+  // -----------------------------------------------------------------
+  // NET-W012 — helpful contributions (Proof-of-Helpfulness).
+  // -----------------------------------------------------------------
+
+  /**
+   * Define the next immutable helpfulness policy version
+   * (protected; person actor; deterministic usefulness criteria).
+   */
+  defineHelpfulnessPolicy(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ policy: ApiHelpfulnessPolicyView; created: boolean }>;
+
+  /** List a helpfulness policy lineage's versions (public read). */
+  listHelpfulnessPolicies(
+    execution: ExecutionContext,
+    policyId: string,
+  ): Promise<readonly ApiHelpfulnessPolicyView[]>;
+
+  /**
+   * Create a helpful contribution + its Proof-of-Helpfulness record
+   * atomically (protected; person actor = contributor; fail-closed
+   * campaign-eligibility enforcement when the opportunity carries a
+   * NET-W011 eligibility reference).
+   */
+  createHelpfulContribution(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{
+    contribution: Record<string, unknown>;
+    proofOfHelpfulness: ApiProofOfHelpfulnessView;
+    created: boolean;
+  }>;
+
+  /** Fetch a helpful contribution + its PoH (public read). */
+  getHelpfulContribution(
+    execution: ExecutionContext,
+    contributionId: string,
+  ): Promise<{
+    contribution: Record<string, unknown>;
+    proofOfHelpfulness: ApiProofOfHelpfulnessView;
+  } | null>;
+
+  /**
+   * Record a protocol-prepared recommendation (protected; person
+   * actor; DRAFT contributions only; NEVER publishes — publication is
+   * user-controlled).
+   */
+  prepareHelpfulRecommendation(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiProofOfHelpfulnessView>;
+
+  /**
+   * Publish a helpful contribution (protected; person actor MUST be
+   * the contributor — the user-controlled publication gate; the
+   * composite walks the workflow transitions DRAFT → … → SUBMITTED
+   * through /workflows and records the publication).
+   */
+  publishHelpfulContribution(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{
+    contribution: Record<string, unknown>;
+    proofOfHelpfulness: ApiProofOfHelpfulnessView;
+  }>;
+
+  /** Declare a commercial disclosure (protected; contributor-only). */
+  declareCommercialDisclosure(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiCommercialDisclosureView>;
+
+  /** Retract a commercial disclosure (protected; contributor-only; terminal). */
+  retractCommercialDisclosure(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiCommercialDisclosureView>;
+
+  /** List a contribution's commercial disclosures (public read). */
+  listCommercialDisclosures(
+    execution: ExecutionContext,
+    contributionId: string,
+  ): Promise<readonly ApiCommercialDisclosureView[]>;
+
+  /**
+   * Attach an advisory model/heuristic score (protected; advisory
+   * only — never qualifies; method identity required).
+   */
+  attachHelpfulAdvisoryScore(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiProofOfHelpfulnessView>;
+
+  /** Attach a qualifying-basis reference (protected; lookup-verified). */
+  attachHelpfulnessBasis(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiProofOfHelpfulnessView>;
+
+  /**
+   * Evaluate the Proof-of-Helpfulness deterministically (protected;
+   * truth authorities re-resolved at evaluation; pure engine).
+   */
+  evaluateHelpfulness(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiProofOfHelpfulnessView>;
 }
 
 export type { ExecutionContext };

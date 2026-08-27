@@ -91,3 +91,15 @@ export * from "./disputes.ts";
 // reward integration NET-W014, inventory NET-W019+) consume the
 // references.
 export * from "./campaigns.ts";
+
+// NET-W012 (helpful contributions): the helpful-contribution
+// vocabulary (helpful opportunity/contribution kinds, the
+// Proof-of-Helpfulness administrative statuses, qualifying basis
+// kinds and source types, advisory-score kinds with REQUIRED method
+// identity, commercial-disclosure vocabularies, the
+// NET-W012:1 policy format, and the PURE fail-closed
+// campaign-eligibility evaluator — the first consumer of the NET-W011
+// eligibility-policy reference). The /contributions domain implements
+// the behaviour; NET-W013 (moderation) and NET-W014 (reward
+// integration) consume the verified-usefulness claim.
+export * from "./contributions.ts";

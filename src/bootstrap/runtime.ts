@@ -83,10 +83,21 @@ import { createAuthorityOpportunityRepository } from "../opportunities/authority
 import { createOpportunityService } from "../opportunities/opportunity-service.ts";
 import { createAuthorityContributionRepository } from "../contributions/authority-contribution-repository.ts";
 import { createContributionService } from "../contributions/contribution-service.ts";
+// NET-W012 helpful contributions: the helpfulness repositories + service.
+import {
+  createAuthorityCommercialDisclosureRepository,
+  createAuthorityHelpfulnessPolicyRepository,
+  createAuthorityProofOfHelpfulnessRepository,
+} from "../contributions/authority-helpfulness-repository.ts";
+import { createHelpfulnessService } from "../contributions/helpfulness-service.ts";
 import { createWorkflowService } from "../workflows/workflow-service.ts";
 import { createLifecycleRepository } from "../workflows/lifecycle-repository.ts";
 import type { OpportunityService } from "../opportunities/port.ts";
-import type { ContributionService, OpportunityLookup } from "../contributions/port.ts";
+import type {
+  ContributionService,
+  HelpfulnessService,
+  OpportunityLookup,
+} from "../contributions/port.ts";
 import type { WorkflowService, TransitionAuthorizer } from "../workflows/port.ts";
 import type { TransitionRequest, TransitionResult } from "../core/workflow.ts";
 // NET-W005 evidence boundary: evidence records (deterministic grades +
@@ -418,6 +429,8 @@ export interface Runtime {
   readonly disputeService: DisputeService;
   // NET-W011 campaigns (campaign policy/configuration) service.
   readonly campaignService: CampaignService;
+  // NET-W012 helpful contributions (Proof-of-Helpfulness) service.
+  readonly helpfulnessService: HelpfulnessService;
   // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
   readonly idempotency: IdempotencyStore;
   initialize(): Promise<readonly { name: string; initialized: boolean }[]>;
@@ -1580,6 +1593,137 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   });
 
   // ------------------------------------------------------------------
+  // NET-W012 helpful contributions wiring (Proof-of-Helpfulness).
+  //
+  // The helpfulness lookups are thin READ-ONLY adapters over the
+  // OWNING domains' repositories (campaigns, opportunities, evidence,
+  // outcomes) — the same dependency-inversion pattern as the campaign
+  // lookups above. The /contributions domain imports core contracts
+  // only; lifecycle EXECUTION (the publication transitions) happens
+  // through the wired WorkflowService at the composition-root
+  // publishHelpfulContribution command below (never inside the
+  // contributions domain: no hidden lifecycle authority — and NO
+  // economic command exists here at all; reward integration is
+  // NET-W014).
+  // ------------------------------------------------------------------
+  const helpfulnessCampaignLookup = {
+    async resolveEligibilityPolicy(reference: string) {
+      // Parse the deterministic NET-W011 reference
+      // `campaign_policy:{campaignId}:{version}:{specId}`.
+      const match = /^campaign_policy:([^:]+):(\d+):(.+)$/.exec(reference);
+      if (!match) return null;
+      const [, campaignId, versionRaw, specId] = match;
+      const policy = await campaignPolicyRepo.findVersion(
+        campaignId!,
+        Number(versionRaw),
+      );
+      if (!policy) return null;
+      const campaign = await campaignRepo.findById(campaignId!);
+      if (!campaign) return null;
+      return {
+        organizationScopeId: policy.organizationScopeId,
+        campaignId: campaignId!,
+        policyVersion: policy.version,
+        specId: specId!,
+        campaignStatus: campaign.status,
+        rules: policy.eligibility.rules,
+      };
+    },
+  };
+  const helpfulnessOpportunityLookup = {
+    async resolveOpportunity(id: string) {
+      const opportunity = await opportunityRepo.findById(id);
+      return opportunity
+        ? {
+            organizationScopeId: opportunity.organizationScopeId,
+            opportunityType: opportunity.opportunityType,
+            eligibilityPolicyReference: opportunity.eligibilityPolicyReference,
+          }
+        : null;
+    },
+  };
+  const helpfulnessEvidenceLookup = {
+    async resolveEvidence(id: string) {
+      const evidence = await evidenceRepo.findById(id);
+      return evidence
+        ? {
+            organizationScopeId: evidence.organizationScopeId,
+            subjectId: evidence.subjectReference.subjectId,
+            subjectType: evidence.subjectReference.subjectType,
+            sourceType: evidence.provenance.sourceType,
+            grade: evidence.grade,
+            confidence: evidence.confidence,
+            provenanceSourceId: evidence.provenance.sourceId ?? null,
+          }
+        : null;
+    },
+  };
+  const helpfulnessMeasurementLookup = {
+    async resolveMeasuredOutcome(id: string) {
+      const measured = await measuredOutcomeRepo.findById(id);
+      return measured
+        ? {
+            organizationScopeId: measured.organizationScopeId,
+            subjectId: measured.subjectReference.subjectId,
+            subjectType: measured.subjectReference.subjectType,
+            outcomeType: measured.outcomeType,
+            state: measured.state,
+            rollupConfidence: measured.rollup?.confidence ?? null,
+          }
+        : null;
+    },
+  };
+  const helpfulnessProofOfValueLookup = {
+    async resolveProofOfValue(id: string) {
+      const pov = await proofOfValueRepo.findById(id);
+      return pov
+        ? {
+            organizationScopeId: pov.organizationScopeId,
+            subjectId: pov.subjectReference.subjectId,
+            subjectType: pov.subjectReference.subjectType,
+            state: pov.state,
+          }
+        : null;
+    },
+  };
+  const helpfulnessPolicyRepo = createAuthorityHelpfulnessPolicyRepository({
+    authority: postgresAuthority,
+    logger: {
+      debug: (m, f) => logger.forModule("contributions").debug(m, f),
+    },
+  });
+  const proofOfHelpfulnessRepo =
+    createAuthorityProofOfHelpfulnessRepository({
+      authority: postgresAuthority,
+      logger: {
+        debug: (m, f) => logger.forModule("contributions").debug(m, f),
+      },
+    });
+  const commercialDisclosureRepo =
+    createAuthorityCommercialDisclosureRepository({
+      authority: postgresAuthority,
+      logger: {
+        debug: (m, f) => logger.forModule("contributions").debug(m, f),
+      },
+    });
+  const helpfulnessService = createHelpfulnessService({
+    contributionRepository: contributionRepo,
+    policyRepository: helpfulnessPolicyRepo,
+    pohRepository: proofOfHelpfulnessRepo,
+    disclosureRepository: commercialDisclosureRepo,
+    lookups: {
+      campaign: helpfulnessCampaignLookup,
+      opportunity: helpfulnessOpportunityLookup,
+      evidence: helpfulnessEvidenceLookup,
+      measurement: helpfulnessMeasurementLookup,
+      proofOfValue: helpfulnessProofOfValueLookup,
+    },
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("contributions"),
+  });
+
+  // ------------------------------------------------------------------
   // NET-W009 §3.7 ECONOMIC GATE (the lock-invariant-21 enforcement
   // point). The composition root — NOT the risk domain, NOT the
   // settlement domain — consults the active-control registry before
@@ -2167,6 +2311,89 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       >[],
       createdBy: policy.createdBy,
       createdAt: policy.createdAt,
+    };
+  }
+  function toHelpfulnessPolicyView(
+    policy: import("../contributions/port.ts").HelpfulnessPolicy,
+  ) {
+    return {
+      id: policy.id,
+      policyId: policy.policyId,
+      organizationScopeId: policy.organizationScopeId,
+      version: policy.version,
+      formatVersion: policy.formatVersion,
+      sections: policy.sections as unknown as Record<string, unknown>,
+      createdBy: policy.createdBy,
+      createdAt: policy.createdAt,
+    };
+  }
+  function toProofOfHelpfulnessView(
+    poh: import("../contributions/port.ts").ProofOfHelpfulness,
+  ) {
+    return {
+      id: poh.id,
+      organizationScopeId: poh.organizationScopeId,
+      contributionId: poh.contributionId,
+      contributorId: poh.contributorId,
+      helpfulnessPolicyId: poh.helpfulnessPolicyId,
+      helpfulnessPolicyVersion: poh.helpfulnessPolicyVersion,
+      formatVersion: poh.formatVersion,
+      eligibility: poh.eligibility as unknown as Record<string, unknown> | null,
+      mentions: poh.mentions as unknown as readonly Record<string, unknown>[],
+      disclosureIds: poh.disclosureIds,
+      advisoryScores: poh.advisoryScores as unknown as readonly Record<
+        string,
+        unknown
+      >[],
+      bases: poh.bases as unknown as readonly Record<string, unknown>[],
+      evaluations: poh.evaluations as unknown as readonly Record<
+        string,
+        unknown
+      >[],
+      recommendations: poh.recommendations as unknown as readonly Record<
+        string,
+        unknown
+      >[],
+      publication: poh.publication as unknown as Record<string, unknown> | null,
+      state: poh.state,
+      events: poh.events,
+      createdAt: poh.createdAt,
+      updatedAt: poh.updatedAt,
+    };
+  }
+  function toCommercialDisclosureView(
+    disclosure: import("../contributions/port.ts").CommercialDisclosureRecord,
+  ) {
+    return {
+      id: disclosure.id,
+      organizationScopeId: disclosure.organizationScopeId,
+      contributionId: disclosure.contributionId,
+      contributorId: disclosure.contributorId,
+      relationshipKind: disclosure.relationshipKind,
+      relationshipRef: disclosure.relationshipRef,
+      productRef: disclosure.productRef,
+      counterpartyRef: disclosure.counterpartyRef,
+      description: disclosure.description,
+      state: disclosure.state,
+      events: disclosure.events,
+      createdAt: disclosure.createdAt,
+      updatedAt: disclosure.updatedAt,
+    };
+  }
+  function toHelpfulContributionView(
+    contribution: import("../contributions/port.ts").Contribution,
+  ) {
+    return {
+      id: contribution.id,
+      organizationScopeId: contribution.organizationScopeId,
+      opportunityId: contribution.opportunityId,
+      contributorId: contribution.contributorId,
+      contributionType: contribution.contributionType,
+      state: contribution.state,
+      version: contribution.version,
+      submission: contribution.submission as unknown as Record<string, unknown>,
+      createdAt: contribution.createdAt,
+      updatedAt: contribution.updatedAt,
     };
   }
 
@@ -4361,6 +4588,211 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         campaignId,
       );
     },
+
+    // -- NET-W012 helpful-contribution commands -------------------------
+    async defineHelpfulnessPolicy(execution, _actorPersonId, input) {
+      const result = await helpfulnessService.defineHelpfulnessPolicy(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId as string,
+          policyId: input.policyId as string,
+          sections:
+            input.sections as unknown as import("../contributions/port.ts").HelpfulnessPolicySections,
+          idempotencyKey: input.idempotencyKey as string,
+        },
+      );
+      return {
+        policy: toHelpfulnessPolicyView(result.policy),
+        created: result.created,
+      };
+    },
+
+    async listHelpfulnessPolicies(execution, policyId) {
+      const policies = await helpfulnessService.listPolicyVersions(
+        getExecutionContext() ?? execution,
+        policyId,
+      );
+      return policies.map(toHelpfulnessPolicyView);
+    },
+
+    async createHelpfulContribution(execution, actorPersonId, input) {
+      const result = await helpfulnessService.createHelpfulContribution(
+        execution,
+        {
+          opportunityId: input.opportunityId as string,
+          contributorId: actorPersonId,
+          organizationScopeId: input.organizationScopeId as string,
+          contributionType:
+            input.contributionType as import("../core/contributions.ts").HelpfulContributionKind,
+          submission:
+            input.submission as unknown as import("../contributions/port.ts").HelpfulSubmission,
+          helpfulnessPolicyId: input.helpfulnessPolicyId as string,
+          idempotencyKey: input.idempotencyKey as string,
+        },
+      );
+      return {
+        contribution: toHelpfulContributionView(result.contribution),
+        proofOfHelpfulness: toProofOfHelpfulnessView(
+          result.proofOfHelpfulness,
+        ),
+        created: result.created,
+      };
+    },
+
+    async getHelpfulContribution(execution, contributionId) {
+      try {
+        const result = await helpfulnessService.getHelpfulContribution(
+          getExecutionContext() ?? execution,
+          contributionId,
+        );
+        return {
+          contribution: toHelpfulContributionView(result.contribution),
+          proofOfHelpfulness: toProofOfHelpfulnessView(
+            result.proofOfHelpfulness,
+          ),
+        };
+      } catch {
+        return null;
+      }
+    },
+
+    async prepareHelpfulRecommendation(execution, _actorPersonId, input) {
+      const poh = await helpfulnessService.prepareRecommendation(execution, {
+        contributionId: input.contributionId as string,
+        preparedContentRef: input.preparedContentRef as string,
+        rationale: input.rationale as string | undefined,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toProofOfHelpfulnessView(poh);
+    },
+
+    async publishHelpfulContribution(execution, actorPersonId, input) {
+      const contributionId = input.contributionId as string;
+      const idempotencyKey = input.idempotencyKey as string;
+      // 1. The USER-CONTROLLED publication gate (person actor ==
+      //    contributor; disclosure compliance when required).
+      await helpfulnessService.assertPublishable(execution, contributionId);
+      // 2. Walk the workflow transitions to SUBMITTED through the
+      //    LIFECYCLE authority (/workflows — never the domain).
+      //    Replay tolerance: already-published contributions skip
+      //    straight to the recording step.
+      const path = ["READY", "ASSIGNED", "IN_PROGRESS", "SUBMITTED"];
+      const { policyActionFor } = await import("../core/workflow.ts");
+      let current =
+        await helpfulnessService.getHelpfulContribution(
+          execution,
+          contributionId,
+        );
+      let step = 0;
+      while (current.contribution.state !== "SUBMITTED") {
+        const from = current.contribution.state;
+        // DRAFT → path[0]; READY → path[1]; … one legal step at a time.
+        const to = path[path.indexOf(from) + 1]!;
+        step += 1;
+        const transition = await workflowService.requestTransition(
+          {
+            subjectId: contributionId,
+            subjectKind: "contribution",
+            targetState: to as TransitionRequest["targetState"],
+            expectedVersion: current.contribution.version,
+            idempotencyKey: `${idempotencyKey}:t${String(step)}`,
+            actorPersonId,
+            policyAction: policyActionFor(
+              "contribution",
+              from as TransitionRequest["targetState"],
+              to as TransitionRequest["targetState"],
+            ),
+            metadata: {
+              publication: "helpful_contribution",
+              actorPersonId,
+            },
+          },
+          execution,
+        );
+        current = await helpfulnessService.getHelpfulContribution(
+          execution,
+          contributionId,
+        );
+        void transition;
+      }
+      // 3. Record the publication (domain bookkeeping + audit).
+      const poh = await helpfulnessService.recordPublication(execution, {
+        contributionId,
+        workflowState: current.contribution.state,
+        idempotencyKey: `${idempotencyKey}:record`,
+      });
+      return {
+        contribution: toHelpfulContributionView(current.contribution),
+        proofOfHelpfulness: toProofOfHelpfulnessView(poh),
+      };
+    },
+
+    async declareCommercialDisclosure(execution, _actorPersonId, input) {
+      const disclosure = await helpfulnessService.declareDisclosure(
+        execution,
+        {
+          contributionId: input.contributionId as string,
+          contributorPersonId: _actorPersonId,
+          relationshipKind:
+            input.relationshipKind as import("../core/contributions.ts").DisclosureRelationshipKind,
+          relationshipRef: input.relationshipRef as string,
+          productRef: input.productRef as string | undefined,
+          counterpartyRef: input.counterpartyRef as string,
+          description: input.description as string | undefined,
+          idempotencyKey: input.idempotencyKey as string,
+        },
+      );
+      return toCommercialDisclosureView(disclosure);
+    },
+
+    async retractCommercialDisclosure(execution, _actorPersonId, input) {
+      const disclosure = await helpfulnessService.retractDisclosure(
+        execution,
+        {
+          disclosureId: input.disclosureId as string,
+          idempotencyKey: input.idempotencyKey as string,
+        },
+      );
+      return toCommercialDisclosureView(disclosure);
+    },
+
+    async listCommercialDisclosures(execution, contributionId) {
+      const disclosures = await helpfulnessService.listDisclosures(
+        getExecutionContext() ?? execution,
+        contributionId,
+      );
+      return disclosures.map(toCommercialDisclosureView);
+    },
+
+    async attachHelpfulAdvisoryScore(execution, _actorPersonId, input) {
+      const poh = await helpfulnessService.attachAdvisoryScore(execution, {
+        contributionId: input.contributionId as string,
+        kind: input.kind as import("../core/contributions.ts").HelpfulAdvisoryKind,
+        methodRef: input.methodRef as string,
+        methodVersion: input.methodVersion as string,
+        score: input.score as number,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toProofOfHelpfulnessView(poh);
+    },
+
+    async attachHelpfulnessBasis(execution, _actorPersonId, input) {
+      const poh = await helpfulnessService.attachBasis(execution, {
+        contributionId: input.contributionId as string,
+        kind: input.kind as import("../core/contributions.ts").HelpfulnessBasisKind,
+        referenceId: input.referenceId as string,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toProofOfHelpfulnessView(poh);
+    },
+
+    async evaluateHelpfulness(execution, _actorPersonId, input) {
+      const poh = await helpfulnessService.evaluateHelpfulness(execution, {
+        contributionId: input.contributionId as string,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toProofOfHelpfulnessView(poh);
+    },
   };
 
   const registry = createModuleRegistry(snapshot, logger);
@@ -4491,6 +4923,7 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     disputeService,
     // NET-W011 campaigns (campaign policy/configuration) service.
     campaignService,
+    helpfulnessService,
     // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
     idempotency,
     async initialize() {

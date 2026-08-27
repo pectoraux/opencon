@@ -19,8 +19,22 @@ import { defineBoundaryModule } from "../core/domain-module.ts";
  *    one opportunity + one contributor; never mutates lifecycle state
  *    directly).
  *
- * Out of scope (NET-W004 §5): no evidence evaluation or Proof-of-Value,
- * no outcome/measurement, no reputation, no settlement.
+ * Concrete behaviour introduced in NET-W012 (helpful contributions —
+ * spec/work-orders/NET-W012.md):
+ *  - The structured helpful submission semantics on the opaque W004
+ *    extension points (no new LifecycleSubjectKind; the Contribution
+ *    remains the workflow-lifecycle subject);
+ *  - The versioned helpfulness-policy lineage (deterministic
+ *    usefulness criteria) and the Proof-of-Helpfulness domain
+ *    aggregate (mentions recorded but never qualifying; advisory
+ *    model/heuristic scores never qualifying; qualifying bases
+ *    re-resolved through the truth-authority lookups at evaluation);
+ *  - First-class auditable commercial disclosures;
+ *  - The user-controlled publication gate (protocol preparation never
+ *    publishes; only the contributor publishes, through /workflows at
+ *    the composition root);
+ *  - The first fail-closed consumer of the NET-W011
+ *    eligibility-policy reference.
  */
 export const contributionsModule = defineBoundaryModule({
   name: "contributions",
@@ -28,5 +42,9 @@ export const contributionsModule = defineBoundaryModule({
   summary:
     "contribution lifecycle and submission state (NET-W004: Contribution " +
     "first-class model + authority-backed repository + ContributionService; " +
-    "lifecycle transitions delegated to /workflows)",
+    "lifecycle transitions delegated to /workflows. NET-W012: helpful " +
+    "contributions — structured helpful submissions, versioned helpfulness " +
+    "policy, the Proof-of-Helpfulness aggregate with evidenced qualifying " +
+    "bases, first-class commercial disclosures, user-controlled " +
+    "publication, and fail-closed campaign-eligibility enforcement)",
 });
