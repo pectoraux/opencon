@@ -11,20 +11,8 @@
 #
 # Two jobs:
 #   verify       — the canonical architecture/dependency gate:
-#                  typecheck + arch:check + the full unit suite
-#                  (integration tests SKIP here: no services are
-#                  provisioned, so PG_TEST_DATABASE_URL /
-#                  REDIS_TEST_URL are unset and the conditional
-#                  test.skip kicks in). This is the gate that
-#                  proves frozen-architecture compliance on every
-#                  push and PR.
-#   integration  — exercises the REAL PostgreSQL + Redis adapters
-#                  (the `pg` and `ioredis` drivers behind
-#                  /adapters) against real service containers.
-#                  Proves commit/restart/rollback/recovery,
-#                  SET NX PX locks + Lua release + TTL, and the
-#                  cross-adapter non-authority invariant
-#                  (architecture-lock §16).
+#                  typecheck + arch:check + authority:check + unit tests
+#   integration  — exercises the REAL PostgreSQL + Redis adapters.
 
 name: CI
 
@@ -43,7 +31,7 @@ concurrency:
 
 jobs:
   verify:
-    name: verify (typecheck + arch:check + unit tests)
+    name: verify (typecheck + architecture + authority + unit tests)
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -65,25 +53,21 @@ jobs:
         run: bun run typecheck
 
       - name: Architecture check (dependency direction + adapter isolation)
-        # NET-W001 §4.8 — enforceable in CI. Exits 1 on any violation.
-        # NET-W003 re-review: this is the gate that proves provider
-        # packages (pg, ioredis) are imported ONLY in the adapter tier
-        # and never leak into domain/infrastructure code.
         run: bun run arch:check
 
+      - name: Authority-boundary guardrails
+        # Polices the single-risk-authority, contribution/moderation,
+        # and workflow-authority boundaries without changing frozen
+        # Architecture v1.0.
+        run: bun run authority:check
+
       - name: Unit test suite (integration tests skip — no services)
-        # Integration tests under tests/integration/ skip when
-        # PG_TEST_DATABASE_URL / REDIS_TEST_URL are unset, so this
-        # job stays green without provisioned services.
         run: bun test
 
   integration:
     name: integration (real PostgreSQL + Redis adapters)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Don't block on the architecture gate — these prove the real
-    # adapters, which the arch:check already permits in the adapter
-    # tier. Both jobs run on every PR.
     services:
       postgres:
         image: postgres:17-alpine
@@ -93,8 +77,6 @@ jobs:
           POSTGRES_DB: opencon_test
         ports:
           - 5432:5432
-        # Wait until PostgreSQL accepts connections before the job
-        # starts the integration tests.
         options: >-
           --health-cmd "pg_isready -U opencon -d opencon_test"
           --health-interval 5s
@@ -130,6 +112,4 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Real PostgreSQL + Redis adapter integration tests
-        # Exercises the real `pg` and `ioredis` adapters behind
-        # /adapters against the provisioned service containers.
         run: bun test tests/integration/
