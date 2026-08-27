@@ -51,13 +51,13 @@ const DISPUTES_ECONOMIC_OR_REPUTATION_IDENTIFIERS = [
   "addReputationInput",
 ];
 
-const WORKFLOW_CALL_PATTERNS = [
+const WORKFLOW_CALL_PATTERNS: readonly RegExp[] = [
   /\brequestTransition\s*\(/g,
   /\bperformTransition\s*\(/g,
   /\btransitionWorkflow\s*\(/g,
 ];
 
-const LOCAL_STATUS_HELPER_PATTERNS = [
+const LOCAL_STATUS_HELPER_PATTERNS: readonly RegExp[] = [
   /\bstatusTransition\s*\(/g,
   /\bstatusMachine\s*\(/g,
   /\badministrativeStatusTransition\s*\(/g,
@@ -97,7 +97,7 @@ function lineOf(source: string, offset: number): number {
 
 function importTargets(source: string): readonly { specifier: string; offset: number }[] {
   const out: { specifier: string; offset: number }[] = [];
-  const re = /(?:import|export)(?:[^'";]*?from)?\s*["']([^"']+)["']/g;
+  const re = /(?:import|export)(?:[^'\";]*?from)?\s*[\"']([^\"']+)[\"']/g;
   let match: RegExpExecArray | null;
   while ((match = re.exec(source)) !== null) out.push({ specifier: match[1] ?? "", offset: match.index });
   return out;
@@ -119,6 +119,10 @@ function regexHits(source: string, patterns: readonly RegExp[]) {
     while ((match = pattern.exec(source)) !== null) hits.push({ pattern: pattern.source, offset: match.index });
   }
   return hits.sort((a, b) => a.offset - b.offset);
+}
+
+function callPattern(identifier: string): RegExp {
+  return new RegExp(String.raw`\b${identifier}\s*\(`, "g");
 }
 
 function isDomainImplementation(importerDir: string, rel: string): boolean {
@@ -164,30 +168,26 @@ export async function scanAuthorityBoundaries(root = resolve("src")): Promise<Au
     }
 
     if (importerDir === "contributions" && implementation) {
-      for (const identifier of CONTRIBUTION_RISK_MUTATION_IDENTIFIERS) {
-        const re = new RegExp(`\\b${identifier}\\s*\\(`, "g");
-        for (const hit of regexHits(source, [re])) {
-          violations.push({
-            file: rel,
-            line: lineOf(source, hit.offset),
-            rule: "contributions-must-not-mutate-risk-authority",
-            detail: `risk mutation ${identifier} is reserved for composition-root orchestration`,
-          });
-        }
+      const patterns = CONTRIBUTION_RISK_MUTATION_IDENTIFIERS.map(callPattern);
+      for (const hit of regexHits(source, patterns)) {
+        violations.push({
+          file: rel,
+          line: lineOf(source, hit.offset),
+          rule: "contributions-must-not-mutate-risk-authority",
+          detail: "risk mutation calls are reserved for composition-root orchestration",
+        });
       }
     }
 
     if (importerDir === "disputes" && implementation) {
-      for (const identifier of DISPUTES_ECONOMIC_OR_REPUTATION_IDENTIFIERS) {
-        const re = new RegExp(`\\b${identifier}\\s*\(`, "g");
-        for (const hit of regexHits(source, [re])) {
-          violations.push({
-            file: rel,
-            line: lineOf(source, hit.offset),
-            rule: "disputes-must-not-own-economic-or-reputation-state",
-            detail: `economic/reputation mutation ${identifier} is forbidden inside /disputes`,
-          });
-        }
+      const patterns = DISPUTES_ECONOMIC_OR_REPUTATION_IDENTIFIERS.map(callPattern);
+      for (const hit of regexHits(source, patterns)) {
+        violations.push({
+          file: rel,
+          line: lineOf(source, hit.offset),
+          rule: "disputes-must-not-own-economic-or-reputation-state",
+          detail: "economic/reputation mutation calls are forbidden inside /disputes",
+        });
       }
     }
 
