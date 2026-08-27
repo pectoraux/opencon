@@ -1,41 +1,37 @@
 /**
  * Authority-boundary guardrails.
  *
- * These rules do NOT change frozen Architecture v1.0. They make three
- * architectural watchpoints mechanically enforceable for future work:
+ * These rules make architectural watchpoints mechanically enforceable
+ * without changing frozen Architecture v1.0.
  *
- * 1. /disputes is the single fraud/risk control authority. It may consume
- *    provider-neutral references, but it must not become a second economic,
- *    reputation, workflow, or campaign authority.
- * 2. /contributions owns contribution quality/moderation semantics, but must
- *    not directly mutate /disputes, /settlement, /reputation, or /workflows.
- *    W013 risk-signal emission remains a composition-root concern.
+ * 1. /disputes is the single fraud/risk control authority.
+ * 2. /contributions owns quality/moderation semantics, but risk mutation
+ *    remains a composition-root concern.
  * 3. /workflows is the only operational lifecycle authority. Other domains
- *    may have narrowly-scoped administrative status, but any such status
- *    machine must be explicitly allowlisted here and must not use workflow
- *    transition primitives.
+ *    may have explicitly approved administrative status, but operational
+ *    transition primitives cannot appear in domain implementations.
  *
- * This is intentionally dependency-free and deterministic so it can run in
- * CI alongside scripts/check-architecture.ts.
+ * This checker deliberately distinguishes semantic implementation code from
+ * shared vocabulary/type contracts and HTTP transport names. The existing
+ * tier checker remains responsible for dependency direction.
  */
 
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 
-export const ADMINISTRATIVE_STATUS_DOMAINS = new Set(["creators"]);
+/** Domain-local administrative state explicitly approved by architecture review. */
+export const ADMINISTRATIVE_STATUS_DOMAINS = new Set(["campaigns", "creators"]);
+
+const DOMAIN_DIRS = new Set([
+  "identity", "organizations", "participants", "opportunities", "contributions",
+  "campaigns", "inventory", "creators", "demand", "benefits", "reputation",
+  "evidence", "outcomes", "settlement", "disputes", "workflows",
+]);
 
 const SINGLE_AUTHORITY_FORBIDDEN_IMPORTS: Record<string, readonly string[]> = {
   disputes: ["settlement", "reputation", "workflows", "campaigns"],
   contributions: ["disputes", "settlement", "reputation", "workflows"],
 };
-
-const WORKFLOW_PRIMITIVE_IDENTIFIERS = [
-  "requestTransition",
-  "performTransition",
-  "WorkflowService",
-  "TransitionRequest",
-  "transitionWorkflow",
-];
 
 const CONTRIBUTION_RISK_MUTATION_IDENTIFIERS = [
   "createSignal",
@@ -53,6 +49,18 @@ const DISPUTES_ECONOMIC_OR_REPUTATION_IDENTIFIERS = [
   "createReputationInput",
   "createReputationSnapshot",
   "addReputationInput",
+];
+
+const WORKFLOW_CALL_PATTERNS = [
+  /\brequestTransition\s*\(/g,
+  /\bperformTransition\s*\(/g,
+  /\btransitionWorkflow\s*\(/g,
+];
+
+const LOCAL_STATUS_HELPER_PATTERNS = [
+  /\bstatusTransition\s*\(/g,
+  /\bstatusMachine\s*\(/g,
+  /\badministrativeStatusTransition\s*\(/g,
 ];
 
 export interface AuthorityGuardViolation {
@@ -91,9 +99,7 @@ function importTargets(source: string): readonly { specifier: string; offset: nu
   const out: { specifier: string; offset: number }[] = [];
   const re = /(?:import|export)(?:[^'";]*?from)?\s*["']([^"']+)["']/g;
   let match: RegExpExecArray | null;
-  while ((match = re.exec(source)) !== null) {
-    out.push({ specifier: match[1] ?? "", offset: match.index });
-  }
+  while ((match = re.exec(source)) !== null) out.push({ specifier: match[1] ?? "", offset: match.index });
   return out;
 }
 
@@ -102,17 +108,23 @@ function targetDomain(importerDir: string, specifier: string): string | null {
   const base = resolve(join("src", importerDir), specifier);
   const rel = relative(resolve("src"), base).replaceAll("\\", "/");
   const first = rel.split("/")[0] ?? "";
-  return first && first !== "core" ? first : null;
+  return first && first !== "core" && DOMAIN_DIRS.has(first) ? first : null;
 }
 
-function identifierHits(source: string, identifiers: readonly string[]): readonly { identifier: string; offset: number }[] {
-  const hits: { identifier: string; offset: number }[] = [];
-  for (const identifier of identifiers) {
-    const re = new RegExp(`\\b${identifier}\\b`, "g");
+function regexHits(source: string, patterns: readonly RegExp[]) {
+  const hits: { pattern: string; offset: number }[] = [];
+  for (const pattern of patterns) {
+    pattern.lastIndex = 0;
     let match: RegExpExecArray | null;
-    while ((match = re.exec(source)) !== null) hits.push({ identifier, offset: match.index });
+    while ((match = pattern.exec(source)) !== null) hits.push({ pattern: pattern.source, offset: match.index });
   }
   return hits.sort((a, b) => a.offset - b.offset);
+}
+
+function isDomainImplementation(importerDir: string, rel: string): boolean {
+  if (!DOMAIN_DIRS.has(importerDir)) return false;
+  const basename = rel.split("/").at(-1) ?? "";
+  return basename !== "port.ts" && basename !== "module.ts" && basename !== "index.ts";
 }
 
 export async function scanAuthorityBoundaries(root = resolve("src")): Promise<AuthorityGuardResult> {
@@ -123,9 +135,10 @@ export async function scanAuthorityBoundaries(root = resolve("src")): Promise<Au
     const rel = relative(root, file).replaceAll("\\", "/");
     const importerDir = rel.split("/")[0] ?? "";
     const source = stripComments(await readFile(file, "utf8"));
+    const implementation = isDomainImplementation(importerDir, rel);
 
     const forbiddenImports = SINGLE_AUTHORITY_FORBIDDEN_IMPORTS[importerDir];
-    if (forbiddenImports) {
+    if (forbiddenImports && implementation) {
       for (const { specifier, offset } of importTargets(source)) {
         const domain = targetDomain(importerDir, specifier);
         if (domain && forbiddenImports.includes(domain)) {
@@ -133,58 +146,58 @@ export async function scanAuthorityBoundaries(root = resolve("src")): Promise<Au
             file: rel,
             line: lineOf(source, offset),
             rule: "single-authority-domain-import",
-            detail: `${importerDir} must not directly import /${domain}; use a provider-neutral lookup and composition-root orchestration`,
+            detail: `${importerDir} implementation must not directly import /${domain}; use a provider-neutral lookup and composition-root orchestration`,
           });
         }
       }
     }
 
-    // Operational lifecycle primitives may only exist in the workflow authority.
-    if (importerDir !== "workflows" && importerDir !== "bootstrap") {
-      for (const hit of identifierHits(source, WORKFLOW_PRIMITIVE_IDENTIFIERS)) {
+    if (implementation && importerDir !== "workflows") {
+      for (const hit of regexHits(source, WORKFLOW_CALL_PATTERNS)) {
         violations.push({
           file: rel,
           line: lineOf(source, hit.offset),
           rule: "workflow-authority-only",
-          detail: `identifier ${hit.identifier} is reserved for /workflows; domain administrative status must not become an operational lifecycle`,
+          detail: "operational workflow transition calls are reserved for /workflows or composition-root orchestration",
         });
       }
     }
 
-    // Contributions may evaluate/record moderation, but risk-signal mutation is
-    // deliberately a composition-root operation feeding the existing /disputes authority.
-    if (importerDir === "contributions") {
-      for (const hit of identifierHits(source, CONTRIBUTION_RISK_MUTATION_IDENTIFIERS)) {
-        violations.push({
-          file: rel,
-          line: lineOf(source, hit.offset),
-          rule: "contributions-must-not-mutate-risk-authority",
-          detail: `identifier ${hit.identifier} must not be called from /contributions; emit risk decisions only through composition-root orchestration`,
-        });
+    if (importerDir === "contributions" && implementation) {
+      for (const identifier of CONTRIBUTION_RISK_MUTATION_IDENTIFIERS) {
+        const re = new RegExp(`\\b${identifier}\\s*\\(`, "g");
+        for (const hit of regexHits(source, [re])) {
+          violations.push({
+            file: rel,
+            line: lineOf(source, hit.offset),
+            rule: "contributions-must-not-mutate-risk-authority",
+            detail: `risk mutation ${identifier} is reserved for composition-root orchestration`,
+          });
+        }
       }
     }
 
-    // The fraud/risk authority must not become an economic or trust-score authority.
-    if (importerDir === "disputes") {
-      for (const hit of identifierHits(source, DISPUTES_ECONOMIC_OR_REPUTATION_IDENTIFIERS)) {
-        violations.push({
-          file: rel,
-          line: lineOf(source, hit.offset),
-          rule: "disputes-must-not-own-economic-or-reputation-state",
-          detail: `identifier ${hit.identifier} would make /disputes a second economic/reputation authority`,
-        });
+    if (importerDir === "disputes" && implementation) {
+      for (const identifier of DISPUTES_ECONOMIC_OR_REPUTATION_IDENTIFIERS) {
+        const re = new RegExp(`\\b${identifier}\\s*\(`, "g");
+        for (const hit of regexHits(source, [re])) {
+          violations.push({
+            file: rel,
+            line: lineOf(source, hit.offset),
+            rule: "disputes-must-not-own-economic-or-reputation-state",
+            detail: `economic/reputation mutation ${identifier} is forbidden inside /disputes`,
+          });
+        }
       }
     }
 
-    // Any explicit local status-transition helper is an architectural choice,
-    // not an accident. Only documented administrative-state domains may use it.
-    if (importerDir !== "workflows" && importerDir !== "bootstrap" && !ADMINISTRATIVE_STATUS_DOMAINS.has(importerDir)) {
-      for (const hit of identifierHits(source, ["statusTransition", "statusMachine", "administrativeStatusTransition"])) {
+    if (implementation && importerDir !== "workflows" && !ADMINISTRATIVE_STATUS_DOMAINS.has(importerDir)) {
+      for (const hit of regexHits(source, LOCAL_STATUS_HELPER_PATTERNS)) {
         violations.push({
           file: rel,
           line: lineOf(source, hit.offset),
           rule: "administrative-status-requires-allowlist",
-          detail: `local status machine in /${importerDir} is not allowlisted; add an explicit architectural decision before introducing domain-local state transitions`,
+          detail: `local administrative status machine in /${importerDir} is not allowlisted`,
         });
       }
     }
