@@ -60,8 +60,13 @@ const NET_W004_DOMAINS = ["opportunities", "contributions", "workflows"];
 // introduced NO fraud/risk behaviour — is preserved (the trust
 // foundation arrives only with the NET-W009 work item + its own AC-08
 // regression).
+// NET-W011 UPDATE: campaigns is implemented by NET-W011 (the campaign
+// domain — policy/configuration authority) and left this list the
+// same way; the NET-W004 intent — NET-W004 itself introduced NO
+// campaign behaviour — is preserved (the campaign domain arrives only
+// with the NET-W011 work item + its own AC-07 regression).
 const DEFERRED_DOMAINS = [
-  "campaigns", "inventory", "creators", "demand", "benefits",
+  "inventory", "creators", "demand", "benefits",
 ];
 
 async function listTsFiles(dir: string, out: string[] = []): Promise<string[]> {

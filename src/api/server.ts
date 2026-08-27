@@ -2403,6 +2403,256 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // -- NET-W011 campaign routes --------------------------------------
+
+    // POST /api/campaigns — create a campaign (protected; the person
+    // actor becomes the owner; DRAFT).
+    if (path === "/api/campaigns" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "campaign.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createCampaign(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          name: strField(obj, "name"),
+          ...(obj.description !== undefined ? { description: String(obj.description) } : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/campaigns/:id/policy — define the next immutable
+    // policy version (protected; owner-only).
+    if (
+      path.startsWith("/api/campaigns/") &&
+      path.endsWith("/policy") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "campaign.policy", "*", res);
+      if (!guarded) return true;
+      const campaignId = path.slice("/api/campaigns/".length, -"/policy".length);
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.defineCampaignPolicy(guarded.execution, guarded.personId, {
+          campaignId,
+          policy: objField(obj, "policy"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/campaigns/:id/activate|pause|resume|complete|cancel —
+    // the administrative status machine (protected; owner-only).
+    for (const [suffix, action] of [
+      ["activate", "campaign.activate"],
+      ["pause", "campaign.pause"],
+      ["resume", "campaign.resume"],
+      ["complete", "campaign.complete"],
+      ["cancel", "campaign.cancel"],
+    ] as const) {
+      if (
+        path.startsWith("/api/campaigns/") &&
+        path.endsWith(`/${suffix}`) &&
+        method === "POST" &&
+        opts.commands
+      ) {
+        const commands = opts.commands;
+        const guarded = await guardMutation(ctx, req, action, "*", res);
+        if (!guarded) return true;
+        const campaignId = path.slice(
+          "/api/campaigns/".length,
+          -`/${suffix}`.length,
+        );
+        const body = await readBody(req);
+        const obj = requireBodyObject(body);
+        const view = await runWithExecutionContextAsync(guarded.execution, () =>
+          suffix === "activate"
+            ? commands.activateCampaign(guarded.execution, guarded.personId, {
+                campaignId,
+                ...(obj.reason !== undefined ? { reason: String(obj.reason) } : {}),
+                idempotencyKey: strField(obj, "idempotencyKey"),
+              })
+            : suffix === "pause"
+              ? commands.pauseCampaign(guarded.execution, guarded.personId, {
+                  campaignId,
+                  ...(obj.reason !== undefined ? { reason: String(obj.reason) } : {}),
+                  idempotencyKey: strField(obj, "idempotencyKey"),
+                })
+              : suffix === "resume"
+                ? commands.resumeCampaign(guarded.execution, guarded.personId, {
+                    campaignId,
+                    ...(obj.reason !== undefined ? { reason: String(obj.reason) } : {}),
+                    idempotencyKey: strField(obj, "idempotencyKey"),
+                  })
+                : suffix === "complete"
+                  ? commands.completeCampaign(guarded.execution, guarded.personId, {
+                      campaignId,
+                      ...(obj.reason !== undefined ? { reason: String(obj.reason) } : {}),
+                      idempotencyKey: strField(obj, "idempotencyKey"),
+                    })
+                  : commands.cancelCampaign(guarded.execution, guarded.personId, {
+                      campaignId,
+                      ...(obj.reason !== undefined ? { reason: String(obj.reason) } : {}),
+                      idempotencyKey: strField(obj, "idempotencyKey"),
+                    }),
+        );
+        await send(res, 200, view);
+        return true;
+      }
+    }
+
+    // POST /api/campaigns/:id/budget — commit the declared budget
+    // through the settlement authority's escrow (protected;
+    // owner-only).
+    if (
+      path.startsWith("/api/campaigns/") &&
+      path.endsWith("/budget") &&
+      !path.endsWith("/budget/release") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "campaign.budget.commit", "*", res);
+      if (!guarded) return true;
+      const campaignId = path.slice("/api/campaigns/".length, -"/budget".length);
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.commitCampaignBudget(guarded.execution, guarded.personId, {
+          campaignId,
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/campaigns/:id/budget/release — release the escrow
+    // after a terminal status (protected; owner-only).
+    if (
+      path.startsWith("/api/campaigns/") &&
+      path.endsWith("/budget/release") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "campaign.budget.release", "*", res);
+      if (!guarded) return true;
+      const campaignId = path.slice(
+        "/api/campaigns/".length,
+        -"/budget/release".length,
+      );
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.releaseCampaignBudget(guarded.execution, guarded.personId, {
+          campaignId,
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/campaigns/:id/opportunities — publish a contribution
+    // opportunity from a policy spec (protected; owner-only; ACTIVE;
+    // composed through the opportunities boundary — lifecycle stays
+    // with /workflows).
+    if (
+      path.startsWith("/api/campaigns/") &&
+      path.endsWith("/opportunities") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "campaign.opportunity.publish", "*", res);
+      if (!guarded) return true;
+      const campaignId = path.slice(
+        "/api/campaigns/".length,
+        -"/opportunities".length,
+      );
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.publishCampaignOpportunity(guarded.execution, guarded.personId, {
+          campaignId,
+          specId: strField(obj, "specId"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/campaigns — an org's campaigns (public; optional status
+    // filter).
+    if (path === "/api/campaigns" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const statusParam = url.searchParams.get("status");
+      const statuses =
+        statusParam !== null ? statusParam.split(",").map((x) => x.trim()) : undefined;
+      const views = await opts.commands.listCampaigns(ctx, organizationScopeId, statuses);
+      await send(res, 200, { organizationScopeId, campaigns: views });
+      return true;
+    }
+
+    // GET /api/campaigns/:id/policies — the immutable policy versions
+    // (public).
+    if (
+      path.startsWith("/api/campaigns/") &&
+      path.endsWith("/policies") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const campaignId = path.slice("/api/campaigns/".length, -"/policies".length);
+      const views = await opts.commands.listCampaignPolicies(ctx, campaignId);
+      await send(res, 200, { campaignId, policies: views });
+      return true;
+    }
+
+    // GET /api/campaigns/:id/opportunities — the published
+    // opportunities derived from the append-only history (public).
+    if (
+      path.startsWith("/api/campaigns/") &&
+      path.endsWith("/opportunities") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const campaignId = path.slice(
+        "/api/campaigns/".length,
+        -"/opportunities".length,
+      );
+      const views = await opts.commands.listCampaignOpportunities(ctx, campaignId);
+      await send(res, 200, { campaignId, opportunities: views });
+      return true;
+    }
+
+    // GET /api/campaigns/:id — fetch a campaign with its immutable
+    // event history (public).
+    if (path.startsWith("/api/campaigns/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/campaigns/".length);
+      const view = await opts.commands.getCampaign(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `campaign not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
     return false;
   }
 
