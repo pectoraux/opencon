@@ -281,7 +281,18 @@ describe("NET-W015-AC-07 architecture / out-of-scope", () => {
     }
   });
 
-  test("the creators domain has NO reputation scoring/mutation path and NO AI/LLM path", async () => {
+  test("the creators domain has NO reputation scoring/mutation path and NO opaque AI/LLM authority", async () => {
+    // NET-W016 refinement: the creator-matching ADVISORY (AI-002) is
+    // now IN scope as a provider-neutral injected port (the work
+    // order §3.3) that blends ONLY into the relevance ranking signal
+    // under a capped weight. What stays forbidden — the W015 intent
+    // ("AI cannot establish creator eligibility", issue #29 invariant
+    // 7) — is refined to the precise structural pins below: no LLM
+    // import (the domain depends on the injected advisory port, never
+    // on a provider), no reputation mutation, and an ADVISORY-FREE
+    // eligibility evaluator (the advisory can never flip a hard
+    // gate — there is no code path from advisory output to an
+    // eligibility verdict).
     const files = await listTsFiles(join(SRC, "creators"));
     const forbidden: RegExp[] = [
       /\brecordInput\b/,
@@ -292,7 +303,6 @@ describe("NET-W015-AC-07 architecture / out-of-scope", () => {
       /\bmutateReputation\b/i,
       /\bllm\b/i,
       /\bgenerateAdvisory\b/,
-      /\badvisoryScore\b/i,
       /from\s+["']\.\.\/reputation\//,
       /from\s+["']\.\.\/llm\//,
       /from\s+["']\.\.\/agents\//,
@@ -306,6 +316,29 @@ describe("NET-W015-AC-07 architecture / out-of-scope", () => {
         ).toBe(false);
       }
     }
+    // STRUCTURAL PIN (NET-W016 §3.3): the pure eligibility evaluator
+    // accepts NO advisory input at all — its signature is
+    // (facts, requirements) and the returned eligibility type has no
+    // advisory field. Hard restrictions cannot be overridden by
+    // model ranking because no advisory value can reach this code.
+    const engine = await readFile(
+      join(SRC, "creators/matching-engine.ts"),
+      "utf8",
+    );
+    expect(engine).toMatch(
+      /export function evaluateEligibility\(\s*facts: CreatorMatchCandidateFacts,\s*requirements: CreatorMatchRequirements,\s*\): CreatorMatchEligibility/,
+    );
+    // The advisory blend is capped in the shared core vocabulary.
+    const coreCreators = await readFile(
+      join(SRC, "core/creators.ts"),
+      "utf8",
+    );
+    expect(coreCreators).toMatch(
+      /export const CREATOR_MATCH_ADVISORY_MAX_BLEND = 0\.25/,
+    );
+    expect(coreCreators).toMatch(
+      /export function validateCreatorMatchAdvisoryMaxWeight/,
+    );
     // The runtime creator composites consult NO LLM/advisory path
     // either (AI cannot establish creator eligibility — issue
     // invariant 7).

@@ -2324,6 +2324,41 @@ export interface ApiCommands {
   }>;
 
   // -----------------------------------------------------------------
+  // NET-W016 — creator matching (deterministic eligibility +
+  // explicit-signal ranking; matching is SELECTION, not authority).
+  // -----------------------------------------------------------------
+
+  /**
+   * Run a creator match (protected; guard action
+   * `creators.matching.run`): deterministic hard-gate eligibility +
+   * ranked candidate set with per-signal explanations, persisted as
+   * ONE append-only, idempotent, tenant-scoped match-run record.
+   * Optional campaign linkage is resolved read-only against the
+   * pinned campaign policy version; the optional advisory (AI-002)
+   * blends only into the relevance signal under a capped weight and
+   * can never flip a hard gate.
+   */
+  runCreatorMatch(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ run: Record<string, unknown>; created: boolean }>;
+
+  /** Fetch one match run (public read; tenant-scoped). */
+  getCreatorMatchRun(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    id: string,
+  ): Promise<Record<string, unknown>>;
+
+  /** List an org's match runs, optionally by campaign (public read). */
+  listCreatorMatchRuns(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    campaignId?: string,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  // -----------------------------------------------------------------
   // NET-W012 — helpful contributions (Proof-of-Helpfulness).
   // -----------------------------------------------------------------
 
