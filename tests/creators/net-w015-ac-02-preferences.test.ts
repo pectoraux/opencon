@@ -77,6 +77,7 @@ describe("NET-W015-AC-02 explicit provider-neutral sections", () => {
     const { profileId, ctx, sections } = await profileWithVersion("ac02-roundtrip");
     const persisted = await harness.runtime.creatorService.getProfileVersion(
       ctx,
+      harness.organizationScopeId,
       profileId,
       1,
     );
@@ -176,11 +177,13 @@ describe("NET-W015-AC-02 explicit provider-neutral sections", () => {
     // The pointer follows; the lineage lists 1..3.
     const profileNow = await harness.runtime.creatorService.getProfile(
       ctx,
+      harness.organizationScopeId,
       profile.id,
     );
     expect(profileNow.currentVersion).toBe(3);
     const lineage = await harness.runtime.creatorService.listProfileVersions(
       ctx,
+      harness.organizationScopeId,
       profile.id,
     );
     expect(lineage.map((v) => v.version)).toEqual([1, 2, 3]);
@@ -189,6 +192,7 @@ describe("NET-W015-AC-02 explicit provider-neutral sections", () => {
     // rate; nothing from v2/v3 leaked backwards.
     const persistedV1 = await harness.runtime.creatorService.getProfileVersion(
       ctx,
+      harness.organizationScopeId,
       profile.id,
       1,
     );
@@ -226,6 +230,7 @@ describe("NET-W015-AC-02 explicit provider-neutral sections", () => {
     // Still exactly one version in the lineage.
     const lineage = await harness.runtime.creatorService.listProfileVersions(
       ctx,
+      harness.organizationScopeId,
       profile.id,
     );
     expect(lineage).toHaveLength(1);

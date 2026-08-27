@@ -51,8 +51,21 @@
  * DETERMINISM: every profile version is immutable and version =
  * latest+1 under the ORGANIZATION-INDEPENDENT lineage mutex
  * `creator_profile_lineage:{profileId}` (the NET-W007/008/010/011
- * pattern — a lineage can never fork across scopes); the activation
- * gate reads only stored records.
+ * pattern — a lineage can never fork across scopes); profile
+ * CREATION is serialized per (organization scope, person) under the
+ * unique-anchor mutex `creator_profile_anchor:{organizationScopeId}
+ * :{creatorPersonId}` (the NET-W007 subject-mutex pattern), so the
+ * one-profile-per-(scope, person) invariant holds even for
+ * concurrent callers with DIFFERENT idempotency keys; the
+ * activation gate reads only stored records.
+ *
+ * TENANT ISOLATION: every read resolves records WITHIN an
+ * organization scope — including the ID-based reads (a profile
+ * fetched by id, its versions and its reputation resolution are all
+ * scope-guarded; a cross-scope id is indistinguishable from a
+ * nonexistent one — no existence oracle). Mutations are
+ * OWNER-ONLY (person-level authorization subsumes tenancy: the
+ * acting person must BE the anchor person).
  *
  * OWNERSHIP: profile/version/status mutations are OWNER-ONLY (the
  * profile owner is the anchor person; checked server-side on every
@@ -148,6 +161,20 @@ function assertIdempotencyKey(idempotencyKey: string): string {
   return idempotencyKey;
 }
 
+/**
+ * The tenant-isolation gate on every read: creator records resolve
+ * ONLY within an organization scope (PR #30 review remediation —
+ * the ID-based reads carry the same boundary as by-person/list).
+ */
+function assertOrganizationScopeId(organizationScopeId: string): string {
+  if (!organizationScopeId?.trim()) {
+    throw creatorValidationError("organizationScopeId is required", {
+      field: "organizationScopeId",
+    });
+  }
+  return organizationScopeId;
+}
+
 /** The acting person's id (authorization: only persons act on profiles). */
 function actingPersonId(execution: ExecutionContext): string {
   if (!execution.actor || execution.actor.kind !== "person") {
@@ -201,6 +228,25 @@ function buildEvent(
 /** Per-record serialization lock (status-machine check-then-act). */
 function profileLockKey(profileId: string): string {
   return `creator_profile_record:${profileId}`;
+}
+
+/**
+ * The unique-anchor serialization mutex: serializes concurrent
+ * profile creations for the SAME (organization scope, person) even
+ * under DIFFERENT idempotency keys. The idempotency key alone is
+ * too narrow — the unique-anchor rule guards the ANCHOR IDENTITY,
+ * not the caller's key (the same check-then-act reasoning as the
+ * NET-W007 dispute-open subject mutex and the NET-W012 transaction
+ * boundary gates). Held through the commit, so the in-tx anchor
+ * re-check always observes the prior creator's COMMITTED profile —
+ * "one profile per (organization scope, person)" is structurally
+ * guaranteed, never snapshot-race-dependent (PR #30 review).
+ */
+function creatorProfileAnchorLockKey(
+  organizationScopeId: string,
+  creatorPersonId: string,
+): string {
+  return `creator_profile_anchor:${organizationScopeId}:${creatorPersonId}`;
 }
 
 /** The org-INDEPENDENT version-lineage mutex (the NET-W007/008/010/011 pattern). */
@@ -1066,71 +1112,89 @@ export function createCreatorService(deps: CreatorServiceDeps): CreatorService {
       }
 
       const key = `creator_profile_create:${input.organizationScopeId}:${input.idempotencyKey}`;
-      const applied = await idempotency.applyIdempotent(
-        key,
-        async (ctx) => {
-          const tx = ctx.transaction;
-          // The unique-anchor rule, in-transaction: one profile per
-          // (organization scope, person). A duplicate anchor is the
-          // identity-duplication guard — rejected with ConflictError.
-          const existing = await repository.findByPersonWithinTx(
-            input.organizationScopeId,
-            input.creatorPersonId,
-            tx,
-          );
-          if (existing) {
-            throw new ConflictError(
-              `person ${input.creatorPersonId} already holds a creator profile (${existing.id}) in organization scope ${input.organizationScopeId}`,
-              {
-                profileId: existing.id,
-                creatorPersonId: input.creatorPersonId,
+      // The UNIQUE-ANCHOR mutex wraps the whole authoritative apply
+      // (anchor-mutex → idempotency-key-mutex, never reversed — the
+      // same lock-ordering discipline as the policy lineages). Two
+      // callers racing with DIFFERENT idempotency keys for the same
+      // (organization scope, person) serialize here; the second
+      // caller's in-tx anchor re-check then observes the first
+      // caller's COMMITTED profile and is rejected — the duplicate
+      // is structurally impossible, not snapshot-luck (PR #30
+      // review remediation).
+      const applied = await idempotency.withLock(
+        creatorProfileAnchorLockKey(
+          input.organizationScopeId,
+          input.creatorPersonId,
+        ),
+        () =>
+          idempotency.applyIdempotent(
+            key,
+            async (ctx) => {
+              const tx = ctx.transaction;
+              // The unique-anchor rule, in-transaction: one profile per
+              // (organization scope, person). A duplicate anchor is the
+              // identity-duplication guard — rejected with ConflictError.
+              // (Serialized by the anchor mutex above, so this read
+              // observes prior COMMITTED profiles.)
+              const existing = await repository.findByPersonWithinTx(
+                input.organizationScopeId,
+                input.creatorPersonId,
+                tx,
+              );
+              if (existing) {
+                throw new ConflictError(
+                  `person ${input.creatorPersonId} already holds a creator profile (${existing.id}) in organization scope ${input.organizationScopeId}`,
+                  {
+                    profileId: existing.id,
+                    creatorPersonId: input.creatorPersonId,
+                    organizationScopeId: input.organizationScopeId,
+                  },
+                );
+              }
+              const now = new Date().toISOString();
+              const event = buildEvent(
+                "created",
+                execution,
+                actor,
+                null,
+                { displayName: input.displayName.trim() },
+              );
+              const profile: CreatorProfileRecord = Object.freeze({
+                id: randomUUID(),
                 organizationScopeId: input.organizationScopeId,
-              },
-            );
-          }
-          const now = new Date().toISOString();
-          const event = buildEvent(
-            "created",
-            execution,
-            actor,
-            null,
-            { displayName: input.displayName.trim() },
-          );
-          const profile: CreatorProfileRecord = Object.freeze({
-            id: randomUUID(),
-            organizationScopeId: input.organizationScopeId,
-            creatorPersonId: input.creatorPersonId,
-            displayName: input.displayName.trim(),
-            status: "DRAFT",
-            currentVersion: null,
-            events: Object.freeze([event]),
-            createdAt: now,
-            updatedAt: now,
-            idempotencyKey: input.idempotencyKey,
-            executionId: execution.executionId,
-            correlationId: execution.correlationId,
-            causationId: execution.causationId,
-          });
-          await repository.createWithinTx(profile, tx);
-          const buffer = auditWriter.forTransaction(tx);
-          await buffer.append({
-            eventType: CREATOR_PROFILE_CREATED,
-            context: execution,
-            actor,
-            subject: profile.id,
-            resourceType: "creator_profile",
-            resourceId: profile.id,
-            metadata: {
-              organizationScopeId: profile.organizationScopeId,
-              creatorPersonId: profile.creatorPersonId,
-              displayName: profile.displayName,
-              idempotencyRecordId: ctx.recordId,
-              transactionId: tx.transactionId,
+                creatorPersonId: input.creatorPersonId,
+                displayName: input.displayName.trim(),
+                status: "DRAFT",
+                currentVersion: null,
+                events: Object.freeze([event]),
+                createdAt: now,
+                updatedAt: now,
+                idempotencyKey: input.idempotencyKey,
+                executionId: execution.executionId,
+                correlationId: execution.correlationId,
+                causationId: execution.causationId,
+              });
+              await repository.createWithinTx(profile, tx);
+              const buffer = auditWriter.forTransaction(tx);
+              await buffer.append({
+                eventType: CREATOR_PROFILE_CREATED,
+                context: execution,
+                actor,
+                subject: profile.id,
+                resourceType: "creator_profile",
+                resourceId: profile.id,
+                metadata: {
+                  organizationScopeId: profile.organizationScopeId,
+                  creatorPersonId: profile.creatorPersonId,
+                  displayName: profile.displayName,
+                  idempotencyRecordId: ctx.recordId,
+                  transactionId: tx.transactionId,
+                },
+              });
+              return profile;
             },
-          });
-          return profile;
-        },
-        execution,
+            execution,
+          ),
       );
       logger.info("creator_profile.created", {
         profileId: applied.result.id,
@@ -1139,9 +1203,13 @@ export function createCreatorService(deps: CreatorServiceDeps): CreatorService {
       return { profile: applied.result, created: applied.executed };
     },
 
-    async getProfile(execution, id) {
+    async getProfile(execution, organizationScopeId, id) {
       void execution;
-      return loadProfile(undefined, id);
+      assertOrganizationScopeId(organizationScopeId);
+      // Tenant-scoped ID read: a cross-scope profile id is
+      // indistinguishable from a nonexistent one — no existence
+      // oracle, no cross-tenant profile data (PR #30 review).
+      return loadProfile(organizationScopeId, id);
     },
 
     async getProfileByPerson(execution, organizationScopeId, creatorPersonId) {
@@ -1336,12 +1404,22 @@ export function createCreatorService(deps: CreatorServiceDeps): CreatorService {
     },
 
     // ------------------------------------------------------------------
-    // Reads (committed reads through the repositories).
+    // Reads (committed reads through the repositories — every read
+    // is tenant-scoped; a cross-scope id is indistinguishable from
+    // an absent one).
     // ------------------------------------------------------------------
-    async getProfileVersion(execution, profileId, version) {
+    async getProfileVersion(
+      execution,
+      organizationScopeId,
+      profileId,
+      version,
+    ) {
       void execution;
+      assertOrganizationScopeId(organizationScopeId);
       const record = await versionRepository.findVersion(profileId, version);
-      if (!record) {
+      if (!record || record.organizationScopeId !== organizationScopeId) {
+        // Cross-scope version reads are indistinguishable from
+        // absent ones (the version carries its profile's scope).
         throw new NotFoundError(
           `creator profile version not found: ${profileId} v${String(version)}`,
           { profileId, version },
@@ -1350,9 +1428,19 @@ export function createCreatorService(deps: CreatorServiceDeps): CreatorService {
       return record;
     },
 
-    async listProfileVersions(execution, profileId) {
+    async listProfileVersions(execution, organizationScopeId, profileId) {
       void execution;
-      return versionRepository.listByProfile(profileId);
+      assertOrganizationScopeId(organizationScopeId);
+      // Tenant-scoped enumeration: the profile must resolve IN the
+      // caller's organization scope first — a foreign scope cannot
+      // even learn that a version lineage exists.
+      await loadProfile(organizationScopeId, profileId);
+      const versions = await versionRepository.listByProfile(profileId);
+      // Defense in depth: a version's scope is copied from its
+      // profile at commit, so only this scope's versions can return.
+      return versions.filter(
+        (v) => v.organizationScopeId === organizationScopeId,
+      );
     },
   };
 }

@@ -5010,14 +5010,18 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return toCreatorProfileView(updated);
     },
 
-    async getCreatorProfile(execution, id) {
+    async getCreatorProfile(execution, organizationScopeId, id) {
       try {
         const profile = await creatorService.getProfile(
           getExecutionContext() ?? execution,
+          organizationScopeId,
           id,
         );
         return toCreatorProfileView(profile);
       } catch {
+        // Not found — including the cross-scope case, which stays
+        // indistinguishable from absence (tenant isolation, PR #30
+        // review remediation).
         return null;
       }
     },
@@ -5044,22 +5048,27 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return profiles.map(toCreatorProfileView);
     },
 
-    async listCreatorProfileVersions(execution, profileId) {
+    async listCreatorProfileVersions(execution, organizationScopeId, profileId) {
       const versions = await creatorService.listProfileVersions(
         getExecutionContext() ?? execution,
+        organizationScopeId,
         profileId,
       );
       return versions.map(toCreatorProfileVersionView);
     },
 
-    async resolveCreatorReputation(execution, profileId) {
+    async resolveCreatorReputation(execution, organizationScopeId, profileId) {
       // The reference-resolution read (work order §3.4): the profile
       // record NEVER stores reputation scores — this read resolves
       // the CURRENT profile version's references through the
       // CANONICAL /reputation snapshot service at the composition
-      // root. The creator boundary never computes a score.
+      // root. The creator boundary never computes a score. The read
+      // is TENANT-SCOPED: the profile must resolve in the caller's
+      // organization scope (a foreign scope cannot resolve another
+      // tenant's creator reputation — PR #30 review remediation).
       const profile = await creatorService.getProfile(
         getExecutionContext() ?? execution,
+        organizationScopeId,
         profileId,
       );
       if (profile.currentVersion === null) {
@@ -5071,6 +5080,7 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       }
       const version = await creatorService.getProfileVersion(
         getExecutionContext() ?? execution,
+        organizationScopeId,
         profileId,
         profile.currentVersion,
       );

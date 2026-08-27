@@ -59,6 +59,7 @@ describe("NET-W015-AC-01 first-class profile records", () => {
     // Durability: a committed re-read returns the same record.
     const fetched = await harness.runtime.creatorService.getProfile(
       ctx,
+      harness.organizationScopeId,
       profile.id,
     );
     expect(fetched.id).toBe(profile.id);
@@ -221,6 +222,7 @@ describe("NET-W015-AC-01 first-class profile records", () => {
     // The event history is append-only and complete.
     const final = await harness.runtime.creatorService.getProfile(
       ctx,
+      harness.organizationScopeId,
       profile.id,
     );
     expect(final.events.map((e) => e.event)).toEqual([

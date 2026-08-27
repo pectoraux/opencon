@@ -390,6 +390,7 @@ describe("NET-W015-AC-07 architecture / out-of-scope", () => {
       "tests/creators/net-w015-ac-04-reputation-reference.test.ts",
       "tests/creators/net-w015-ac-05-authorization-tenancy.test.ts",
       "tests/creators/net-w015-ac-06-provider-neutrality.test.ts",
+      "tests/creators/net-w015-remediation-anchor-concurrency-tenancy.test.ts",
       "tests/regression/net-w015-ac-07-architecture-out-of-scope.test.ts",
     ];
     for (const rel of expected) {

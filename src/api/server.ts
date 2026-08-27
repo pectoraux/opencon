@@ -2801,7 +2801,9 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
 
     // GET /api/creators/:id/reputation — resolve the CURRENT profile
     // version's reputation references through the canonical
-    // /reputation snapshot service (public read).
+    // /reputation snapshot service (public read; TENANT-SCOPED —
+    // organizationScopeId required; a cross-scope profile id is not
+    // found; PR #30 review remediation).
     if (
       path.startsWith("/api/creators/") &&
       path.endsWith("/reputation") &&
@@ -2809,8 +2811,17 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       opts.commands
     ) {
       const profileId = path.slice("/api/creators/".length, -"/reputation".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
       try {
-        const view = await opts.commands.resolveCreatorReputation(ctx, profileId);
+        const view = await opts.commands.resolveCreatorReputation(
+          ctx,
+          organizationScopeId,
+          profileId,
+        );
         await send(res, 200, view);
       } catch (error) {
         if (error instanceof Error && error.message.includes("not found")) {
@@ -2826,7 +2837,9 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
     }
 
     // GET /api/creators/:id/versions — the immutable profile versions
-    // (public).
+    // (public; TENANT-SCOPED — organizationScopeId required; a
+    // cross-scope profile id is not found; PR #30 review
+    // remediation).
     if (
       path.startsWith("/api/creators/") &&
       path.endsWith("/versions") &&
@@ -2834,16 +2847,47 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       opts.commands
     ) {
       const profileId = path.slice("/api/creators/".length, -"/versions".length);
-      const views = await opts.commands.listCreatorProfileVersions(ctx, profileId);
-      await send(res, 200, { profileId, versions: views });
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      try {
+        const views = await opts.commands.listCreatorProfileVersions(
+          ctx,
+          organizationScopeId,
+          profileId,
+        );
+        await send(res, 200, { profileId, versions: views });
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("not found")) {
+          await send(res, 404, {
+            error: "not_found",
+            message: `creator profile not found: ${profileId}`,
+          });
+          return true;
+        }
+        throw error;
+      }
       return true;
     }
 
     // GET /api/creators/:id — fetch a creator profile with its
-    // immutable event history (public).
+    // immutable event history (public; TENANT-SCOPED —
+    // organizationScopeId required; a cross-scope profile id is not
+    // found; PR #30 review remediation).
     if (path.startsWith("/api/creators/") && method === "GET" && opts.commands) {
       const id = path.slice("/api/creators/".length);
-      const view = await opts.commands.getCreatorProfile(ctx, id);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const view = await opts.commands.getCreatorProfile(
+        ctx,
+        organizationScopeId,
+        id,
+      );
       if (!view) {
         await send(res, 404, { error: "not_found", message: `creator profile not found: ${id}` });
         return true;

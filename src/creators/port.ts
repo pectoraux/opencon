@@ -567,8 +567,15 @@ export interface CreatorService {
     execution: ExecutionContext,
     input: CreatorProfileStatusInput,
   ): Promise<CreatorProfileRecord>;
+  /**
+   * Fetch a creator profile by id WITHIN an organization scope
+   * (tenant-scoped read — a cross-scope id is indistinguishable from
+   * a nonexistent one: NotFoundError, no existence oracle; PR #30
+   * review remediation).
+   */
   getProfile(
     execution: ExecutionContext,
+    organizationScopeId: string,
     id: string,
   ): Promise<CreatorProfileRecord>;
   /** The profile for a person in an org scope (the anchor lookup). */
@@ -582,13 +589,25 @@ export interface CreatorService {
     organizationScopeId: string,
     statuses?: readonly string[],
   ): Promise<readonly CreatorProfileRecord[]>;
+  /**
+   * Fetch one immutable profile version (tenant-scoped read: the
+   * profile's organization scope must match, else NotFoundError).
+   */
   getProfileVersion(
     execution: ExecutionContext,
+    organizationScopeId: string,
     profileId: string,
     version: number,
   ): Promise<CreatorProfileVersion>;
+  /**
+   * List a profile's immutable version lineage (tenant-scoped read:
+   * the profile must resolve in the caller's organization scope,
+   * else NotFoundError — a foreign scope cannot enumerate the
+   * lineage).
+   */
   listProfileVersions(
     execution: ExecutionContext,
+    organizationScopeId: string,
     profileId: string,
   ): Promise<readonly CreatorProfileVersion[]>;
 }

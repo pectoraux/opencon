@@ -11,9 +11,13 @@ NET-W015 makes this boundary concrete. It owns:
 
 - **First-class creator profile records** — durable,
   organization-scoped, ANCHORED to a canonical person identity
-  (self-anchored; one profile per person per organization scope),
-  with an append-only event history and an administrative status
-  machine (`DRAFT → ACTIVE ⇄ PAUSED → ARCHIVED`).
+  (self-anchored; one profile per person per organization scope —
+  creation serialized under the
+  `creator_profile_anchor:{organizationScopeId}:{creatorPersonId}`
+  mutex so the invariant holds even for concurrent callers with
+  different idempotency keys), with an append-only event history and
+  an administrative status machine
+  (`DRAFT → ACTIVE ⇄ PAUSED → ARCHIVED`).
 - **Versioned profile sections** — immutable, append-only
   `CreatorProfileVersion` records (lineage mutex; version =
   latest+1) carrying ALL declared creator data: connected platforms,
@@ -27,6 +31,12 @@ NET-W015 makes this boundary concrete. It owns:
   one `production` reference per profile version (CRE-005), each
   verified against the canonical `/reputation` snapshot authority
   and stored as a reference (id + digest) only.
+
+Every read is tenant-scoped, including the ID-based reads (profile
+by id, version lineage, reputation resolution): a cross-scope id is
+indistinguishable from a nonexistent one (NotFoundError, no
+existence oracle). Mutations are owner-only — the acting person
+must BE the anchor person.
 
 ## Authority separation (the boundary's strongest constraint)
 

@@ -252,6 +252,7 @@ describe("NET-W015-AC-04 canonical reputation references", () => {
 
     const resolved = await harness.runtime.apiCommands.resolveCreatorReputation(
       ctx,
+      harness.organizationScopeId,
       profile.id,
     );
     expect(resolved.profileId).toBe(profile.id);

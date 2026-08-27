@@ -264,6 +264,7 @@ describe("NET-W015-AC-03 privacy and secret boundaries", () => {
     // Re-fetch through the committed path.
     const persisted = await harness.runtime.creatorService.getProfileVersion(
       ctx,
+      harness.organizationScopeId,
       profileId,
       1,
     );

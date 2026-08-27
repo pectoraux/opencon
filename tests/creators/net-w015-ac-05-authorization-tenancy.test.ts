@@ -203,12 +203,14 @@ describe("NET-W015-AC-05 authorization/tenancy/idempotency/concurrency/authority
     expect(versions).toEqual([1, 2, 3, 4]);
     const lineage = await harness.runtime.creatorService.listProfileVersions(
       ctx,
+      harness.organizationScopeId,
       profile.id,
     );
     expect(lineage.map((v) => v.version)).toEqual([1, 2, 3, 4]);
     // The pointer sits at the latest.
     const now = await harness.runtime.creatorService.getProfile(
       ctx,
+      harness.organizationScopeId,
       profile.id,
     );
     expect(now.currentVersion).toBe(4);
@@ -229,12 +231,14 @@ describe("NET-W015-AC-05 authorization/tenancy/idempotency/concurrency/authority
     // Committed reads through the authority boundary.
     const fetched = await harness.runtime.creatorService.getProfile(
       ctx,
+      harness.organizationScopeId,
       profile.id,
     );
     expect(fetched.displayName).toBe("Persisted Creator");
     const fetchedVersion =
       await harness.runtime.creatorService.getProfileVersion(
         ctx,
+        harness.organizationScopeId,
         profile.id,
         version.version,
       );
@@ -270,12 +274,14 @@ describe("NET-W015-AC-05 authorization/tenancy/idempotency/concurrency/authority
     ).rejects.toThrow(/does not resolve/);
     const untouched = await harness.runtime.creatorService.getProfile(
       ctx,
+      harness.organizationScopeId,
       profile.id,
     );
     expect(untouched.currentVersion).toBeNull();
     expect(untouched.events).toHaveLength(1);
     const lineage = await harness.runtime.creatorService.listProfileVersions(
       ctx,
+      harness.organizationScopeId,
       profile.id,
     );
     expect(lineage).toHaveLength(0);

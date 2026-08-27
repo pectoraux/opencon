@@ -254,6 +254,7 @@ describe("NET-W015-AC-06 provider neutrality", () => {
     });
     const persisted = await harness.runtime.creatorService.getProfileVersion(
       ctx,
+      harness.organizationScopeId,
       profile.id,
       1,
     );

@@ -159,11 +159,15 @@ reputation roles, profile events).
 - `GET /api/creators?organizationScopeId[&status]` — org listing
 - `GET /api/creators/by-person?organizationScopeId&creatorPersonId`
   — the anchor lookup
-- `GET /api/creators/:id` — the profile with its event history
-- `GET /api/creators/:id/versions` — the immutable version lineage
-- `GET /api/creators/:id/reputation` — resolve the current
-  version's references through the canonical `/reputation` snapshot
-  service (references only; the trust signal resolves on demand)
+- `GET /api/creators/:id?organizationScopeId` — the profile with its
+  event history (tenant-scoped: the organization scope is REQUIRED;
+  a cross-scope id is not found)
+- `GET /api/creators/:id/versions?organizationScopeId` — the
+  immutable version lineage (tenant-scoped as above)
+- `GET /api/creators/:id/reputation?organizationScopeId` — resolve
+  the current version's references through the canonical
+  `/reputation` snapshot service (references only; the trust signal
+  resolves on demand; tenant-scoped as above)
 
 ## Acceptance-criteria → test mapping
 
@@ -174,6 +178,7 @@ reputation roles, profile events).
 | 03 privacy/secret boundaries | tests/creators/net-w015-ac-03-privacy-secrets.test.ts (13 tests) | pass |
 | 04 reputation referenced not duplicated | tests/creators/net-w015-ac-04-reputation-reference.test.ts (8 tests) | pass |
 | 05 authz/tenancy/idempotency/concurrency/PG/audit | tests/creators/net-w015-ac-05-authorization-tenancy.test.ts (7 tests) | pass |
+| 05 PR #30 review remediation (anchor concurrency + tenant-scoped ID reads) | tests/creators/net-w015-remediation-anchor-concurrency-tenancy.test.ts (8 tests) | pass |
 | 06 provider neutrality | tests/creators/net-w015-ac-06-provider-neutrality.test.ts (6 tests) | pass |
 | 07 architecture/out-of-scope regression | tests/regression/net-w015-ac-07-architecture-out-of-scope.test.ts (10 tests) | pass |
 
@@ -188,3 +193,45 @@ describe check).
 `bun run verify` — typecheck PASS · `arch:check` 0 violations ·
 full unit suite green (the numbers recorded in the worklog at PR
 time).
+
+## PR #30 review remediation (CHANGES REQUESTED)
+
+The architect review found two blocking issues in the creator
+boundary; both are fixed on the same branch/PR:
+
+1. **Unique-anchor concurrency is now actually enforced.** The
+   in-tx unique check (`findByPersonWithinTx`) was correct but
+   unsynchronized: two concurrent creates for the same
+   `(organizationScopeId, creatorPersonId)` with DIFFERENT
+   idempotency keys could both read "no existing profile" from
+   their transaction snapshots and both insert. Creation is now
+   serialized under the unique-anchor mutex
+   `creator_profile_anchor:{organizationScopeId}:{creatorPersonId}`
+   (the NET-W007 dispute-subject / NET-W012 transaction-boundary
+   serialization pattern; anchor-mutex → idempotency-key-mutex lock
+   ordering, never reversed), held through the commit so the in-tx
+   re-check always observes the prior creator's COMMITTED profile.
+   Regression proof: a forced interleaving at the authoritative
+   boundary (the winner's transaction parked OPEN after its insert;
+   the rival launched at that moment — the NET-W012 interception
+   pattern) plus a plain 8-way `Promise.all` with distinct keys —
+   exactly one profile, one audit event, ConflictError for every
+   loser, deterministic same-key replay; mutation-checked (keying
+   the mutex on the idempotency key reproduces the duplicate and
+   fails the suite loudly).
+
+2. **Tenant isolation is complete on the ID-based reads.**
+   `getProfile` / `getProfileVersion` / `listProfileVersions` (and
+   the `resolveCreatorReputation` composite) now require the
+   organization scope: a caller who knows another tenant's profile
+   id gets NotFoundError — indistinguishable from a nonexistent id
+   (no existence oracle), never the profile, its version lineage or
+   its reputation references. The HTTP boundary mirrors the service:
+   `GET /api/creators/:id`, `GET /api/creators/:id/versions` and
+   `GET /api/creators/:id/reputation` REQUIRE the
+   `organizationScopeId` query parameter (absent → 400, cross-scope
+   → 404, same-scope → 200). Mutations remain owner-only (the
+   acting person must BE the anchor person — person-level
+   authorization subsumes tenancy there). Mutation-checked
+   (removing the scope gate fails all four tenant regressions
+   loudly).

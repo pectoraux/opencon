@@ -2269,9 +2269,14 @@ export interface ApiCommands {
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
 
-  /** Fetch a creator profile (public read). */
+  /**
+   * Fetch a creator profile by id WITHIN an organization scope
+   * (public read; tenant-scoped — a cross-scope id is not found; PR
+   * #30 review remediation).
+   */
   getCreatorProfile(
     execution: ExecutionContext,
+    organizationScopeId: string,
     id: string,
   ): Promise<Record<string, unknown> | null>;
 
@@ -2289,20 +2294,28 @@ export interface ApiCommands {
     statuses?: readonly string[],
   ): Promise<readonly Record<string, unknown>[]>;
 
-  /** List a creator profile's immutable versions (public read). */
+  /**
+   * List a creator profile's immutable versions (public read;
+   * tenant-scoped — the profile must resolve in the caller's
+   * organization scope).
+   */
   listCreatorProfileVersions(
     execution: ExecutionContext,
+    organizationScopeId: string,
     profileId: string,
   ): Promise<readonly Record<string, unknown>[]>;
 
   /**
    * Resolve the CURRENT profile version's reputation references
    * through the canonical /reputation snapshot service (public
-   * read) — the creator record stores references only; the trust
-   * signal resolves on demand from the authority that owns it.
+   * read; tenant-scoped — a foreign organization scope cannot
+   * resolve another tenant's creator reputation) — the creator
+   * record stores references only; the trust signal resolves on
+   * demand from the authority that owns it.
    */
   resolveCreatorReputation(
     execution: ExecutionContext,
+    organizationScopeId: string,
     profileId: string,
   ): Promise<{
     profileId: string;

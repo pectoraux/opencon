@@ -91,7 +91,15 @@ scope and ANCHORED to a canonical person id:
   (neutral lookup) and enforces ONE profile per (organizationScope,
   person) — the unique-anchor rule: a second person identity is never
   created and a person cannot hold two creator profiles in one org
-  (the identity-duplication guard). Idempotent
+  (the identity-duplication guard). CREATION IS SERIALIZED per
+  (organizationScope, person) under the unique-anchor mutex
+  `creator_profile_anchor:{organizationScopeId}:{creatorPersonId}`
+  (the NET-W007 subject-mutex / NET-W012 transaction-boundary
+  pattern) — held through the commit so the in-tx anchor re-check
+  (`findByPersonWithinTx`) always observes the prior creator's
+  COMMITTED profile, making the duplicate structurally impossible
+  even for concurrent callers with DIFFERENT idempotency keys (PR
+  #30 review remediation). Idempotent
   (`creator_profile:{org}:{key}`), transactionally audited
   (`creator_profile.created`), starts in `DRAFT` with an append-only
   event history.
@@ -186,16 +194,28 @@ it referenced).
 
 - Owner-only mutations (server-side actor from the execution
   context; non-owner → AuthorizationError).
-- Tenant isolation: every repository lookup is organization-scoped;
-  cross-org reads/mutations are refused (scope checked BEFORE
-  ownership so absence leaks nothing).
+- Tenant isolation: every repository lookup is organization-scoped,
+  INCLUDING the ID-based reads — `getProfile`, `getProfileVersion`,
+  `listProfileVersions` and the reputation resolution all resolve
+  records WITHIN the caller's organization scope (a cross-scope id
+  is indistinguishable from a nonexistent one: NotFoundError, no
+  existence oracle); cross-org reads/mutations are refused (scope
+  checked BEFORE ownership so absence leaks nothing). The HTTP
+  boundary mirrors this: the three ID-based GETs REQUIRE
+  `organizationScopeId` (absent → 400; cross-scope → 404) (PR #30
+  review remediation).
 - Idempotency: every mutation through `IdempotencyStore`
   .applyIdempotent with the `creator_*` key family; replays return
   `created: false` and the same record.
 - Concurrency: version monotonicity under the org-independent
   lineage mutex (parallel defines serialize — never fork);
-  unique-anchor creation is race-safe in-tx (`findByPersonWithinTx`
-  under the profile-anchor mutex).
+  unique-anchor creation is serialized by the
+  `creator_profile_anchor:{organizationScopeId}:{creatorPersonId}`
+  mutex wrapping the whole authoritative apply (anchor-mutex →
+  idempotency-key-mutex lock ordering, never reversed), with the
+  in-tx anchor re-check (`findByPersonWithinTx`) as the
+  authoritative gate — concurrent creates with different keys leave
+  exactly one profile.
 - PostgreSQL authority: profiles + versions persist through the
   authority boundary (`creators`, `creator_profile_versions`
   collections — authority-backed repositories; the file-backed shim
@@ -247,6 +267,7 @@ blockchain consensus, no economic mutation of any kind.
 | 03 | tests/creators/net-w015-ac-03-privacy-secrets.test.ts | credential-shaped + raw-audience-shaped keys rejected at any depth; aggregate-only audience shapes; structural source pins |
 | 04 | tests/creators/net-w015-ac-04-reputation-reference.test.ts | references verified against canonical snapshots (scope/person/digest/dimension); both roles required distinct; no score storage; reads resolve through the canonical authority |
 | 05 | tests/creators/net-w015-ac-05-authorization-tenancy.test.ts | owner-only mutations; tenant isolation; idempotent replays; lineage-mutex concurrency; PostgreSQL authority collections; atomic audit lineage |
+| 05 | tests/creators/net-w015-remediation-anchor-concurrency-tenancy.test.ts | PR #30 review remediation: concurrent creates with DIFFERENT idempotency keys leave exactly one profile (forced interleaving at the authoritative boundary + plain Promise.all); the anchor mutex does not over-serialize; cross-tenant profile/version/reputation reads are NotFoundError; the HTTP ID-based GETs require organizationScopeId (400/404/200) |
 | 06 | tests/creators/net-w015-ac-06-provider-neutrality.test.ts | no provider imports/names/SDK patterns in the domain; closed vocabularies; adapter composition points declared, not implemented |
 | 07 | tests/regression/net-w015-ac-07-architecture-out-of-scope.test.ts | arch check 0 violations; frozen specs unchanged; frozen vocabularies pinned UNCHANGED + new creator vocab pinned; no economic/reputation/AI/matching paths; file list; secret scan |
 
