@@ -76,6 +76,14 @@ import type {
   RiskState,
   RiskStateThresholds,
 } from "../core/risk.ts";
+import type {
+  DisputeControlDisposition,
+  DisputeKind,
+  DisputeOutcome,
+  DisputeStakeDisposition,
+  DisputeState,
+  DisputeSubjectType,
+} from "../core/disputes.ts";
 
 // ---------------------------------------------------------------------------
 // Risk signals (work order §3.2)
@@ -340,10 +348,16 @@ export interface RiskResolvedRiskRecordSource {
   readonly organizationScopeId: string;
 }
 
-/** Over this boundary's own records (signals + assessments). */
+/** Over this boundary's own records (signals + assessments + cases). */
 export interface RiskRecordLookup {
   resolveSignal(id: string): Promise<RiskResolvedRiskRecordSource | null>;
   resolveAssessment(id: string): Promise<RiskResolvedRiskRecordSource | null>;
+  /**
+   * NET-W010 (additive, non-breaking): a risk CASE is an
+   * authoritative prior decision — resolvable as a challenge subject
+   * and as a supporting source reference.
+   */
+  resolveCase(id: string): Promise<RiskResolvedRiskRecordSource | null>;
 }
 
 /** Over the NET-W007 reputation domain (read-only — never mutated here). */
@@ -933,15 +947,457 @@ export interface RiskControlService {
 }
 
 // ---------------------------------------------------------------------------
+// Challenges, disputes and appeals (NET-W010 work order §3.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * The subject a dispute is about: a prior decision / risk case /
+ * authoritative upstream record (work item §Scope). Resolution may
+ * challenge, suspend, route or request re-evaluation of the subject —
+ * it can never MUTATE the subject (authority separation, invariant 5:
+ * /evidence remains the truth authority, /settlement the economic
+ * authority, /workflows the lifecycle authority, /reputation the
+ * trust-signal authority).
+ */
+export interface DisputeSubjectRef {
+  readonly subjectType: DisputeSubjectType;
+  readonly subjectId: string;
+}
+
+/**
+ * Structural view of a resolved dispute subject, resolved through the
+ * NEUTRAL subject lookup (composition-root wired over the owning
+ * domains' repositories — never a domain-to-domain import).
+ *
+ *  - `anchorAt` is the subject's AUTHORITATIVE timestamp the challenge
+ *    window anchors to (deterministic eligibility, invariant 4 — each
+ *    subject kind's anchor is fixed by the adapter: economic value →
+ *    recordedAt, credit issuance → issuedAt, cash obligation →
+ *    recordedAt, contribution/proof_of_value/measured_outcome → their
+ *    recorded/submitted timestamp, risk case → its last decision's
+ *    recordedAt, risk control → activatedAt).
+ *  - `beneficiaryPersonId` is the subject's interested participant
+ *    (the conflict-of-interest check bars them from reviewing a
+ *    dispute about their own record). Null when the subject carries
+ *    no single beneficiary.
+ */
+export interface DisputeResolvedSubject {
+  readonly organizationScopeId: string;
+  readonly anchorAt: string;
+  readonly beneficiaryPersonId: string | null;
+  readonly state: string;
+}
+
+/** Over the subject-owning domains (read-only). */
+export interface DisputeSubjectLookup {
+  resolveSubject(
+    subjectType: string,
+    id: string,
+  ): Promise<DisputeResolvedSubject | null>;
+}
+
+/**
+ * Structural view of a stake resolved through the NEUTRAL stake
+ * lookup over the settlement boundary's stake repository (read-only —
+ * the disputes domain never posts or mutates stakes; it only
+ * VERIFIES the linkage when bonding and RECORDS the outcome after
+ * the settlement authority acted).
+ */
+export interface DisputeResolvedStake {
+  readonly organizationScopeId: string;
+  readonly ownerPersonId: string;
+  readonly amount: number;
+  readonly unit: string;
+  readonly state: string;
+  readonly purposeKind: string;
+  readonly purposeId: string;
+  readonly committedAt: string;
+}
+
+/** Over the settlement boundary's stake records (read-only). */
+export interface DisputeStakeLookup {
+  resolveStake(id: string): Promise<DisputeResolvedStake | null>;
+}
+
+export interface DisputeLookups {
+  readonly subject: RiskSubjectLookup;
+  readonly sources: RiskLookups;
+  readonly disputeSubject: DisputeSubjectLookup;
+  readonly stake: DisputeStakeLookup;
+}
+
+/** The dispute lifecycle events (append-only history entries). */
+export const DISPUTE_EVENTS = [
+  "requested",
+  "stake_bonded",
+  "withdrawn",
+  "review_started",
+  "rejected",
+  "resolved",
+  "appealed",
+  "stake_outcome_recorded",
+] as const;
+
+export type DisputeEventKind = (typeof DISPUTE_EVENTS)[number];
+
+export function isDisputeEventKind(value: string): value is DisputeEventKind {
+  return (DISPUTE_EVENTS as readonly string[]).includes(value);
+}
+
+/**
+ * One append-only event in a dispute's history. Actor identity is
+ * taken from the EXECUTION ACTOR (server-side; never
+ * caller-asserted — AUD-006 dispute audit lineage). Material events
+ * (rejected / resolved / appealed) require ≥1 supporting reference
+ * (evidence-backed material decisions).
+ */
+export interface DisputeEvent {
+  readonly id: string;
+  readonly event: DisputeEventKind;
+  readonly actorPersonId: string;
+  readonly reasonCodes: readonly string[];
+  readonly note: string | null;
+  /** Supporting references (signal / assessment / case / upstream records). */
+  readonly sourceRefs: readonly RiskSignalSourceRef[];
+  readonly recordedAt: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+}
+
+/**
+ * The dispute's explicit stake bookkeeping. The AMOUNT is the frozen
+ * requirement at open time; `stakeId` is the settlement authority's
+ * record bonded through the composition root; the recorded
+ * `disposition` mirrors what the settlement authority EXECUTED (the
+ * disputes domain never moves the escrow itself — invariant 1).
+ */
+export interface DisputeStakeBlock {
+  readonly requirement: { readonly amount: number; readonly unit: "credits" };
+  readonly stakeId: string | null;
+  readonly bondedAt: string | null;
+  readonly disposition: DisputeStakeDisposition | null;
+  readonly dispositionAt: string | null;
+}
+
+/** The immutable resolution block (set on RESOLVED — never rewritten). */
+export interface DisputeResolutionBlock {
+  readonly outcome: DisputeOutcome;
+  readonly controlDisposition: DisputeControlDisposition;
+  /** The DETERMINISTIC stake mapping (core: stakeDispositionForOutcome). */
+  readonly stakeDisposition: DisputeStakeDisposition;
+  readonly resolvedBy: string;
+  readonly resolvedAt: string;
+  readonly appealWindowExpiresAt: string;
+}
+
+/**
+ * A DisputeRecord — a first-class, durable, organization-scoped
+ * challenge or appeal with an immutable, append-only event history
+ * (work item: "immutable lifecycle history"; invariant 8).
+ *
+ * The `state` is derived from the event history (monotonic); appeals
+ * create a NEW linked record (`appealOfDisputeId`) and flip the
+ * original RESOLVED→APPEALED with an append-only event + forward
+ * pointer — the original's resolution block stays byte-identical.
+ */
+export interface DisputeRecord {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly kind: DisputeKind;
+  /** Set on APPEAL records: the dispute whose outcome is appealed. */
+  readonly appealOfDisputeId: string | null;
+  readonly challengerPersonId: string;
+  readonly subjectRef: DisputeSubjectRef;
+  /** The subject snapshot the deterministic eligibility gate used. */
+  readonly subjectAnchorAt: string;
+  readonly subjectBeneficiaryPersonId: string | null;
+  readonly statement: string;
+  readonly reasonCodes: readonly string[];
+  readonly supportingRefs: readonly RiskSignalSourceRef[];
+  readonly state: DisputeState;
+  readonly stake: DisputeStakeBlock;
+  readonly window: {
+    readonly challengeWindowExpiresAt: string;
+    readonly appealWindowExpiresAt: string | null;
+  };
+  readonly reviewerPersonId: string | null;
+  readonly reviewStartedAt: string | null;
+  readonly resolution: DisputeResolutionBlock | null;
+  /** Forward pointer to the appeal record (set when appealed). */
+  readonly appealDisputeId: string | null;
+  readonly events: readonly DisputeEvent[];
+  /** The recorded policy lineage (deterministic reproducibility). */
+  readonly policyVersion: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+export interface OpenDisputeInput {
+  readonly organizationScopeId: string;
+  /**
+   * The subject being challenged (prior decision / risk case /
+   * authoritative record).
+   */
+  readonly subjectRef: { readonly subjectType: string; readonly subjectId: string };
+  /** The challenger's statement of the challenge (required, non-empty). */
+  readonly statement: string;
+  readonly reasonCodes: readonly string[];
+  /** ≥1 supporting reference required (evidence-backed challenges). */
+  readonly supportingRefs: readonly { readonly kind: string; readonly id: string }[];
+  /**
+   * The EXPLICIT eligibility reference timestamp (deterministic —
+   * must fall within the subject's challenge window; no wall clock).
+   */
+  readonly effectiveAt: string;
+  readonly idempotencyKey: string;
+}
+
+export interface OpenDisputeResult {
+  readonly dispute: DisputeRecord;
+  /** false when a dispute with the same idempotency key already existed. */
+  readonly created: boolean;
+}
+
+export interface BondStakeInput {
+  readonly disputeId: string;
+  /** The settlement authority's stake record id (committed for this dispute). */
+  readonly stakeId: string;
+  readonly idempotencyKey: string;
+}
+
+export interface MarkStakeOutcomeInput {
+  readonly disputeId: string;
+  /** The outcome the settlement authority EXECUTED (RELEASE | FORFEIT). */
+  readonly disposition: string;
+  readonly stakeId: string;
+  readonly transactionId: string | null;
+  readonly idempotencyKey: string;
+}
+
+export interface StartDisputeReviewInput {
+  readonly disputeId: string;
+  readonly reasonCodes?: readonly string[];
+  readonly note?: string;
+  readonly idempotencyKey: string;
+}
+
+export interface RejectDisputeInput {
+  readonly disputeId: string;
+  readonly reasonCodes: readonly string[];
+  readonly note?: string;
+  /** ≥1 supporting reference required (material decision). */
+  readonly sourceRefs: readonly { readonly kind: string; readonly id: string }[];
+  readonly idempotencyKey: string;
+}
+
+export interface ResolveDisputeInput {
+  readonly disputeId: string;
+  /** UPHELD | DENIED | DISMISSED (the challenge's merits outcome). */
+  readonly outcome: string;
+  /** MAINTAIN_CONTROL | RELEASE_CONTROL | REQUIRE_REEVALUATION. */
+  readonly controlDisposition: string;
+  readonly reasonCodes: readonly string[];
+  readonly note?: string;
+  /** ≥1 supporting reference required (material decision). */
+  readonly sourceRefs: readonly { readonly kind: string; readonly id: string }[];
+  readonly idempotencyKey: string;
+}
+
+export interface AppealDisputeInput {
+  readonly disputeId: string;
+  readonly statement: string;
+  readonly reasonCodes: readonly string[];
+  /** ≥1 supporting reference required (material decision). */
+  readonly supportingRefs: readonly { readonly kind: string; readonly id: string }[];
+  /**
+   * The EXPLICIT eligibility reference timestamp (must fall within the
+   * appealed resolution's appeal window; no wall clock).
+   */
+  readonly effectiveAt: string;
+  readonly idempotencyKey: string;
+}
+
+export interface AppealDisputeResult {
+  /** The appealed original (state APPEALED, forward pointer set). */
+  readonly original: DisputeRecord;
+  /** The NEW linked appeal record (state PENDING_STAKE). */
+  readonly appeal: DisputeRecord;
+  readonly created: boolean;
+}
+
+export interface WithdrawDisputeInput {
+  readonly disputeId: string;
+  readonly reason?: string;
+  readonly idempotencyKey: string;
+}
+
+export interface DisputeRepository {
+  save(dispute: DisputeRecord, execution: ExecutionContext): Promise<DisputeRecord>;
+  findById(id: string): Promise<DisputeRecord | null>;
+  listByOrganization(
+    organizationScopeId: string,
+    states?: readonly string[],
+  ): Promise<readonly DisputeRecord[]>;
+  /** Live disputes (PENDING_STAKE/OPEN/UNDER_REVIEW) about a subject. */
+  findLiveBySubject(
+    organizationScopeId: string,
+    subjectType: string,
+    subjectId: string,
+  ): Promise<readonly DisputeRecord[]>;
+  /** In-transaction variant (duplicate-gate re-check inside the tx). */
+  findLiveBySubjectWithinTx(
+    organizationScopeId: string,
+    subjectType: string,
+    subjectId: string,
+    tx: AuthorityTransaction,
+  ): Promise<readonly DisputeRecord[]>;
+  /**
+   * The gate read: disputes in the ACTIVE states (OPEN/UNDER_REVIEW/
+   * APPEALED) whose subject id is in the given set — the composition
+   * root's dispute gate consults this read (lock invariant 21, the
+   * disputed half).
+   */
+  findActiveBySubjectIds(
+    organizationScopeId: string,
+    subjectIds: readonly string[],
+  ): Promise<readonly DisputeRecord[]>;
+  findByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<DisputeRecord | null>;
+  createWithinTx(
+    dispute: DisputeRecord,
+    tx: AuthorityTransaction,
+  ): Promise<DisputeRecord>;
+  /** Persist an updated dispute record (appended events + derived state). */
+  saveWithinTx(
+    dispute: DisputeRecord,
+    tx: AuthorityTransaction,
+  ): Promise<DisputeRecord>;
+}
+
+export interface DisputeService {
+  /**
+   * Open a dispute (the challenge request). Runs the DETERMINISTIC
+   * eligibility gate — actor is a person, the subject resolves
+   * same-scope with a valid anchor, `effectiveAt` is within the
+   * challenge window, no other LIVE dispute covers the subject,
+   * reason codes and supporting references are present — and commits
+   * the PENDING_STAKE record atomically with the `dispute.opened`
+   * audit event. The stake is NOT touched here (explicit bonding is
+   * a separate step through the settlement authority).
+   */
+  openDispute(
+    execution: ExecutionContext,
+    input: OpenDisputeInput,
+  ): Promise<OpenDisputeResult>;
+  /**
+   * Bond the committed stake to a PENDING_STAKE dispute ( verifier:
+   * same scope, owner == challenger, amount/unit match the frozen
+   * requirement, state COMMITTED, purpose links THIS dispute, bonded
+   * within the challenge window). Flips the state to OPEN atomically
+   * with the `dispute.stake_bonded` audit event.
+   */
+  bondStake(
+    execution: ExecutionContext,
+    input: BondStakeInput,
+  ): Promise<DisputeRecord>;
+  /**
+   * RECORD the stake outcome the settlement authority executed
+   * (release/forfeit) — append-only bookkeeping on the dispute; the
+   * escrow itself is never touched here. Commits atomically with the
+   * `dispute.stake_outcome_recorded` audit event.
+   */
+  markStakeOutcome(
+    execution: ExecutionContext,
+    input: MarkStakeOutcomeInput,
+  ): Promise<DisputeRecord>;
+  /**
+   * Start the review (OPEN → UNDER_REVIEW). The reviewer is the
+   * execution actor; the conflict-of-interest gate bars the
+   * challenger and the subject beneficiary. Commits atomically with
+   * the `dispute.review_started` audit event.
+   */
+  startReview(
+    execution: ExecutionContext,
+    input: StartDisputeReviewInput,
+  ): Promise<DisputeRecord>;
+  /**
+   * Reject the dispute as inadmissible (OPEN/UNDER_REVIEW →
+   * REJECTED; stake disposition deterministically RELEASE).
+   * Material decision: ≥1 supporting reference required. Commits
+   * atomically with the `dispute.rejected` audit event.
+   */
+  rejectDispute(
+    execution: ExecutionContext,
+    input: RejectDisputeInput,
+  ): Promise<DisputeRecord>;
+  /**
+   * Resolve the dispute on the merits (UNDER_REVIEW → RESOLVED).
+   * Records the outcome, the provider-neutral control disposition and
+   * the DETERMINISTIC stake mapping; the economic consequence itself
+   * executes through the settlement authority at the composition
+   * root AFTER this records the decision. Material decision: ≥1
+   * supporting reference required. Commits atomically with the
+   * `dispute.resolved` audit event.
+   */
+  resolveDispute(
+    execution: ExecutionContext,
+    input: ResolveDisputeInput,
+  ): Promise<DisputeRecord>;
+  /**
+   * Appeal a RESOLVED dispute's outcome within the appeal window: the
+   * ORIGINAL flips to terminal APPEALED (append-only event + forward
+   * pointer — its resolution stays byte-identical) and a NEW linked
+   * APPEAL record opens (PENDING_STAKE, its own stake cycle). The
+   * appellant is the execution actor (the original challenger or the
+   * subject beneficiary — the interested parties). Commits atomically
+   * with the `dispute.appealed` audit event.
+   */
+  appealDispute(
+    execution: ExecutionContext,
+    input: AppealDisputeInput,
+  ): Promise<AppealDisputeResult>;
+  /**
+   * Withdraw the dispute (PENDING_STAKE/OPEN → WITHDRAWN; only the
+   * challenger; stake disposition deterministically RELEASE when
+   * bonded). Commits atomically with the `dispute.withdrawn` audit
+   * event.
+   */
+  withdrawDispute(
+    execution: ExecutionContext,
+    input: WithdrawDisputeInput,
+  ): Promise<DisputeRecord>;
+  getDispute(execution: ExecutionContext, id: string): Promise<DisputeRecord>;
+  listDisputes(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    states?: readonly string[],
+  ): Promise<readonly DisputeRecord[]>;
+  /**
+   * The gate read (read-only): disputes in the ACTIVE states whose
+   * subject id is in the given set. Consumed by the composition
+   * root's dispute gate (never by any domain).
+   */
+  listActiveBySubjectIds(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    subjectIds: readonly string[],
+  ): Promise<readonly DisputeRecord[]>;
+}
+
+// ---------------------------------------------------------------------------
 // The boundary port
 // ---------------------------------------------------------------------------
 
 /**
  * The DisputesPort describes the boundary's readiness. After NET-W009
- * it is `"ready"` — the boundary carries the fraud/risk foundation
- * (signals, versioned deterministic policies, provenance-preserving
- * assessments, review cases, control decisions). NET-W010 will extend
- * it with staking, challenges and the dispute lifecycle.
+ * it carries the fraud/risk foundation (signals, versioned
+ * deterministic policies, provenance-preserving assessments, review
+ * cases, control decisions). NET-W010 extends it with the challenge/
+ * dispute/appeal lifecycle and stake bonding bookkeeping.
  */
 export interface DisputesPort {
   readonly boundary: "disputes";
@@ -955,6 +1411,14 @@ export interface DisputesPort {
     readonly riskCaseDecisionRecorded: "risk_case.decision_recorded";
     readonly riskControlActivated: "risk_control.activated";
     readonly riskControlResolved: "risk_control.resolved";
+    readonly disputeOpened: "dispute.opened";
+    readonly disputeStakeBonded: "dispute.stake_bonded";
+    readonly disputeReviewStarted: "dispute.review_started";
+    readonly disputeRejected: "dispute.rejected";
+    readonly disputeResolved: "dispute.resolved";
+    readonly disputeAppealed: "dispute.appealed";
+    readonly disputeWithdrawn: "dispute.withdrawn";
+    readonly disputeStakeOutcomeRecorded: "dispute.stake_outcome_recorded";
   };
 }
 
@@ -973,4 +1437,10 @@ export type {
   RiskSignalSourceKind,
   RiskState,
   RiskStateThresholds,
+  DisputeControlDisposition,
+  DisputeKind,
+  DisputeOutcome,
+  DisputeStakeDisposition,
+  DisputeState,
+  DisputeSubjectType,
 };

@@ -144,6 +144,14 @@ export async function resolveSources(
             (await lookups.risk.resolveAssessment(src.id))
               ?.organizationScopeId ?? null
           );
+        // NET-W010: a risk CASE is an authoritative prior decision —
+        // citable as a supporting reference by challenge/dispute
+        // records (and by risk case/control decisions).
+        case "risk_case":
+          return (
+            (await lookups.risk.resolveCase(src.id))?.organizationScopeId ??
+            null
+          );
         default:
           return null;
       }

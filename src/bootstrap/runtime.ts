@@ -205,11 +205,13 @@ import { createAuthorityRewardPolicyRepository } from "../settlement/authority-r
 import { createAuthorityRewardAllocationRepository } from "../settlement/authority-reward-repository.ts";
 import { createAuthorityCashObligationRepository } from "../settlement/authority-cash-repository.ts";
 import { createAuthorityConversionRepository } from "../settlement/authority-conversion-repository.ts";
+import { createAuthorityStakeRepository } from "../settlement/authority-stake-repository.ts";
 import { createEconomicValueService } from "../settlement/value-service.ts";
 import { createCreditService } from "../settlement/credit-service.ts";
 import { createRewardPolicyService, createRewardService } from "../settlement/reward-service.ts";
 import { createCashService } from "../settlement/cash-service.ts";
 import { createConversionService } from "../settlement/conversion-service.ts";
+import { createStakeService } from "../settlement/stake-service.ts";
 import { createEconomicLedgerService } from "../settlement/ledger-service.ts";
 import type {
   AllocateRewardsInput,
@@ -225,6 +227,7 @@ import type {
   RecordPendingValueInput,
   RewardPolicyService,
   RewardService,
+  StakeService,
 } from "../settlement/port.ts";
 
 // NET-W009 disputes boundary (the Phase-3 Trust domain): the fraud/risk
@@ -241,18 +244,24 @@ import { createAuthorityRiskPolicyRepository } from "../disputes/authority-polic
 import { createAuthorityRiskAssessmentRepository } from "../disputes/authority-assessment-repository.ts";
 import { createAuthorityRiskCaseRepository } from "../disputes/authority-case-repository.ts";
 import { createAuthorityRiskControlRepository } from "../disputes/authority-control-repository.ts";
+import { createAuthorityDisputeRepository } from "../disputes/authority-dispute-repository.ts";
 import { createRiskSignalService } from "../disputes/signal-service.ts";
 import { createRiskPolicyService } from "../disputes/policy-service.ts";
 import { createRiskAssessmentService } from "../disputes/assessment-service.ts";
 import { createRiskCaseService } from "../disputes/case-service.ts";
 import { createRiskControlService } from "../disputes/control-service.ts";
+import { createDisputeService } from "../disputes/dispute-service.ts";
 import type {
   ActivateRiskControlInput,
+  AppealDisputeInput,
   CreateRiskPolicyInput,
   CreateRiskSignalInput,
+  OpenDisputeInput,
   OpenRiskCaseInput,
   RecordRiskAssessmentInput,
   RecordRiskCaseDecisionInput,
+  RejectDisputeInput,
+  ResolveDisputeInput,
   ResolveRiskControlInput,
   RiskAssessmentService,
   RiskCaseService,
@@ -260,6 +269,7 @@ import type {
   RiskPolicyService,
   RiskSignalService,
   SupersedeRiskSignalInput,
+  DisputeService,
 } from "../disputes/port.ts";
 import type { RiskOperationClass } from "../core/risk.ts";
 
@@ -386,12 +396,16 @@ export interface Runtime {
   readonly cashService: CashService;
   readonly conversionService: ConversionService;
   readonly economicLedgerService: EconomicLedgerService;
+  // NET-W010 stake escrow (the settlement authority's stake commands).
+  readonly stakeService: StakeService;
   // NET-W009 disputes (fraud/risk foundation) services.
   readonly riskSignalService: RiskSignalService;
   readonly riskPolicyService: RiskPolicyService;
   readonly riskAssessmentService: RiskAssessmentService;
   readonly riskCaseService: RiskCaseService;
   readonly riskControlService: RiskControlService;
+  // NET-W010 disputes (challenges/disputes/appeals) service.
+  readonly disputeService: DisputeService;
   // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
   readonly idempotency: IdempotencyStore;
   initialize(): Promise<readonly { name: string; initialized: boolean }[]>;
@@ -1105,6 +1119,22 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   const economicLedgerService = createEconomicLedgerService({
     repository: economicLedgerRepo,
   });
+  // NET-W010 stake escrow: the settlement authority's stake commands
+  // (commit/release/forfeit). The /disputes boundary consumes these
+  // ONLY through composition-root orchestration (never a direct
+  // domain call) — /settlement stays the sole economic authority.
+  const stakeRepo = createAuthorityStakeRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
+  });
+  const stakeService = createStakeService({
+    stakeRepository: stakeRepo,
+    ledgerRepository: economicLedgerRepo,
+    subjectLookup: economicSubjectLookup,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("settlement"),
+  });
 
   // ------------------------------------------------------------------
   // NET-W009 disputes boundary wiring (fraud/risk foundation).
@@ -1237,6 +1267,12 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         ? { organizationScopeId: assessment.organizationScopeId }
         : null;
     },
+    // NET-W010: a risk CASE is an authoritative prior decision —
+    // resolvable as a challenge subject / supporting source.
+    async resolveCase(id: string) {
+      const riskCase = await riskCaseRepo.findById(id);
+      return riskCase ? { organizationScopeId: riskCase.organizationScopeId } : null;
+    },
   };
   const riskLookups = {
     subject: riskSubjectLookup,
@@ -1306,6 +1342,152 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   });
 
   // ------------------------------------------------------------------
+  // NET-W010 disputes wiring (challenges, disputes, appeals).
+  //
+  // The dispute subject lookup is a thin adapter over the OWNING
+  // domains' repositories (risk cases/controls here, contributions/
+  // PoV/outcomes/economic records above) returning the subject's
+  // deterministic eligibility anchor + interested beneficiary; the
+  // stake lookup is read-only over the settlement authority's stake
+  // records. The /disputes domain imports core contracts only —
+  // stake/economic EXECUTION happens through the stakeService at the
+  // composition-root commands below (never inside the disputes
+  // domain: no hidden economic authority).
+  // ------------------------------------------------------------------
+  const disputeSubjectLookup = {
+    async resolveSubject(subjectType: string, id: string) {
+      switch (subjectType) {
+        case "contribution": {
+          const contribution = await contributionRepo.findById(id);
+          return contribution
+            ? {
+                organizationScopeId: contribution.organizationScopeId,
+                anchorAt: contribution.createdAt,
+                beneficiaryPersonId: contribution.contributorId,
+                state: contribution.state,
+              }
+            : null;
+        }
+        case "proof_of_value": {
+          const pov = await proofOfValueRepo.findById(id);
+          return pov
+            ? {
+                organizationScopeId: pov.organizationScopeId,
+                anchorAt: pov.createdAt,
+                beneficiaryPersonId: pov.ownerId,
+                state: pov.state,
+              }
+            : null;
+        }
+        case "measured_outcome": {
+          const measurement = await measuredOutcomeRepo.findById(id);
+          return measurement
+            ? {
+                organizationScopeId: measurement.organizationScopeId,
+                anchorAt: measurement.createdAt,
+                beneficiaryPersonId: measurement.ownerId,
+                state: measurement.state,
+              }
+            : null;
+        }
+        case "economic_value": {
+          const value = await economicValueRepo.findById(id);
+          return value
+            ? {
+                organizationScopeId: value.organizationScopeId,
+                anchorAt: value.recordedAt,
+                beneficiaryPersonId: value.beneficiaryPersonId,
+                state: value.state,
+              }
+            : null;
+        }
+        case "credit_issuance": {
+          const issuance = await creditIssuanceRepo.findById(id);
+          return issuance
+            ? {
+                organizationScopeId: issuance.organizationScopeId,
+                anchorAt: issuance.issuedAt,
+                beneficiaryPersonId: issuance.beneficiaryPersonId,
+                state: issuance.status,
+              }
+            : null;
+        }
+        case "cash_obligation": {
+          const obligation = await cashObligationRepo.findById(id);
+          return obligation
+            ? {
+                organizationScopeId: obligation.organizationScopeId,
+                anchorAt: obligation.recordedAt,
+                beneficiaryPersonId: obligation.counterpartyPersonId,
+                state: obligation.status,
+              }
+            : null;
+        }
+        case "risk_case": {
+          const riskCase = await riskCaseRepo.findById(id);
+          if (!riskCase) return null;
+          const lastDecision =
+            riskCase.decisions[riskCase.decisions.length - 1] ?? null;
+          return {
+            organizationScopeId: riskCase.organizationScopeId,
+            anchorAt: lastDecision
+              ? lastDecision.recordedAt
+              : riskCase.openedAt,
+            beneficiaryPersonId: riskCase.subjectPersonId,
+            state: riskCase.state,
+          };
+        }
+        case "risk_control_decision": {
+          const control = await riskControlRepo.findById(id);
+          return control
+            ? {
+                organizationScopeId: control.organizationScopeId,
+                anchorAt: control.activatedAt,
+                beneficiaryPersonId: control.subjectPersonId,
+                state: control.state,
+              }
+            : null;
+        }
+        default:
+          return null;
+      }
+    },
+  };
+  const disputeStakeLookup = {
+    async resolveStake(id: string) {
+      const stake = await stakeRepo.findById(id);
+      return stake
+        ? {
+            organizationScopeId: stake.organizationScopeId,
+            ownerPersonId: stake.ownerPersonId,
+            amount: stake.amount,
+            unit: stake.unit,
+            state: stake.state,
+            purposeKind: stake.purpose.kind,
+            purposeId: stake.purpose.id,
+            committedAt: stake.committedAt,
+          }
+        : null;
+    },
+  };
+  const disputeRepo = createAuthorityDisputeRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("disputes").debug(m, f) },
+  });
+  const disputeService = createDisputeService({
+    repository: disputeRepo,
+    lookups: {
+      subject: riskSubjectLookup,
+      sources: riskLookups,
+      disputeSubject: disputeSubjectLookup,
+      stake: disputeStakeLookup,
+    },
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("disputes"),
+  });
+
+  // ------------------------------------------------------------------
   // NET-W009 §3.7 ECONOMIC GATE (the lock-invariant-21 enforcement
   // point). The composition root — NOT the risk domain, NOT the
   // settlement domain — consults the active-control registry before
@@ -1345,6 +1527,49 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
           organizationScopeId,
           recordSubjectId,
           personSubjectId,
+        },
+      });
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // NET-W010 DISPUTE GATE (lock invariant 21, the disputed half): a
+  // disputed claim cannot mature (or be consumed) until the dispute
+  // resolves. The composition root consults the dispute registry for
+  // ACTIVE disputes (OPEN/UNDER_REVIEW/APPEALED — a PENDING_STAKE
+  // request never freezes value: griefing resistance) whose subject
+  // covers the guarded record id OR any of its upstream source ids,
+  // and refuses the call. As with the risk gate: neither the disputes
+  // domain nor the settlement domain performs this check — the
+  // composition root owns the wiring, /settlement's code is untouched.
+  // ------------------------------------------------------------------
+  async function refuseWhenDisputed(
+    execution: import("../core/execution-context.ts").ExecutionContext,
+    organizationScopeId: string,
+    subjectIds: readonly string[],
+  ): Promise<void> {
+    if (subjectIds.length === 0) return;
+    const active = await disputeService.listActiveBySubjectIds(
+      execution,
+      organizationScopeId,
+      subjectIds,
+    );
+    if (active.length > 0) {
+      const { OpenConError: GateError } = await import("../core/errors.ts");
+      const dispute = active[0]!;
+      throw new GateError({
+        code: "DISPUTE_CHALLENGE",
+        classification: "precondition",
+        message: `operation is refused: active dispute ${dispute.id} (${dispute.state}, subject ${dispute.subjectRef.subjectType}:${dispute.subjectRef.subjectId}) covers this record`,
+        context: {
+          disputeId: dispute.id,
+          disputeState: dispute.state,
+          disputeKind: dispute.kind,
+          subjectType: dispute.subjectRef.subjectType,
+          subjectId: dispute.subjectRef.subjectId,
+          challengerPersonId: dispute.challengerPersonId,
+          activeDisputeIds: active.map((d) => d.id),
+          organizationScopeId,
         },
       });
     }
@@ -1740,6 +1965,57 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       resolvedBy: control.resolvedBy,
       resolvedAt: control.resolvedAt,
       resolvedViaCaseDecisionId: control.resolvedViaCaseDecisionId,
+    };
+  }
+  // NET-W010 view helpers (domain entity → API view).
+  function toDisputeView(
+    dispute: import("../disputes/port.ts").DisputeRecord,
+  ) {
+    return {
+      id: dispute.id,
+      organizationScopeId: dispute.organizationScopeId,
+      kind: dispute.kind,
+      appealOfDisputeId: dispute.appealOfDisputeId,
+      challengerPersonId: dispute.challengerPersonId,
+      subjectRef: dispute.subjectRef,
+      subjectAnchorAt: dispute.subjectAnchorAt,
+      subjectBeneficiaryPersonId: dispute.subjectBeneficiaryPersonId,
+      statement: dispute.statement,
+      reasonCodes: dispute.reasonCodes,
+      supportingRefs: dispute.supportingRefs as unknown as readonly {
+        kind: string;
+        id: string;
+      }[],
+      state: dispute.state,
+      stake: dispute.stake as unknown as {
+        requirement: { amount: number; unit: string };
+        stakeId: string | null;
+        bondedAt: string | null;
+        disposition: string | null;
+        dispositionAt: string | null;
+      },
+      window: dispute.window,
+      reviewerPersonId: dispute.reviewerPersonId,
+      reviewStartedAt: dispute.reviewStartedAt,
+      resolution: dispute.resolution as unknown as Record<string, unknown> | null,
+      appealDisputeId: dispute.appealDisputeId,
+      events: dispute.events as unknown as readonly Record<string, unknown>[],
+      policyVersion: dispute.policyVersion,
+    };
+  }
+  function toStakeView(stake: import("../settlement/port.ts").EconomicStake) {
+    return {
+      id: stake.id,
+      organizationScopeId: stake.organizationScopeId,
+      ownerPersonId: stake.ownerPersonId,
+      amount: stake.amount,
+      unit: stake.unit,
+      state: stake.state,
+      purpose: stake.purpose as unknown as { kind: string; id: string },
+      committedAt: stake.committedAt,
+      outcome: stake.outcome as unknown as Record<string, unknown> | null,
+      transactionId: stake.transactionId,
+      description: stake.description,
     };
   }
 
@@ -2690,6 +2966,13 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         gated.id,
         gated.beneficiaryPersonId,
       );
+      // NET-W010 dispute gate (lock invariant 21, disputed half): an
+      // ACTIVE dispute covering this record OR any of its upstream
+      // sources refuses the maturation until the dispute resolves.
+      await refuseWhenDisputed(execution, gated.organizationScopeId, [
+        gated.id,
+        ...gated.sources.map((s) => s.id),
+      ]);
       const value = await economicValueService.matureValue(execution, {
         valueRecordId: input.valueRecordId,
         ...(input.effectiveAt !== undefined
@@ -2720,6 +3003,16 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         input.sourceValueRecordId,
         input.beneficiaryPersonId,
       );
+      // NET-W010 dispute gate: an ACTIVE dispute covering the source
+      // record or its upstream sources refuses the consumption.
+      const gatedValue = await economicValueService.getValue(
+        execution,
+        input.sourceValueRecordId,
+      );
+      await refuseWhenDisputed(execution, gatedValue.organizationScopeId, [
+        gatedValue.id,
+        ...gatedValue.sources.map((s) => s.id),
+      ]);
       const result = await creditService.issueCredits(execution, {
         organizationScopeId: input.organizationScopeId,
         beneficiaryPersonId: input.beneficiaryPersonId,
@@ -2811,6 +3104,12 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         input.sourceValueRecordId,
         gatedValue.beneficiaryPersonId,
       );
+      // NET-W010 dispute gate: an ACTIVE dispute covering the source
+      // record or its upstream sources refuses the consumption.
+      await refuseWhenDisputed(execution, gatedValue.organizationScopeId, [
+        gatedValue.id,
+        ...gatedValue.sources.map((s) => s.id),
+      ]);
       const result = await rewardService.allocateRewards(execution, {
         organizationScopeId: input.organizationScopeId,
         sourceValueRecordId: input.sourceValueRecordId,
@@ -3439,6 +3738,233 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         },
       };
     },
+
+    // -- NET-W010 dispute commands ---------------------------------------
+    //
+    // COMPOSITION-ROOT ORCHESTRATION (the authority-separation
+    // pattern): the dispute domain records decisions; the settlement
+    // authority moves the stake; the composition root sequences them
+    // with COMPOUND idempotency keys (`${key}:stake`, `${key}:bond`,
+    // …) so a retried composite replays each step idempotently (the
+    // NET-W009 applyWorkflowHold precedent). The /disputes domain
+    // code never calls /settlement.
+
+    async openDispute(execution, _actorPersonId, input) {
+      const result = await disputeService.openDispute(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+        subjectRef: input.subjectRef as unknown as OpenDisputeInput["subjectRef"],
+        statement: input.statement as string,
+        reasonCodes: input.reasonCodes as readonly string[],
+        supportingRefs:
+          input.supportingRefs as unknown as OpenDisputeInput["supportingRefs"],
+        effectiveAt: input.effectiveAt as string,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return { dispute: toDisputeView(result.dispute), created: result.created };
+    },
+
+    async bondDisputeStake(execution, actorPersonId, input) {
+      // 1. Verify the dispute is bondable by this actor (the dispute
+      //    service re-verifies everything in-transaction).
+      const dispute = await disputeService.getDispute(
+        execution,
+        input.disputeId as string,
+      );
+      // 2. THE STAKE through the settlement authority (the economic
+      //    authority — never the disputes domain).
+      const staked = await stakeService.commitStake(execution, {
+        organizationScopeId: dispute.organizationScopeId,
+        ownerPersonId: dispute.challengerPersonId,
+        amount: dispute.stake.requirement.amount,
+        purpose: { kind: "dispute_challenge", id: dispute.id },
+        description: `challenge stake for dispute ${dispute.id}`,
+        idempotencyKey: `${input.idempotencyKey}:stake`,
+      });
+      // 3. Bond it to the dispute (verifies owner/amount/state/purpose
+      //    linkage + the window through the read-only stake lookup).
+      const bonded = await disputeService.bondStake(execution, {
+        disputeId: dispute.id,
+        stakeId: staked.stake.id,
+        idempotencyKey: `${input.idempotencyKey}:bond`,
+      });
+      void actorPersonId;
+      return { dispute: toDisputeView(bonded), stake: toStakeView(staked.stake) };
+    },
+
+    async startDisputeReview(execution, _actorPersonId, input) {
+      const updated = await disputeService.startReview(execution, {
+        disputeId: input.disputeId as string,
+        ...(input.reasonCodes !== undefined
+          ? { reasonCodes: input.reasonCodes as readonly string[] }
+          : {}),
+        ...(input.note !== undefined ? { note: input.note as string } : {}),
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toDisputeView(updated);
+    },
+
+    async rejectDispute(execution, _actorPersonId, input) {
+      // 1. The dispute decision (REJECTED — inadmissible; the stake
+      //    disposition is deterministically RELEASE).
+      const rejected = await disputeService.rejectDispute(execution, {
+        disputeId: input.disputeId as string,
+        reasonCodes: input.reasonCodes as readonly string[],
+        ...(input.note !== undefined ? { note: input.note as string } : {}),
+        sourceRefs:
+          input.sourceRefs as unknown as RejectDisputeInput["sourceRefs"],
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      // 2. The economic consequence through the settlement authority
+      //    (release the challenger's stake), then 3. record the
+      //    outcome on the dispute (append-only bookkeeping).
+      let dispute = rejected;
+      let stakeView: ReturnType<typeof toStakeView> | null = null;
+      if (rejected.stake.stakeId !== null) {
+        const released = await stakeService.releaseStake(execution, {
+          stakeId: rejected.stake.stakeId,
+          reason: `dispute ${rejected.id} rejected (inadmissible)`,
+          idempotencyKey: `${input.idempotencyKey}:release`,
+        });
+        dispute = await disputeService.markStakeOutcome(execution, {
+          disputeId: rejected.id,
+          disposition: "RELEASE",
+          stakeId: released.id,
+          transactionId: released.outcome?.transactionId ?? null,
+          idempotencyKey: `${input.idempotencyKey}:record`,
+        });
+        stakeView = toStakeView(released);
+      }
+      return { dispute: toDisputeView(dispute), ...(stakeView !== null ? { stake: stakeView } : {}) };
+    },
+
+    async resolveDispute(execution, _actorPersonId, input) {
+      // 1. The dispute decision on the merits (records the outcome,
+      //    the control disposition and the DETERMINISTIC stake
+      //    mapping — the reviewer cannot override it).
+      const resolved = await disputeService.resolveDispute(execution, {
+        disputeId: input.disputeId as string,
+        outcome: input.outcome as string,
+        controlDisposition: input.controlDisposition as string,
+        reasonCodes: input.reasonCodes as readonly string[],
+        ...(input.note !== undefined ? { note: input.note as string } : {}),
+        sourceRefs:
+          input.sourceRefs as unknown as ResolveDisputeInput["sourceRefs"],
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      // 2. The economic consequence through the settlement authority
+      //    (release or forfeit per the deterministic mapping), then
+      //    3. record the outcome on the dispute.
+      let dispute = resolved;
+      let stakeView: ReturnType<typeof toStakeView> | null = null;
+      if (
+        resolved.stake.stakeId !== null &&
+        resolved.resolution !== null &&
+        resolved.resolution.stakeDisposition !== "NONE"
+      ) {
+        const disposition = resolved.resolution.stakeDisposition;
+        const stake =
+          disposition === "FORFEIT"
+            ? await stakeService.forfeitStake(execution, {
+                stakeId: resolved.stake.stakeId,
+                reason: `dispute ${resolved.id} resolved ${resolved.resolution.outcome} (challenge DENIED)`,
+                idempotencyKey: `${input.idempotencyKey}:forfeit`,
+              })
+            : await stakeService.releaseStake(execution, {
+                stakeId: resolved.stake.stakeId,
+                reason: `dispute ${resolved.id} resolved ${resolved.resolution.outcome}`,
+                idempotencyKey: `${input.idempotencyKey}:release`,
+              });
+        dispute = await disputeService.markStakeOutcome(execution, {
+          disputeId: resolved.id,
+          disposition,
+          stakeId: stake.id,
+          transactionId: stake.outcome?.transactionId ?? null,
+          idempotencyKey: `${input.idempotencyKey}:record`,
+        });
+        stakeView = toStakeView(stake);
+      }
+      return { dispute: toDisputeView(dispute), ...(stakeView !== null ? { stake: stakeView } : {}) };
+    },
+
+    async appealDispute(execution, _actorPersonId, input) {
+      const result = await disputeService.appealDispute(execution, {
+        disputeId: input.disputeId as string,
+        statement: input.statement as string,
+        reasonCodes: input.reasonCodes as readonly string[],
+        supportingRefs:
+          input.supportingRefs as unknown as AppealDisputeInput["supportingRefs"],
+        effectiveAt: input.effectiveAt as string,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return {
+        original: toDisputeView(result.original),
+        appeal: toDisputeView(result.appeal),
+        created: result.created,
+      };
+    },
+
+    async withdrawDispute(execution, _actorPersonId, input) {
+      // 1. The challenger's withdrawal (stake disposition
+      //    deterministically RELEASE when bonded).
+      const withdrawn = await disputeService.withdrawDispute(execution, {
+        disputeId: input.disputeId as string,
+        ...(input.reason !== undefined ? { reason: input.reason as string } : {}),
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      // 2. Release the bonded stake through the settlement authority,
+      //    then 3. record the outcome on the dispute.
+      let dispute = withdrawn;
+      let stakeView: ReturnType<typeof toStakeView> | null = null;
+      if (withdrawn.stake.stakeId !== null) {
+        const released = await stakeService.releaseStake(execution, {
+          stakeId: withdrawn.stake.stakeId,
+          reason: `dispute ${withdrawn.id} withdrawn by the challenger`,
+          idempotencyKey: `${input.idempotencyKey}:release`,
+        });
+        dispute = await disputeService.markStakeOutcome(execution, {
+          disputeId: withdrawn.id,
+          disposition: "RELEASE",
+          stakeId: released.id,
+          transactionId: released.outcome?.transactionId ?? null,
+          idempotencyKey: `${input.idempotencyKey}:record`,
+        });
+        stakeView = toStakeView(released);
+      }
+      return { dispute: toDisputeView(dispute), ...(stakeView !== null ? { stake: stakeView } : {}) };
+    },
+
+    async getDispute(execution, id) {
+      try {
+        const dispute = await disputeService.getDispute(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toDisputeView(dispute);
+      } catch {
+        return null;
+      }
+    },
+
+    async listDisputes(execution, organizationScopeId, states) {
+      const disputes = await disputeService.listDisputes(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        states,
+      );
+      return disputes.map(toDisputeView);
+    },
+
+    async getStake(execution, id) {
+      try {
+        const stake = await stakeService.getStake(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toStakeView(stake);
+      } catch {
+        return null;
+      }
+    },
   };
 
   const registry = createModuleRegistry(snapshot, logger);
@@ -3557,12 +4083,16 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     cashService,
     conversionService,
     economicLedgerService,
+    // NET-W010 stake escrow.
+    stakeService,
     // NET-W009 disputes (fraud/risk foundation) services.
     riskSignalService,
     riskPolicyService,
     riskAssessmentService,
     riskCaseService,
     riskControlService,
+    // NET-W010 disputes (challenges/disputes/appeals) service.
+    disputeService,
     // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
     idempotency,
     async initialize() {

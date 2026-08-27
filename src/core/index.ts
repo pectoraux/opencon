@@ -75,3 +75,8 @@ export * from "./economics.ts";
 // items (NET-W010 challenges/disputes, NET-W013 moderation, NET-W021
 // advertising fraud) consume the vocabulary.
 export * from "./risk.ts";
+// NET-W010 shared challenge/dispute vocabulary (kinds, states, outcomes,
+// control/stake dispositions, subject types, deterministic window math
+// with explicit timestamps). The /disputes domain implements the
+// behaviour; /settlement consumes the stake purpose kinds.
+export * from "./disputes.ts";

@@ -167,6 +167,15 @@ export interface EconomicMaturationPolicy {
  * account against which value is recognized, credits are minted and
  * cash obligations are booked — it keeps every transaction balanced
  * per unit.
+ *
+ * NET-W010 (additive, non-breaking): `stake_escrow` is the
+ * person-owned, credit-normal encumbrance account for challenge
+ * participation stakes — committing a stake debits the person's
+ * `credits` and credits their `stake_escrow` (the amount stays
+ * visible as the participant's locked commitment; releasing moves it
+ * back; forfeiting moves it to `protocol_recognition(credits)`). The
+ * /settlement StakeService owns every posting; the /disputes domain
+ * only records intent and outcome references.
  */
 export const ECONOMIC_ACCOUNT_KINDS = [
   "pending_value",
@@ -176,6 +185,7 @@ export const ECONOMIC_ACCOUNT_KINDS = [
   "cash_payable",
   "cash_receivable",
   "protocol_recognition",
+  "stake_escrow",
 ] as const;
 
 export type EconomicAccountKind = (typeof ECONOMIC_ACCOUNT_KINDS)[number];
@@ -204,6 +214,7 @@ export function economicAccountNormalSide(
     case "credits":
     case "rewards":
     case "cash_payable":
+    case "stake_escrow":
       return "credit";
   }
 }
@@ -224,6 +235,7 @@ export function economicAccountUnit(kind: EconomicAccountKind): EconomicUnitType
     case "rewards":
       return "value";
     case "credits":
+    case "stake_escrow":
       return "credits";
     case "cash_payable":
     case "cash_receivable":
@@ -247,6 +259,13 @@ export function isEconomicEntryDirection(
 /**
  * The kinds of ledger transaction (each maps to exactly one authorized
  * economic command — value/credits never move outside these).
+ *
+ * NET-W010 (additive, non-breaking): the three stake commands —
+ * `stake_commit` (encumber credits into the owner's stake escrow),
+ * `stake_release` (return the escrow to the owner's credits) and
+ * `stake_forfeit` (move the escrow to protocol recognition — the
+ * unsuccessful-challenge penalty). Each balances per unit like every
+ * other kind; the /disputes domain can never post these directly.
  */
 export const ECONOMIC_LEDGER_TX_KINDS = [
   "value_recognition",
@@ -257,6 +276,9 @@ export const ECONOMIC_LEDGER_TX_KINDS = [
   "cash_accounting",
   "conversion",
   "settlement",
+  "stake_commit",
+  "stake_release",
+  "stake_forfeit",
 ] as const;
 
 export type EconomicLedgerTxKind = (typeof ECONOMIC_LEDGER_TX_KINDS)[number];
@@ -269,6 +291,42 @@ export function isEconomicLedgerTxKind(
 
 /** Cash obligation kinds (work order §3.6). */
 export const ECONOMIC_CASH_KINDS = ["payable", "receivable"] as const;
+
+/**
+ * The stake-record lifecycle states (NET-W010 §3.2). A stake is
+ * `COMMITTED` while it encumbers the owner's credits in escrow;
+ * `RELEASED` (returned to the owner) and `FORFEITED` (moved to
+ * protocol recognition) are terminal and append-only — the outcome
+ * lineage (reason + transaction) is carried on the record, never a
+ * destructive rewrite.
+ */
+export const ECONOMIC_STAKE_STATES = [
+  "COMMITTED",
+  "RELEASED",
+  "FORFEITED",
+] as const;
+
+export type EconomicStakeState = (typeof ECONOMIC_STAKE_STATES)[number];
+
+export function isEconomicStakeState(value: string): value is EconomicStakeState {
+  return (ECONOMIC_STAKE_STATES as readonly string[]).includes(value);
+}
+
+/**
+ * The purposes a stake may be committed for. NET-W010 ships exactly
+ * one: `dispute_challenge` (challenge/appeal participation, per the
+ * NET-W010 work item). The purpose is the linkage the disputes
+ * boundary verifies when a stake is bonded to a dispute record.
+ */
+export const ECONOMIC_STAKE_PURPOSE_KINDS = ["dispute_challenge"] as const;
+
+export type EconomicStakePurposeKind = (typeof ECONOMIC_STAKE_PURPOSE_KINDS)[number];
+
+export function isEconomicStakePurposeKind(
+  value: string,
+): value is EconomicStakePurposeKind {
+  return (ECONOMIC_STAKE_PURPOSE_KINDS as readonly string[]).includes(value);
+}
 
 export type EconomicCashKind = (typeof ECONOMIC_CASH_KINDS)[number];
 

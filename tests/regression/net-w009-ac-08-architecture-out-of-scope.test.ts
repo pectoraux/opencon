@@ -5,12 +5,12 @@
  * unchanged, the disputes domain (the Phase-3 Trust boundary — see the
  * NET-W009 work order §2 placement decision) carries NO out-of-scope
  * behaviour (no economic mutation — it cannot mint/destroy/transfer
- * value or credits; no reputation mutation; no staking/challenges/
- * dispute lifecycle — NET-W010; no provider-specific fraud SDK
- * semantics; no decentralized fraud consensus), the gates stay at the
- * composition root (the risk domain never imports /workflows or
- * /settlement), and the domain remains provider-independent (core +
- * self only).
+ * value or credits; no reputation mutation; no provider-specific
+ * fraud SDK semantics; no decentralized fraud consensus; the
+ * challenge/dispute/staking lifecycle is NET-W010 — asserted by the
+ * net-w010-ac-08 regression), the gates stay at the composition root
+ * (the risk domain never imports /workflows or /settlement), and the
+ * domain remains provider-independent (core + self only).
  *
  * Evidence: static architecture check + regression tests.
  */
@@ -91,12 +91,19 @@ describe("NET-W009-AC-08 architecture/out-of-scope regression", () => {
     expect(disputesModule.describe?.() ?? "").not.toMatch(/skeleton/i);
   });
 
-  test("the disputes domain introduces NO out-of-scope patterns (economic mutation / reputation mutation / staking / challenge lifecycle / provider fraud SDKs / decentralized consensus)", async () => {
+  test("the disputes domain introduces NO out-of-scope patterns (economic mutation / reputation mutation / provider fraud SDKs / decentralized consensus)", async () => {
     const files = await listTsFiles(join(SRC, "disputes"));
     expect(files.length).toBeGreaterThan(0);
     // Patterns that would indicate hidden economic or reputation
-    // authority, NET-W010 scope, or provider/decentralized semantics
-    // inside the risk foundation.
+    // authority, or provider/decentralized semantics inside the risk
+    // foundation. NET-W010 AMENDMENT: `bondStake` (the audited
+    // dispute-side bookkeeping command that VERIFIES the settlement
+    // authority's stake record) and `resolveDispute` (the audited
+    // merits-resolution command) are now LEGITIMATE /disputes
+    // identifiers — the stake COMMANDS (commit/release/forfeit) remain
+    // forbidden here (they live in /settlement only; the
+    // net-w010-ac-08 regression asserts both sides). The stake
+    // POSTING path never enters this boundary.
     const forbidden: RegExp[] = [
       /\bissueCredits?\b/i,
       /\bmintCredit/i,
@@ -109,10 +116,8 @@ describe("NET-W009-AC-08 architecture/out-of-scope regression", () => {
       /\brecordReputationInput\b/,
       /\brecordSnapshot\b/,
       /\brequestTransition\b/,
-      /\bbondStake\b/i,
       /\bslashStake\b/i,
       /\bopenChallenge\b/i,
-      /\bresolveDispute\b/i,
       /\bfrom\s+["']pg["']/,
       /\bfrom\s+["']ioredis["']/,
       /openrtb/i,
