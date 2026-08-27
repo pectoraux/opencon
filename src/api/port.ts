@@ -2213,6 +2213,104 @@ export interface ApiCommands {
   }[]>;
 
   // -----------------------------------------------------------------
+  // NET-W015 — creator identity and preferences (issue #29).
+  // -----------------------------------------------------------------
+
+  /**
+   * Create a creator profile anchored to the acting person's
+   * canonical identity (protected; self-anchored; unique per person
+   * per organization scope; DRAFT).
+   */
+  createCreatorProfile(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ profile: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Define the next immutable creator profile version — ALL declared
+   * sections (platforms, audience aggregates, commercial
+   * preferences, rights, restrictions, availability, participation
+   * rules, reputation references) at once (protected; owner-only;
+   * every reputation reference verified against the canonical
+   * /reputation authority).
+   */
+  defineCreatorProfileVersion(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ version: Record<string, unknown>; created: boolean }>;
+
+  /** Activate a creator profile (protected; owner-only). */
+  activateCreatorProfile(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /** Pause a creator profile (protected; owner-only). */
+  pauseCreatorProfile(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /** Resume a creator profile (protected; owner-only). */
+  resumeCreatorProfile(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /** Archive a creator profile (protected; owner-only; terminal). */
+  archiveCreatorProfile(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /** Fetch a creator profile (public read). */
+  getCreatorProfile(
+    execution: ExecutionContext,
+    id: string,
+  ): Promise<Record<string, unknown> | null>;
+
+  /** Fetch the creator profile anchored to a person in an org (public read). */
+  getCreatorProfileByPerson(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    creatorPersonId: string,
+  ): Promise<Record<string, unknown> | null>;
+
+  /** List an org's creator profiles, optionally by status (public read). */
+  listCreatorProfiles(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    statuses?: readonly string[],
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /** List a creator profile's immutable versions (public read). */
+  listCreatorProfileVersions(
+    execution: ExecutionContext,
+    profileId: string,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /**
+   * Resolve the CURRENT profile version's reputation references
+   * through the canonical /reputation snapshot service (public
+   * read) — the creator record stores references only; the trust
+   * signal resolves on demand from the authority that owns it.
+   */
+  resolveCreatorReputation(
+    execution: ExecutionContext,
+    profileId: string,
+  ): Promise<{
+    profileId: string;
+    currentVersion: number | null;
+    references: readonly Record<string, unknown>[];
+  }>;
+
+  // -----------------------------------------------------------------
   // NET-W012 — helpful contributions (Proof-of-Helpfulness).
   // -----------------------------------------------------------------
 

@@ -103,3 +103,14 @@ export * from "./campaigns.ts";
 // the behaviour; NET-W013 (moderation) and NET-W014 (reward
 // integration) consume the verified-usefulness claim.
 export * from "./contributions.ts";
+
+// NET-W015 (creators): the creator vocabulary (the profile status
+// machine, the closed provider-neutral platform-kind/content-format/
+// audience-band/rate-unit/rights-kind vocabularies, the CRE-005
+// reputation reference roles, and the PURE privacy/secret guards —
+// the credential-shaped and raw-audience-shaped key scans that make
+// secret and raw-audience material structurally unable to enter
+// creator records). The /creators domain implements the behaviour;
+// later work items (creator matching NET-W016, UGC/rights NET-W017,
+// sponsorship/disclosure NET-W018) consume the declared sections.
+export * from "./creators.ts";

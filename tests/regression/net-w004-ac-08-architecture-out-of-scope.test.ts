@@ -65,8 +65,14 @@ const NET_W004_DOMAINS = ["opportunities", "contributions", "workflows"];
 // same way; the NET-W004 intent — NET-W004 itself introduced NO
 // campaign behaviour — is preserved (the campaign domain arrives only
 // with the NET-W011 work item + its own AC-07 regression).
+// NET-W015 UPDATE: creators is implemented by NET-W015 (the creator
+// domain — profile anchors + versioned preference sections +
+// canonical reputation references) and left this list the same way;
+// the NET-W004 intent — NET-W004 itself introduced NO creator
+// behaviour — is preserved (the creator domain arrives only with the
+// NET-W015 work item + its own AC-07 regression).
 const DEFERRED_DOMAINS = [
-  "inventory", "creators", "demand", "benefits",
+  "inventory", "demand", "benefits",
 ];
 
 async function listTsFiles(dir: string, out: string[] = []): Promise<string[]> {

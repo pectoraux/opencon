@@ -2654,6 +2654,205 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
     }
 
     // ------------------------------------------------------------------
+    // NET-W015 — creator identity and preferences.
+    // ------------------------------------------------------------------
+
+    // POST /api/creators — create a creator profile anchored to the
+    // acting person's canonical identity (protected; self-anchored;
+    // unique per person per organization scope).
+    if (path === "/api/creators" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "creators.profile.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createCreatorProfile(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          creatorPersonId: strField(obj, "creatorPersonId"),
+          displayName: strField(obj, "displayName"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/creators/:id/versions — define the next immutable
+    // profile version (protected; owner-only).
+    if (
+      path.startsWith("/api/creators/") &&
+      path.endsWith("/versions") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "creators.version.define", "*", res);
+      if (!guarded) return true;
+      const profileId = path.slice("/api/creators/".length, -"/versions".length);
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.defineCreatorProfileVersion(guarded.execution, guarded.personId, {
+          profileId,
+          sections: objField(obj, "sections"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/creators/:id/activate|pause|resume|archive — the
+    // administrative status machine (protected; owner-only).
+    for (const [suffix, action] of [
+      ["activate", "creators.status.activate"],
+      ["pause", "creators.status.pause"],
+      ["resume", "creators.status.resume"],
+      ["archive", "creators.status.archive"],
+    ] as const) {
+      if (
+        path.startsWith("/api/creators/") &&
+        path.endsWith(`/${suffix}`) &&
+        method === "POST" &&
+        opts.commands
+      ) {
+        const commands = opts.commands;
+        const guarded = await guardMutation(ctx, req, action, "*", res);
+        if (!guarded) return true;
+        const profileId = path.slice(
+          "/api/creators/".length,
+          -`/${suffix}`.length,
+        );
+        const body = await readBody(req);
+        const obj = requireBodyObject(body);
+        const view = await runWithExecutionContextAsync(guarded.execution, () =>
+          suffix === "activate"
+            ? commands.activateCreatorProfile(guarded.execution, guarded.personId, {
+                profileId,
+                ...(obj.reason !== undefined ? { reason: String(obj.reason) } : {}),
+                idempotencyKey: strField(obj, "idempotencyKey"),
+              })
+            : suffix === "pause"
+              ? commands.pauseCreatorProfile(guarded.execution, guarded.personId, {
+                  profileId,
+                  ...(obj.reason !== undefined ? { reason: String(obj.reason) } : {}),
+                  idempotencyKey: strField(obj, "idempotencyKey"),
+                })
+              : suffix === "resume"
+                ? commands.resumeCreatorProfile(guarded.execution, guarded.personId, {
+                    profileId,
+                    ...(obj.reason !== undefined ? { reason: String(obj.reason) } : {}),
+                    idempotencyKey: strField(obj, "idempotencyKey"),
+                  })
+                : commands.archiveCreatorProfile(guarded.execution, guarded.personId, {
+                    profileId,
+                    ...(obj.reason !== undefined ? { reason: String(obj.reason) } : {}),
+                    idempotencyKey: strField(obj, "idempotencyKey"),
+                  }),
+        );
+        await send(res, 200, view);
+        return true;
+      }
+    }
+
+    // GET /api/creators — an org's creator profiles (public; optional
+    // status filter).
+    if (path === "/api/creators" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const statusParam = url.searchParams.get("status");
+      const statuses =
+        statusParam !== null ? statusParam.split(",").map((x) => x.trim()) : undefined;
+      const views = await opts.commands.listCreatorProfiles(ctx, organizationScopeId, statuses);
+      await send(res, 200, { organizationScopeId, creators: views });
+      return true;
+    }
+
+    // GET /api/creators/by-person?organizationScopeId&creatorPersonId —
+    // the profile anchored to a person in an org (public).
+    if (path === "/api/creators/by-person" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      const creatorPersonId = url.searchParams.get("creatorPersonId");
+      if (!organizationScopeId || !creatorPersonId) {
+        throw apiValidationError(
+          'query parameters "organizationScopeId" and "creatorPersonId" are required',
+        );
+      }
+      const view = await opts.commands.getCreatorProfileByPerson(
+        ctx,
+        organizationScopeId,
+        creatorPersonId,
+      );
+      if (!view) {
+        await send(res, 404, {
+          error: "not_found",
+          message: `creator profile not found for person ${creatorPersonId} in organization scope ${organizationScopeId}`,
+        });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/creators/:id/reputation — resolve the CURRENT profile
+    // version's reputation references through the canonical
+    // /reputation snapshot service (public read).
+    if (
+      path.startsWith("/api/creators/") &&
+      path.endsWith("/reputation") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const profileId = path.slice("/api/creators/".length, -"/reputation".length);
+      try {
+        const view = await opts.commands.resolveCreatorReputation(ctx, profileId);
+        await send(res, 200, view);
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("not found")) {
+          await send(res, 404, {
+            error: "not_found",
+            message: `creator profile not found: ${profileId}`,
+          });
+          return true;
+        }
+        throw error;
+      }
+      return true;
+    }
+
+    // GET /api/creators/:id/versions — the immutable profile versions
+    // (public).
+    if (
+      path.startsWith("/api/creators/") &&
+      path.endsWith("/versions") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const profileId = path.slice("/api/creators/".length, -"/versions".length);
+      const views = await opts.commands.listCreatorProfileVersions(ctx, profileId);
+      await send(res, 200, { profileId, versions: views });
+      return true;
+    }
+
+    // GET /api/creators/:id — fetch a creator profile with its
+    // immutable event history (public).
+    if (path.startsWith("/api/creators/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/creators/".length);
+      const view = await opts.commands.getCreatorProfile(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `creator profile not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // ------------------------------------------------------------------
     // NET-W012 — helpful contributions (Proof-of-Helpfulness).
     // ------------------------------------------------------------------
 
