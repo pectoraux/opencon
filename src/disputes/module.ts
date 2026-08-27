@@ -20,12 +20,18 @@ import { defineBoundaryModule } from "../core/domain-module.ts";
  *  - control decisions — the workflow/economic gate registry consumed
  *    at the composition root (lock invariant 21 enforcement point).
  *
+ * NET-W010 extends the same boundary with the challenge/dispute/
+ * appeal lifecycle: participant-initiated challenges over prior
+ * decisions / risk cases / authoritative records, explicit
+ * stake-bonded participation (the economic accounting lives in
+ * /settlement's stake escrow — NEVER here), conflict-checked
+ * reviewer workflows, deterministic resolution dispositions
+ * (control outcome separated from the economic consequence), and
+ * appeals as NEW linked records (append-only history).
+ *
  * Decision-support and control authority ONLY: no economic mutation,
  * no reputation mutation, no lifecycle mutation (those belong to
  * /settlement, /reputation and /workflows).
- *
- * NET-W010 will extend this boundary with staking, challenges and the
- * dispute lifecycle.
  */
 export const disputesModule = defineBoundaryModule({
   name: "disputes",
@@ -33,5 +39,6 @@ export const disputesModule = defineBoundaryModule({
   summary:
     "fraud/risk foundation: signals, deterministic policies, " +
     "assessments, review cases, control gates (NET-W009); challenges/" +
-    "disputes/staking (NET-W010)",
+    "disputes/appeals with explicit settlement-authority staking " +
+    "(NET-W010)",
 });

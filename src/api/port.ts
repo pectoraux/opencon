@@ -1023,6 +1023,56 @@ export interface ApiRiskSubjectSummaryView {
   readonly signalCount: number;
 }
 
+// ---------------------------------------------------------------------------
+// NET-W010 challenges/disputes/appeals views (/disputes boundary)
+// ---------------------------------------------------------------------------
+
+export interface ApiDisputeView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly kind: string;
+  readonly appealOfDisputeId: string | null;
+  readonly challengerPersonId: string;
+  readonly subjectRef: { subjectType: string; subjectId: string };
+  readonly subjectAnchorAt: string;
+  readonly subjectBeneficiaryPersonId: string | null;
+  readonly statement: string;
+  readonly reasonCodes: readonly string[];
+  readonly supportingRefs: readonly { kind: string; id: string }[];
+  readonly state: string;
+  readonly stake: {
+    readonly requirement: { amount: number; unit: string };
+    readonly stakeId: string | null;
+    readonly bondedAt: string | null;
+    readonly disposition: string | null;
+    readonly dispositionAt: string | null;
+  };
+  readonly window: {
+    readonly challengeWindowExpiresAt: string;
+    readonly appealWindowExpiresAt: string | null;
+  };
+  readonly reviewerPersonId: string | null;
+  readonly reviewStartedAt: string | null;
+  readonly resolution: Record<string, unknown> | null;
+  readonly appealDisputeId: string | null;
+  readonly events: readonly Record<string, unknown>[];
+  readonly policyVersion: string;
+}
+
+export interface ApiStakeView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly ownerPersonId: string;
+  readonly amount: number;
+  readonly unit: string;
+  readonly state: string;
+  readonly purpose: { kind: string; id: string };
+  readonly committedAt: string;
+  readonly outcome: Record<string, unknown> | null;
+  readonly transactionId: string;
+  readonly description: string | null;
+}
+
 export interface ApiCommands {
   /** Create a canonical person identity. Returns the public view. */
   createIdentity(
@@ -1753,6 +1803,100 @@ export interface ApiCommands {
     actorPersonId: string,
     input: Record<string, unknown>,
   ): Promise<{ control: ApiRiskControlView; transition: Record<string, unknown> }>;
+
+  // -----------------------------------------------------------------
+  // NET-W010 challenges/disputes/appeals (/disputes boundary)
+  // -----------------------------------------------------------------
+
+  /**
+   * Open a dispute (the challenge request; protected). Runs the
+   * deterministic eligibility gate and creates the PENDING_STAKE
+   * record — the stake is committed in a separate explicit step.
+   */
+  openDispute(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ dispute: ApiDisputeView; created: boolean }>;
+
+  /**
+   * Bond the challenge stake (protected): commits the stake through
+   * the settlement authority and bonds it to the PENDING_STAKE
+   * dispute, making it a formal OPEN dispute.
+   */
+  bondDisputeStake(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ dispute: ApiDisputeView; stake: ApiStakeView }>;
+
+  /** Start the review (protected; conflict-of-interest gate). */
+  startDisputeReview(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiDisputeView>;
+
+  /**
+   * Reject the dispute as inadmissible (protected). Releases the
+   * bonded stake through the settlement authority and records the
+   * outcome on the dispute.
+   */
+  rejectDispute(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ dispute: ApiDisputeView; stake?: ApiStakeView }>;
+
+  /**
+   * Resolve the dispute on the merits (protected). Records the
+   * outcome + control disposition + deterministic stake mapping, then
+   * executes the stake consequence (release/forfeit) through the
+   * settlement authority and records the outcome on the dispute.
+   */
+  resolveDispute(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ dispute: ApiDisputeView; stake?: ApiStakeView }>;
+
+  /**
+   * Appeal a resolved dispute's outcome (protected, within the appeal
+   * window): creates a NEW linked appeal record; the original flips
+   * to terminal APPEALED.
+   */
+  appealDispute(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{
+    original: ApiDisputeView;
+    appeal: ApiDisputeView;
+    created: boolean;
+  }>;
+
+  /**
+   * Withdraw the dispute (protected; the challenger only). Releases
+   * the bonded stake through the settlement authority.
+   */
+  withdrawDispute(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ dispute: ApiDisputeView; stake?: ApiStakeView }>;
+
+  /** Fetch a dispute with its immutable event history (public read). */
+  getDispute(execution: ExecutionContext, id: string): Promise<ApiDisputeView | null>;
+
+  /** List an org's disputes, optionally filtered by state (public read). */
+  listDisputes(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    states?: readonly string[],
+  ): Promise<readonly ApiDisputeView[]>;
+
+  /** Fetch a stake record from the settlement authority (public read). */
+  getStake(execution: ExecutionContext, id: string): Promise<ApiStakeView | null>;
 }
 
 export type { ExecutionContext };

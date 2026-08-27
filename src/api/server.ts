@@ -2169,6 +2169,240 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // ------------------------------------------------------------------
+    // NET-W010 challenges/disputes/appeals (/disputes boundary).
+    // ------------------------------------------------------------------
+
+    // POST /api/disputes — open a dispute (the challenge request;
+    // protected; deterministic eligibility gate; PENDING_STAKE).
+    if (path === "/api/disputes" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "dispute.open", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.openDispute(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          subjectRef: objField(obj, "subjectRef"),
+          statement: strField(obj, "statement"),
+          reasonCodes: strArrayField(obj, "reasonCodes"),
+          supportingRefs: objField(obj, "supportingRefs"),
+          effectiveAt: strField(obj, "effectiveAt"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/disputes/:id/bond — bond the challenge stake
+    // (protected; commits the stake through the settlement authority
+    // and makes the dispute formal/OPEN).
+    if (
+      path.startsWith("/api/disputes/") &&
+      path.endsWith("/bond") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "dispute.bond", "*", res);
+      if (!guarded) return true;
+      const disputeId = path.slice("/api/disputes/".length, -"/bond".length);
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.bondDisputeStake(guarded.execution, guarded.personId, {
+          disputeId,
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/disputes/:id/review — start the review (protected;
+    // conflict-of-interest gate bars the challenger + the subject
+    // beneficiary).
+    if (
+      path.startsWith("/api/disputes/") &&
+      path.endsWith("/review") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "dispute.review", "*", res);
+      if (!guarded) return true;
+      const disputeId = path.slice("/api/disputes/".length, -"/review".length);
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.startDisputeReview(guarded.execution, guarded.personId, {
+          disputeId,
+          ...(obj.reasonCodes !== undefined
+            ? { reasonCodes: strArrayField(obj, "reasonCodes") }
+            : {}),
+          ...(obj.note !== undefined ? { note: String(obj.note) } : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/disputes/:id/reject — reject as inadmissible
+    // (protected; releases the stake through the settlement authority).
+    if (
+      path.startsWith("/api/disputes/") &&
+      path.endsWith("/reject") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "dispute.reject", "*", res);
+      if (!guarded) return true;
+      const disputeId = path.slice("/api/disputes/".length, -"/reject".length);
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.rejectDispute(guarded.execution, guarded.personId, {
+          disputeId,
+          reasonCodes: strArrayField(obj, "reasonCodes"),
+          ...(obj.note !== undefined ? { note: String(obj.note) } : {}),
+          sourceRefs: objField(obj, "sourceRefs"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/disputes/:id/resolve — resolve on the merits
+    // (protected; records outcome + control disposition + the
+    // deterministic stake mapping, then executes the stake consequence
+    // through the settlement authority).
+    if (
+      path.startsWith("/api/disputes/") &&
+      path.endsWith("/resolve") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "dispute.resolve", "*", res);
+      if (!guarded) return true;
+      const disputeId = path.slice("/api/disputes/".length, -"/resolve".length);
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.resolveDispute(guarded.execution, guarded.personId, {
+          disputeId,
+          outcome: strField(obj, "outcome"),
+          controlDisposition: strField(obj, "controlDisposition"),
+          reasonCodes: strArrayField(obj, "reasonCodes"),
+          ...(obj.note !== undefined ? { note: String(obj.note) } : {}),
+          sourceRefs: objField(obj, "sourceRefs"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/disputes/:id/appeal — appeal the resolved outcome
+    // (protected; NEW linked record; the original flips to APPEALED).
+    if (
+      path.startsWith("/api/disputes/") &&
+      path.endsWith("/appeal") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "dispute.appeal", "*", res);
+      if (!guarded) return true;
+      const disputeId = path.slice("/api/disputes/".length, -"/appeal".length);
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.appealDispute(guarded.execution, guarded.personId, {
+          disputeId,
+          statement: strField(obj, "statement"),
+          reasonCodes: strArrayField(obj, "reasonCodes"),
+          supportingRefs: objField(obj, "supportingRefs"),
+          effectiveAt: strField(obj, "effectiveAt"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/disputes/:id/withdraw — the challenger withdraws
+    // (protected; releases the bonded stake through the settlement
+    // authority).
+    if (
+      path.startsWith("/api/disputes/") &&
+      path.endsWith("/withdraw") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "dispute.withdraw", "*", res);
+      if (!guarded) return true;
+      const disputeId = path.slice("/api/disputes/".length, -"/withdraw".length);
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.withdrawDispute(guarded.execution, guarded.personId, {
+          disputeId,
+          ...(obj.reason !== undefined ? { reason: String(obj.reason) } : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // GET /api/disputes — an org's disputes (public; optional state
+    // filter).
+    if (path === "/api/disputes" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const stateParam = url.searchParams.get("state");
+      const states = stateParam !== null ? stateParam.split(",").map((x) => x.trim()) : undefined;
+      const views = await opts.commands.listDisputes(ctx, organizationScopeId, states);
+      await send(res, 200, { organizationScopeId, disputes: views });
+      return true;
+    }
+
+    // GET /api/disputes/:id — fetch a dispute with its immutable
+    // event history (public).
+    if (path.startsWith("/api/disputes/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/disputes/".length);
+      const view = await opts.commands.getDispute(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `dispute not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/stakes/:id — fetch a stake record from the settlement
+    // authority (public read; the escrow's authoritative state).
+    if (path.startsWith("/api/stakes/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/stakes/".length);
+      const view = await opts.commands.getStake(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `stake not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
     return false;
   }
 

@@ -75,6 +75,8 @@ import type {
   EconomicEntryDirection,
   EconomicLedgerTxKind,
   EconomicMaturationPolicy,
+  EconomicStakePurposeKind,
+  EconomicStakeState,
   EconomicUnitType,
   EconomicValueSourceKind,
   EconomicValueState,
@@ -363,7 +365,10 @@ export interface EconomicLedgerSubjectRef {
     | "credit_issuance"
     | "reward_allocation"
     | "cash_obligation"
-    | "conversion";
+    | "conversion"
+    // NET-W010 (additive): the stake record — the encumbrance a
+    // challenge participant commits through this boundary.
+    | "stake";
   readonly id: string;
 }
 
@@ -1062,7 +1067,9 @@ export interface ConversionService {
  * ledger, pending/mature value with explicit maturation, PoV-gated
  * Participation Credit issuance, deterministic reward accounting, cash
  * obligations with internal settlement state, and explicit cash↔
- * credits conversion).
+ * credits conversion). NET-W010 extends it with the stake escrow
+ * commands (commit/release/forfeit) — the economic authority for
+ * challenge participation stakes.
  */
 export interface SettlementPort {
   readonly boundary: "settlement";
@@ -1081,7 +1088,167 @@ export interface SettlementPort {
     readonly cashObligationReversed: "cash_obligation.reversed";
     readonly conversionRecorded: "conversion.recorded";
     readonly conversionReversed: "conversion.reversed";
+    readonly stakeCommitted: "stake.committed";
+    readonly stakeReleased: "stake.released";
+    readonly stakeForfeited: "stake.forfeited";
   };
+}
+
+// ---------------------------------------------------------------------------
+// Stake escrow (NET-W010 §3.2 — challenge participation stakes)
+// ---------------------------------------------------------------------------
+
+/**
+ * An EconomicStake — the explicit, escrowed commitment a challenge
+ * participant posts (NET-W010 work item: "stake is committed/released
+ * through provider-neutral economic commands, not by mutating
+ * balances inside disputes").
+ *
+ * Postings (all balanced per unit, all through the posting layer's
+ * conservation + non-negative guards):
+ *
+ * ```text
+ * commit:  debit  credits(owner)        amount   credit stake_escrow(owner)  amount
+ * release: debit  stake_escrow(owner)   amount   credit credits(owner)      amount
+ * forfeit: debit  stake_escrow(owner)   amount   credit protocol(credits)   amount
+ * ```
+ *
+ * The outcome (release/forfeit) is append-only lineage on the record;
+ * terminal states never revert. One COMMITTED stake per purpose is
+ * enforced (a purpose cannot double-post its commitment).
+ */
+export interface EconomicStake {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  /** The participant whose credits are encumbered. */
+  readonly ownerPersonId: string;
+  /** Positive, ≤ 6 decimals, `credits` unit. */
+  readonly amount: number;
+  readonly unit: "credits";
+  readonly state: EconomicStakeState;
+  /** Why the stake exists (linkage verified by the disputes boundary). */
+  readonly purpose: {
+    readonly kind: EconomicStakePurposeKind;
+    readonly id: string;
+  };
+  readonly committedAt: string;
+  /** Terminal outcome lineage (append-only; set on release/forfeit). */
+  readonly outcome:
+    | {
+        readonly disposition: "RELEASED" | "FORFEITED";
+        readonly reason: string;
+        readonly outcomeAt: string;
+        readonly transactionId: string;
+      }
+    | null;
+  /** The stake-commit ledger transaction. */
+  readonly transactionId: string;
+  readonly description: string | null;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+export interface CommitStakeInput {
+  readonly organizationScopeId: string;
+  readonly ownerPersonId: string;
+  readonly amount: number;
+  readonly purpose: { readonly kind: string; readonly id: string };
+  readonly description?: string;
+  readonly idempotencyKey: string;
+}
+
+export interface CommitStakeResult {
+  readonly stake: EconomicStake;
+  /** false when a stake with the same idempotency key already existed. */
+  readonly created: boolean;
+}
+
+export interface ReleaseStakeInput {
+  readonly stakeId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+export interface ForfeitStakeInput {
+  readonly stakeId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+export interface EconomicStakeRepository {
+  findById(id: string): Promise<EconomicStake | null>;
+  listByOrganization(
+    organizationScopeId: string,
+    states?: readonly string[],
+  ): Promise<readonly EconomicStake[]>;
+  listByOwner(
+    organizationScopeId: string,
+    ownerPersonId: string,
+  ): Promise<readonly EconomicStake[]>;
+  findByPurpose(
+    organizationScopeId: string,
+    purposeKind: string,
+    purposeId: string,
+    states?: readonly string[],
+  ): Promise<readonly EconomicStake[]>;
+  findByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<EconomicStake | null>;
+  findByPurposeWithinTx(
+    organizationScopeId: string,
+    purposeKind: string,
+    purposeId: string,
+    tx: AuthorityTransaction,
+  ): Promise<readonly EconomicStake[]>;
+  createWithinTx(
+    stake: EconomicStake,
+    tx: AuthorityTransaction,
+  ): Promise<EconomicStake>;
+  saveWithinTx(
+    stake: EconomicStake,
+    tx: AuthorityTransaction,
+  ): Promise<EconomicStake>;
+}
+
+export interface StakeService {
+  /**
+   * Commit a stake: encumber `amount` credits from the owner into
+   * their stake escrow (the posting layer's non-negative guard rejects
+   * an over-commitment — conservation). One COMMITTED stake per
+   * purpose. Commits atomically with the `stake.committed` audit
+   * event.
+   */
+  commitStake(
+    execution: ExecutionContext,
+    input: CommitStakeInput,
+  ): Promise<CommitStakeResult>;
+  /**
+   * Release a COMMITTED stake back to its owner (append-only outcome
+   * lineage). Commits atomically with the `stake.released` audit
+   * event.
+   */
+  releaseStake(
+    execution: ExecutionContext,
+    input: ReleaseStakeInput,
+  ): Promise<EconomicStake>;
+  /**
+   * Forfeit a COMMITTED stake to protocol recognition (the
+   * unsuccessful-challenge penalty). Commits atomically with the
+   * `stake.forfeited` audit event.
+   */
+  forfeitStake(
+    execution: ExecutionContext,
+    input: ForfeitStakeInput,
+  ): Promise<EconomicStake>;
+  getStake(execution: ExecutionContext, id: string): Promise<EconomicStake>;
+  listStakes(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    ownerPersonId?: string,
+  ): Promise<readonly EconomicStake[]>;
 }
 
 export type {
@@ -1099,4 +1266,6 @@ export type {
   EconomicUnitType,
   EconomicValueSourceKind,
   EconomicValueState,
+  EconomicStakeState,
+  EconomicStakePurposeKind,
 };

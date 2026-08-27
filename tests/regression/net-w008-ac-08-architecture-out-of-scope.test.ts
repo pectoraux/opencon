@@ -253,6 +253,11 @@ describe("NET-W008-AC-08 architecture/out-of-scope regression", () => {
       "cash_payable",
       "cash_receivable",
       "protocol_recognition",
+      // NET-W010 (additive): the challenge-participation escrow — the
+      // /settlement stake commands (NET-W010 work order §3.2) commit,
+      // release and forfeit against it. Asserted fully in
+      // net-w010-ac-08.
+      "stake_escrow",
     ]);
     expect(core.economicAccountNormalSide("protocol_recognition")).toBe("debit");
     expect(core.economicAccountNormalSide("credits")).toBe("credit");

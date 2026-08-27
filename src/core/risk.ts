@@ -88,6 +88,13 @@ export const RISK_SIGNAL_SOURCE_KINDS = [
   // always an authoritative upstream record).
   "risk_signal",
   "risk_assessment",
+  // NET-W010 (additive, non-breaking): a resolved risk CASE is an
+  // authoritative prior decision — challenge/dispute records and
+  // their supporting references may cite it ("prior decision / risk
+  // case" per the NET-W010 work item). Signal-level provenance
+  // sources remain the upstream kinds (a risk case is never a
+  // signal's evidence base).
+  "risk_case",
 ] as const;
 
 export type RiskSignalSourceKind = (typeof RISK_SIGNAL_SOURCE_KINDS)[number];

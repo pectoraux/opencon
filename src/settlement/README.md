@@ -43,6 +43,19 @@ construction. Concurrent postings serialize per account (sorted lock
 acquisition — see `posting.ts`), the documented monolith stand-in for
 PostgreSQL `SELECT … FOR UPDATE` row locking.
 
+## Scope in NET-W010 — stake escrow
+
+`stake-service.ts` (+ `authority-stake-repository.ts`, collection
+`stakes`): the economic authority for challenge participation stakes
+(NET-W010). Commit debits the owner's `credits` into their
+`stake_escrow`; release returns it; forfeit moves it to protocol
+recognition — every posting through the shared posting layer
+(conservation + non-negative guards). One COMMITTED stake per purpose;
+terminal outcomes carry append-only lineage. The /disputes boundary
+consumes these ONLY through composition-root orchestration (it never
+posts); this domain carries NO dispute lifecycle (asserted by the
+NET-W008/W010 regressions).
+
 ## Dependencies
 
 `core` contracts only. Upstream record resolution (evidence,
