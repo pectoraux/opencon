@@ -186,6 +186,28 @@ export function createAuthorityProofOfHelpfulnessRepository(
       return rec ? rec.value : null;
     },
 
+    async findByContributionIdWithinTx(contributionId, tx) {
+      const index = await tx.get<string>(
+        PROOFS_OF_HELPFULNESS_COLLECTION,
+        contributionIndexKey(contributionId),
+      );
+      if (index) {
+        const rec = await tx.get<ProofOfHelpfulness>(
+          PROOFS_OF_HELPFULNESS_COLLECTION,
+          index.value,
+        );
+        if (rec) return rec.value;
+      }
+      const records = await tx.scan<ProofOfHelpfulness>(
+        PROOFS_OF_HELPFULNESS_COLLECTION,
+      );
+      return (
+        records
+          .map((r) => r.value)
+          .find((p) => p.contributionId === contributionId) ?? null
+      );
+    },
+
     async createWithinTx(record, tx) {
       await tx.put(PROOFS_OF_HELPFULNESS_COLLECTION, record.id, record);
       await tx.put(

@@ -198,6 +198,10 @@ describe("NET-W009-AC-08 architecture/out-of-scope regression", () => {
 
   test("the core risk vocabulary exports the frozen sets + structural advisory rule", async () => {
     const core = await import("../../src/core/risk.ts");
+    // NET-W013 AMENDMENT (additive): the content-level spam + abuse
+    // categories joined the frozen category vocabulary — moderation
+    // conclusions feed the SAME risk authority as ordinary signals
+    // (never a second fraud authority).
     expect(core.RISK_SIGNAL_CATEGORIES).toEqual([
       "identity",
       "behavioral",
@@ -208,6 +212,8 @@ describe("NET-W009-AC-08 architecture/out-of-scope regression", () => {
       "duplicate_pattern",
       "historical_reputation",
       "model_advisory",
+      "spam",
+      "abuse",
     ]);
     expect(core.RISK_STATES).toEqual([
       "CLEAR",

@@ -2966,6 +2966,296 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // ------------------------------------------------------------------
+    // NET-W013 — quality, moderation and anti-spam controls.
+    // ------------------------------------------------------------------
+
+    // POST /api/quality-policies — define the next immutable quality
+    // policy version (protected; person actor).
+    if (path === "/api/quality-policies" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "quality.policy", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.defineQualityPolicy(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          policyId: strField(obj, "policyId"),
+          shape: objField(obj, "shape"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/quality-policies/:policyId — list the lineage's
+    // immutable versions (public).
+    if (
+      path.startsWith("/api/quality-policies/") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const policyId = path.slice("/api/quality-policies/".length);
+      const versions = await opts.commands.listQualityPolicies(ctx, policyId);
+      await send(res, 200, { policies: versions });
+      return true;
+    }
+
+    // POST /api/contributions/:id/advisory-quality-scores/generate —
+    // generate an advisory score through the provider-neutral LLM port
+    // (protected; the FIRST LlmPort consumer; non-authoritative).
+    if (
+      path.startsWith("/api/contributions/") &&
+      path.endsWith("/advisory-quality-scores/generate") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "quality.advisory.generate", "*", res);
+      if (!guarded) return true;
+      const contributionId = path.slice(
+        "/api/contributions/".length,
+        -"/advisory-quality-scores/generate".length,
+      );
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.generateAdvisoryQualityScore(guarded.execution, guarded.personId, {
+          contributionId,
+          ...(obj.qualityPolicyId !== undefined
+            ? { qualityPolicyId: String(obj.qualityPolicyId) }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/contributions/:id/advisory-quality-scores — attach an
+    // advisory quality score manually (protected; advisory only).
+    if (
+      path.startsWith("/api/contributions/") &&
+      path.endsWith("/advisory-quality-scores") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "quality.advisory.attach", "*", res);
+      if (!guarded) return true;
+      const contributionId = path.slice(
+        "/api/contributions/".length,
+        -"/advisory-quality-scores".length,
+      );
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.attachAdvisoryQualityScore(guarded.execution, guarded.personId, {
+          contributionId,
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          kind: strField(obj, "kind"),
+          methodRef: strField(obj, "methodRef"),
+          methodVersion: strField(obj, "methodVersion"),
+          ...(obj.provider !== undefined ? { provider: obj.provider as string | null } : {}),
+          ...(obj.modelRef !== undefined ? { modelRef: obj.modelRef as string | null } : {}),
+          score: numField(obj, "score"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/contributions/:id/advisory-quality-scores — list a
+    // contribution's advisory quality scores (public).
+    if (
+      path.startsWith("/api/contributions/") &&
+      path.endsWith("/advisory-quality-scores") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const contributionId = path.slice(
+        "/api/contributions/".length,
+        -"/advisory-quality-scores".length,
+      );
+      const scores = await opts.commands.listAdvisoryQualityScores(
+        ctx,
+        contributionId,
+      );
+      await send(res, 200, { advisoryScores: scores });
+      return true;
+    }
+
+    // POST /api/contributions/:id/quality-evaluation/preview — preview
+    // the deterministic evaluation (protected; pure engine; no
+    // persistence).
+    if (
+      path.startsWith("/api/contributions/") &&
+      path.endsWith("/quality-evaluation/preview") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "quality.evaluation.preview", "*", res);
+      if (!guarded) return true;
+      const contributionId = path.slice(
+        "/api/contributions/".length,
+        -"/quality-evaluation/preview".length,
+      );
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.previewQualityEvaluation(guarded.execution, guarded.personId, {
+          contributionId,
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          qualityPolicyId: strField(obj, "qualityPolicyId"),
+          ...(obj.qualityPolicyVersion !== undefined
+            ? { qualityPolicyVersion: Number(obj.qualityPolicyVersion) }
+            : {}),
+          evaluatedAt: strField(obj, "evaluatedAt"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/contributions/:id/quality-evaluation — record the
+    // authoritative quality evaluation (protected; in-tx same-scope
+    // policy pinning; append-only supersession).
+    if (
+      path.startsWith("/api/contributions/") &&
+      path.endsWith("/quality-evaluation") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "quality.evaluation.record", "*", res);
+      if (!guarded) return true;
+      const contributionId = path.slice(
+        "/api/contributions/".length,
+        -"/quality-evaluation".length,
+      );
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recordQualityEvaluation(guarded.execution, guarded.personId, {
+          contributionId,
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          qualityPolicyId: strField(obj, "qualityPolicyId"),
+          ...(obj.qualityPolicyVersion !== undefined
+            ? { qualityPolicyVersion: Number(obj.qualityPolicyVersion) }
+            : {}),
+          evaluatedAt: strField(obj, "evaluatedAt"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/contributions/:id/quality-evaluations — the
+    // contribution's evaluation history + latest (public).
+    if (
+      path.startsWith("/api/contributions/") &&
+      path.endsWith("/quality-evaluations") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const contributionId = path.slice(
+        "/api/contributions/".length,
+        -"/quality-evaluations".length,
+      );
+      const result = await opts.commands.getQualityEvaluationHistory(
+        ctx,
+        contributionId,
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/contributions/:id/moderation-decisions — record a
+    // moderation decision (protected; person actor —
+    // moderator-controlled; append-only; emits the spam/abuse risk
+    // signal into /disputes when the reasons carry spam/abuse).
+    if (
+      path.startsWith("/api/contributions/") &&
+      path.endsWith("/moderation-decisions") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "moderation.decide", "*", res);
+      if (!guarded) return true;
+      const contributionId = path.slice(
+        "/api/contributions/".length,
+        -"/moderation-decisions".length,
+      );
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recordModerationDecision(guarded.execution, guarded.personId, {
+          contributionId,
+          decision: strField(obj, "decision"),
+          reasonKinds: strArrayField(obj, "reasonKinds"),
+          ...(obj.notes !== undefined ? { notes: obj.notes as string | null } : {}),
+          ...(obj.qualityEvaluationIds !== undefined
+            ? { qualityEvaluationIds: obj.qualityEvaluationIds as readonly string[] }
+            : {}),
+          ...(obj.signalSeverity !== undefined
+            ? { signalSeverity: String(obj.signalSeverity) }
+            : {}),
+          ...(obj.signalConfidence !== undefined
+            ? { signalConfidence: Number(obj.signalConfidence) }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/contributions/:id/moderation-decisions — the
+    // contribution's append-only moderation history (public).
+    if (
+      path.startsWith("/api/contributions/") &&
+      path.endsWith("/moderation-decisions") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const contributionId = path.slice(
+        "/api/contributions/".length,
+        -"/moderation-decisions".length,
+      );
+      const decisions = await opts.commands.listModerationDecisions(
+        ctx,
+        contributionId,
+      );
+      await send(res, 200, { decisions });
+      return true;
+    }
+
+    // GET /api/contributions/:id/moderation — the contribution's
+    // DERIVED moderation status (public).
+    if (
+      path.startsWith("/api/contributions/") &&
+      path.endsWith("/moderation") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const contributionId = path.slice(
+        "/api/contributions/".length,
+        -"/moderation".length,
+      );
+      const summary = await opts.commands.getModerationSummary(
+        ctx,
+        contributionId,
+      );
+      await send(res, 200, summary);
+      return true;
+    }
+
     return false;
   }
 

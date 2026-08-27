@@ -152,6 +152,15 @@ export async function resolveSources(
             (await lookups.risk.resolveCase(src.id))?.organizationScopeId ??
             null
           );
+        // NET-W013: a MODERATION DECISION is an authoritative upstream
+        // record of the contributions domain — the spam/abuse signals
+        // the composition root emits cite the deciding moderation
+        // record as part of their evidence base (work order §3.5).
+        case "moderation_decision":
+          return (
+            (await lookups.moderation.resolve(src.id))
+              ?.organizationScopeId ?? null
+          );
         default:
           return null;
       }

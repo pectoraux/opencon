@@ -54,6 +54,14 @@ export const RISK_SIGNAL_CATEGORIES = [
   "duplicate_pattern",
   "historical_reputation",
   "model_advisory",
+  // NET-W013 (additive, non-breaking): content-level spam and abuse
+  // classifications emitted by the moderation layer (through the
+  // composition root) as evidence-backed signals about a
+  // CONTRIBUTION's contributor. They are ordinary multi-signal inputs
+  // (FRAUD-001): a policy consumes them only through explicit rules,
+  // never ambiently.
+  "spam",
+  "abuse",
 ] as const;
 
 export type RiskSignalCategory = (typeof RISK_SIGNAL_CATEGORIES)[number];
@@ -95,6 +103,12 @@ export const RISK_SIGNAL_SOURCE_KINDS = [
   // sources remain the upstream kinds (a risk case is never a
   // signal's evidence base).
   "risk_case",
+  // NET-W013 (additive, non-breaking): a MODERATION DECISION is an
+  // authoritative upstream record of the contributions domain — the
+  // spam/abuse signals the composition root emits cite the deciding
+  // moderation record (and the contribution) as their evidence base
+  // (work order §3.5).
+  "moderation_decision",
 ] as const;
 
 export type RiskSignalSourceKind = (typeof RISK_SIGNAL_SOURCE_KINDS)[number];

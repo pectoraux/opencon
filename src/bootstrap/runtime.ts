@@ -90,6 +90,25 @@ import {
   createAuthorityProofOfHelpfulnessRepository,
 } from "../contributions/authority-helpfulness-repository.ts";
 import { createHelpfulnessService } from "../contributions/helpfulness-service.ts";
+// NET-W013 quality/moderation/anti-spam: the quality + moderation
+// repositories and services, and the provider-neutral LLM port whose
+// FIRST concrete consumption (advisory quality scoring) happens at
+// the composition root below.
+import {
+  createAuthorityAdvisoryQualityScoreRepository,
+  createAuthorityModerationDecisionRepository,
+  createAuthorityQualityEvaluationRepository,
+  createAuthorityQualityPolicyRepository,
+} from "../contributions/authority-quality-repository.ts";
+import { createQualityService } from "../contributions/quality-service.ts";
+import { createModerationService } from "../contributions/moderation-service.ts";
+import type {
+  ModerationService,
+  QualityService,
+} from "../contributions/port.ts";
+import type { LlmPort } from "../llm/port.ts";
+import type { ProviderAdapter } from "../core/adapter.ts";
+import { echoLlmProvider } from "../llm/providers/echo-llm-provider.ts";
 import { createWorkflowService } from "../workflows/workflow-service.ts";
 import { createLifecycleRepository } from "../workflows/lifecycle-repository.ts";
 import type { OpportunityService } from "../opportunities/port.ts";
@@ -431,6 +450,13 @@ export interface Runtime {
   readonly campaignService: CampaignService;
   // NET-W012 helpful contributions (Proof-of-Helpfulness) service.
   readonly helpfulnessService: HelpfulnessService;
+  // NET-W013 quality/moderation/anti-spam services.
+  readonly qualityService: QualityService;
+  readonly moderationService: ModerationService;
+  /** NET-W013 provider-neutral LLM providers (echo reference default). */
+  readonly llmProviders: readonly (LlmPort & ProviderAdapter)[];
+  /** The default LLM provider (llmProviders[0]) used by the composites. */
+  readonly llmProvider: LlmPort;
   // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
   readonly idempotency: IdempotencyStore;
   initialize(): Promise<readonly { name: string; initialized: boolean }[]>;
@@ -468,6 +494,16 @@ export interface CreateRuntimeOptions {
    */
   readonly measurement?: {
     readonly providers?: readonly MeasurementProviderAdapter[];
+  };
+  /**
+   * NET-W013: explicitly configured LLM provider adapters (test
+   * doubles or future concrete adapters). When omitted, the
+   * deterministic reference ECHO provider is wired. Consumers use
+   * ONLY the neutral LlmPort contract — outputs are structurally
+   * non-authoritative (architecture-lock §4).
+   */
+  readonly llm?: {
+    readonly providers?: readonly (LlmPort & ProviderAdapter)[];
   };
 }
 
@@ -843,6 +879,13 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     opts.measurement?.providers?.length
       ? opts.measurement.providers
       : [echoMeasurementProvider];
+  // NET-W013: the provider-neutral LLM adapters (explicit override or
+  // the deterministic ECHO reference provider). The FIRST consumer is
+  // the generateAdvisoryQualityScore composition-root composite below
+  // — never a domain module (the domain-must-not-import-adapter rule).
+  const llmProviders: readonly (LlmPort & ProviderAdapter)[] =
+    opts.llm?.providers?.length ? opts.llm.providers : [echoLlmProvider];
+  const llmProvider: LlmPort = llmProviders[0]!;
   const outcomeObservationRepo = createAuthorityOutcomeObservationRepository({
     authority: postgresAuthority,
     logger: { debug: (m, f) => logger.forModule("outcomes").debug(m, f) },
@@ -1299,6 +1342,22 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return riskCase ? { organizationScopeId: riskCase.organizationScopeId } : null;
     },
   };
+  // NET-W013: the moderation-decision repo is created BEFORE the risk
+  // lookups so the moderation source resolver can be wired here; the
+  // moderation service below reuses the SAME repo instance (the
+  // riskSignalRepo/riskCaseRepo hoists above follow the same pattern).
+  const moderationDecisionRepo = createAuthorityModerationDecisionRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("contributions").debug(m, f) },
+  });
+  const riskModerationLookup = {
+    async resolve(id: string) {
+      const decision = await moderationDecisionRepo.findById(id);
+      return decision
+        ? { organizationScopeId: decision.organizationScopeId }
+        : null;
+    },
+  };
   const riskLookups = {
     subject: riskSubjectLookup,
     evidence: riskEvidenceLookup,
@@ -1308,6 +1367,7 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     economic: riskEconomicLookup,
     reputation: riskReputationLookup,
     risk: riskRecordLookup,
+    moderation: riskModerationLookup,
   };
   const riskSignalRepo = createAuthorityRiskSignalRepository({
     authority: postgresAuthority,
@@ -1718,6 +1778,64 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       measurement: helpfulnessMeasurementLookup,
       proofOfValue: helpfulnessProofOfValueLookup,
     },
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("contributions"),
+  });
+
+  // ------------------------------------------------------------------
+  // NET-W013 quality/moderation/anti-spam wiring.
+  //
+  // The quality service reads the truth authorities through the SAME
+  // neutral lookups the helpfulness service consumes (the quality
+  // engine re-resolves the PoH's recorded bases at evaluation time),
+  // plus a PoH lookup over this domain's own repository. The
+  // moderation service shares the contribution repository and the
+  // quality evaluation repository (same-domain reads). The
+  // spam/abuse RISK-SIGNAL emission is composed ONLY in the
+  // apiCommands below (never inside a domain: no second fraud
+  // authority); the LLM provider is consumed ONLY by the
+  // generateAdvisoryQualityScore composite (never a domain module —
+  // the domain-must-not-import-adapter rule).
+  // ------------------------------------------------------------------
+  const qualityPolicyRepo = createAuthorityQualityPolicyRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("contributions").debug(m, f) },
+  });
+  const qualityEvaluationRepo = createAuthorityQualityEvaluationRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("contributions").debug(m, f) },
+  });
+  const advisoryQualityScoreRepo =
+    createAuthorityAdvisoryQualityScoreRepository({
+      authority: postgresAuthority,
+      logger: { debug: (m, f) => logger.forModule("contributions").debug(m, f) },
+    });
+  const qualityPohLookup = {
+    async resolveByContribution(contributionId: string) {
+      return proofOfHelpfulnessRepo.findByContributionId(contributionId);
+    },
+  };
+  const qualityService = createQualityService({
+    contributionRepository: contributionRepo,
+    policyRepository: qualityPolicyRepo,
+    evaluationRepository: qualityEvaluationRepo,
+    advisoryRepository: advisoryQualityScoreRepo,
+    pohRepository: proofOfHelpfulnessRepo,
+    lookups: {
+      proofOfHelpfulness: qualityPohLookup,
+      evidence: helpfulnessEvidenceLookup,
+      measurement: helpfulnessMeasurementLookup,
+      proofOfValue: helpfulnessProofOfValueLookup,
+    },
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("contributions"),
+  });
+  const moderationService = createModerationService({
+    contributionRepository: contributionRepo,
+    decisionRepository: moderationDecisionRepo,
+    evaluationRepository: qualityEvaluationRepo,
     idempotency,
     auditWriter,
     logger: logger.forModule("contributions"),
@@ -2394,6 +2512,101 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       submission: contribution.submission as unknown as Record<string, unknown>,
       createdAt: contribution.createdAt,
       updatedAt: contribution.updatedAt,
+    };
+  }
+  function toQualityPolicyView(
+    policy: import("../contributions/port.ts").QualityPolicy,
+  ) {
+    return {
+      id: policy.id,
+      policyId: policy.policyId,
+      organizationScopeId: policy.organizationScopeId,
+      version: policy.version,
+      formatVersion: policy.formatVersion,
+      inputs: policy.inputs as unknown as readonly Record<string, unknown>[],
+      advisory: policy.advisory as unknown as Record<string, unknown>,
+      minimumGrade: policy.minimumGrade,
+      qualifyingSourceTypes: policy.qualifyingSourceTypes,
+      qualifyingOutcomeTypes: policy.qualifyingOutcomeTypes,
+      minimumConfidence: policy.minimumConfidence,
+      thresholds: policy.thresholds as unknown as Record<string, unknown>,
+      structural: policy.structural as unknown as Record<string, unknown>,
+      description: policy.description,
+      createdBy: policy.createdBy,
+      createdAt: policy.createdAt,
+    };
+  }
+  function toQualityEvaluationView(
+    evaluation: import("../contributions/port.ts").QualityEvaluation,
+  ) {
+    return {
+      id: evaluation.id,
+      organizationScopeId: evaluation.organizationScopeId,
+      contributionId: evaluation.contributionId,
+      qualityPolicyId: evaluation.qualityPolicyId,
+      qualityPolicyVersion: evaluation.qualityPolicyVersion,
+      formatVersion: evaluation.formatVersion,
+      evaluatedAt: evaluation.evaluatedAt,
+      recordedAt: evaluation.recordedAt,
+      inputContributions: evaluation.inputContributions as unknown as readonly Record<
+        string,
+        unknown
+      >[],
+      advisoryCount: evaluation.advisoryCount,
+      advisoryAverage: evaluation.advisoryAverage,
+      score: evaluation.score,
+      band: evaluation.band,
+      reasons: evaluation.reasons,
+      evaluator: evaluation.evaluator,
+      digest: evaluation.digest,
+      supersedesEvaluationId: evaluation.supersedesEvaluationId,
+      supersededByEvaluationId: evaluation.supersededByEvaluationId,
+    };
+  }
+  function toAdvisoryQualityScoreView(
+    score: import("../contributions/port.ts").AdvisoryQualityScore,
+  ) {
+    return {
+      id: score.id,
+      organizationScopeId: score.organizationScopeId,
+      contributionId: score.contributionId,
+      kind: score.kind,
+      methodRef: score.methodRef,
+      methodVersion: score.methodVersion,
+      provider: score.provider,
+      modelRef: score.modelRef,
+      score: score.score,
+      recordedBy: score.recordedBy,
+      recordedAt: score.recordedAt,
+    };
+  }
+  function toModerationDecisionView(
+    decision: import("../contributions/port.ts").ModerationDecisionRecord,
+  ) {
+    return {
+      id: decision.id,
+      organizationScopeId: decision.organizationScopeId,
+      contributionId: decision.contributionId,
+      decision: decision.decision,
+      reasonKinds: decision.reasonKinds,
+      notes: decision.notes,
+      qualityEvaluationIds: decision.qualityEvaluationIds,
+      decidedBy: decision.decidedBy,
+      decidedAt: decision.decidedAt,
+    };
+  }
+  function toModerationSummaryView(
+    summary: import("../contributions/port.ts").ModerationSummary,
+  ) {
+    return {
+      contributionId: summary.contributionId,
+      organizationScopeId: summary.organizationScopeId,
+      status: summary.status,
+      decisionCount: summary.decisionCount,
+      latestDecision:
+        summary.latestDecision === null
+          ? null
+          : toModerationDecisionView(summary.latestDecision),
     };
   }
 
@@ -4797,6 +5010,307 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       });
       return toProofOfHelpfulnessView(poh);
     },
+
+    // ------------------------------------------------------------------
+    // NET-W013 commands (quality, moderation, anti-spam).
+    // ------------------------------------------------------------------
+    async defineQualityPolicy(execution, _actorPersonId, input) {
+      const result = await qualityService.defineQualityPolicy(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+        policyId: input.policyId as string,
+        shape: input.shape as unknown as Parameters<
+          typeof qualityService.defineQualityPolicy
+        >[1]["shape"],
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return {
+        policy: toQualityPolicyView(result.policy),
+        created: result.created,
+      };
+    },
+
+    async listQualityPolicies(execution, policyId) {
+      const policies = await qualityService.listQualityPolicyVersions(
+        getExecutionContext() ?? execution,
+        policyId,
+      );
+      return policies.map(toQualityPolicyView);
+    },
+
+    async attachAdvisoryQualityScore(execution, actorPersonId, input) {
+      const score = await qualityService.attachAdvisoryScore(execution, {
+        contributionId: input.contributionId as string,
+        organizationScopeId: input.organizationScopeId as string,
+        kind: input.kind as import("../core/moderation.ts").QualityAdvisoryKind,
+        methodRef: input.methodRef as string,
+        methodVersion: input.methodVersion as string,
+        provider: (input.provider as string | null | undefined) ?? null,
+        modelRef: (input.modelRef as string | null | undefined) ?? null,
+        score: input.score as number,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      void actorPersonId;
+      return toAdvisoryQualityScoreView(score);
+    },
+
+    async listAdvisoryQualityScores(execution, contributionId) {
+      const scores = await qualityService.listAdvisoryScores(
+        getExecutionContext() ?? execution,
+        contributionId,
+      );
+      return scores.map(toAdvisoryQualityScoreView);
+    },
+
+    /**
+     * The FIRST LlmPort consumer (NET-W013, AI-004): build the NEUTRAL
+     * record-level fact set (never user content), request an advisory
+     * score from the provider-neutral port, and attach it through the
+     * domain's advisory API with provider identity preserved. The
+     * model output is structurally non-authoritative evidence.
+     */
+    async generateAdvisoryQualityScore(execution, _actorPersonId, input) {
+      const contributionId = input.contributionId as string;
+      const idempotencyKey = input.idempotencyKey as string;
+      const contribution = await contributionService.getContribution(
+        execution,
+        contributionId,
+      );
+      const organizationScopeId = contribution.organizationScopeId;
+      // Neutral record-level facts ONLY (no user content, no
+      // authoritative assertions — the provider receives labels +
+      // values from the authoritative records).
+      let pohState = "none";
+      let qualifyingBasisCount = 0;
+      let independentSourceCount = 0;
+      let mentionCount = 0;
+      try {
+        const poh = await helpfulnessService.getProofOfHelpfulness(
+          execution,
+          contributionId,
+        );
+        pohState = poh.state;
+        const latest =
+          poh.evaluations.length > 0
+            ? poh.evaluations[poh.evaluations.length - 1]!
+            : null;
+        qualifyingBasisCount = latest ? latest.qualifyingBasisCount : 0;
+        independentSourceCount = latest ? latest.independentSourceCount : 0;
+        const submission = contribution.submission as {
+          mentions?: readonly unknown[];
+        };
+        mentionCount = Array.isArray(submission?.mentions)
+          ? submission.mentions.length
+          : 0;
+      } catch {
+        // No PoH for this contribution — the facts stay at their
+        // neutral defaults (quality evaluates non-helpful kinds too).
+      }
+      // The rubric reference: the pinned quality policy when supplied,
+      // else the neutral default rubric.
+      let rubricRef = "contribution-quality:default";
+      if (input.qualityPolicyId) {
+        const versions = await qualityService.listQualityPolicyVersions(
+          execution,
+          input.qualityPolicyId as string,
+        );
+        const latest = versions[versions.length - 1];
+        if (latest) {
+          rubricRef = `quality_policy:${latest.policyId}:v${String(latest.version)}`;
+        }
+      }
+      const scored = await llmProvider.score({
+        purpose: "content_scoring",
+        rubricRef,
+        neutralFacts: [
+          { label: "contribution_type", value: contribution.contributionType },
+          { label: "contribution_state", value: contribution.state },
+          { label: "mention_count", value: String(mentionCount) },
+          { label: "poh_state", value: pohState },
+          {
+            label: "poh_qualifying_basis_count",
+            value: String(qualifyingBasisCount),
+          },
+          {
+            label: "poh_independent_source_count",
+            value: String(independentSourceCount),
+          },
+        ],
+      });
+      const attached = await qualityService.attachAdvisoryScore(execution, {
+        contributionId,
+        organizationScopeId,
+        kind: "model_score",
+        methodRef: rubricRef,
+        methodVersion: scored.modelRef,
+        provider: scored.provider,
+        modelRef: scored.modelRef,
+        score: scored.score,
+        idempotencyKey: `${idempotencyKey}:attach`,
+      });
+      return {
+        advisoryScore: toAdvisoryQualityScoreView(attached),
+        provider: scored.provider,
+        modelRef: scored.modelRef,
+        authoritative: scored.authoritative,
+      };
+    },
+
+    async previewQualityEvaluation(execution, _actorPersonId, input) {
+      const preview = await qualityService.previewQualityEvaluation(
+        execution,
+        {
+          contributionId: input.contributionId as string,
+          organizationScopeId: input.organizationScopeId as string,
+          qualityPolicyId: input.qualityPolicyId as string,
+          ...(input.qualityPolicyVersion !== undefined
+            ? { qualityPolicyVersion: input.qualityPolicyVersion as number }
+            : {}),
+          evaluatedAt: input.evaluatedAt as string,
+        },
+      );
+      return {
+        policy: toQualityPolicyView(preview.policy),
+        inputContributions: preview.inputContributions as unknown as readonly Record<
+          string,
+          unknown
+        >[],
+        advisoryCount: preview.advisoryCount,
+        advisoryAverage: preview.advisoryAverage,
+        score: preview.score,
+        band: preview.band,
+        reasons: preview.reasons,
+        evaluator: preview.evaluator,
+      };
+    },
+
+    async recordQualityEvaluation(execution, _actorPersonId, input) {
+      const result = await qualityService.recordQualityEvaluation(execution, {
+        contributionId: input.contributionId as string,
+        organizationScopeId: input.organizationScopeId as string,
+        qualityPolicyId: input.qualityPolicyId as string,
+        ...(input.qualityPolicyVersion !== undefined
+          ? { qualityPolicyVersion: input.qualityPolicyVersion as number }
+          : {}),
+        evaluatedAt: input.evaluatedAt as string,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return {
+        evaluation: toQualityEvaluationView(result.evaluation),
+        created: result.created,
+      };
+    },
+
+    async getQualityEvaluationHistory(execution, contributionId) {
+      const [history, latest] = await Promise.all([
+        qualityService.listQualityEvaluationHistory(
+          getExecutionContext() ?? execution,
+          contributionId,
+        ),
+        qualityService.getLatestQualityEvaluation(
+          getExecutionContext() ?? execution,
+          contributionId,
+        ),
+      ]);
+      return {
+        evaluations: history.map(toQualityEvaluationView),
+        latest: latest === null ? null : toQualityEvaluationView(latest),
+      };
+    },
+
+    /**
+     * The moderation composite: the domain records the append-only
+     * decision; when the decision carries a spam/abuse reason, the
+     * composition root emits ONE evidence-backed risk signal into the
+     * EXISTING /disputes risk authority (subject: the CONTRIBUTOR;
+     * sources: the moderation decision + the contribution) with a
+     * compound idempotency key. This is the ONLY spam/abuse emission
+     * path — no second fraud authority exists.
+     */
+    async recordModerationDecision(execution, _actorPersonId, input) {
+      const contributionId = input.contributionId as string;
+      const idempotencyKey = input.idempotencyKey as string;
+      const contribution = await contributionService.getContribution(
+        execution,
+        contributionId,
+      );
+      const organizationScopeId = contribution.organizationScopeId;
+      const decision = await moderationService.recordModerationDecision(
+        execution,
+        {
+          contributionId,
+          organizationScopeId,
+          decision: input.decision as import("../core/moderation.ts").ModerationDecision,
+          reasonKinds: input.reasonKinds as readonly import("../core/moderation.ts").ModerationReasonKind[],
+          ...(input.notes !== undefined
+            ? { notes: input.notes as string | null }
+            : {}),
+          ...(input.qualityEvaluationIds !== undefined
+            ? {
+                qualityEvaluationIds:
+                  input.qualityEvaluationIds as readonly string[],
+              }
+            : {}),
+          idempotencyKey,
+        },
+      );
+      // Spam/abuse emission (composition root ONLY).
+      const reasons = decision.reasonKinds as readonly string[];
+      const abuseReasons = reasons.filter((r) => r === "spam" || r === "abuse");
+      let riskSignal: ReturnType<typeof toRiskSignalView> | null = null;
+      let signalCreated = false;
+      if (abuseReasons.length > 0) {
+        const category = abuseReasons.includes("spam") ? "spam" : "abuse";
+        const signalResult = await riskSignalService.createSignal(execution, {
+          organizationScopeId,
+          subjectPersonId: contribution.contributorId,
+          subjectRef: {
+            subjectType: "contribution",
+            subjectId: contributionId,
+          },
+          category,
+          severity: (input.signalSeverity as string | undefined) ?? "MEDIUM",
+          confidence:
+            typeof input.signalConfidence === "number"
+              ? input.signalConfidence
+              : 0.9,
+          provenance: {
+            kind: "manual_review",
+            detectionMethod: "net-w013-moderation",
+            detectionVersion: "1",
+            sources: [
+              { kind: "moderation_decision", id: decision.id },
+              { kind: "contribution", id: contributionId },
+            ],
+          },
+          description: `moderation ${decision.decision} (${decision.reasonKinds.join(", ")}) on contribution ${contributionId}`,
+          detectedAt: decision.decidedAt,
+          idempotencyKey: `${idempotencyKey}:signal`,
+        });
+        riskSignal = toRiskSignalView(signalResult.signal);
+        signalCreated = signalResult.created;
+      }
+      return {
+        decision: toModerationDecisionView(decision),
+        riskSignal,
+        signalCreated,
+      };
+    },
+
+    async listModerationDecisions(execution, contributionId) {
+      const decisions = await moderationService.listModerationDecisions(
+        getExecutionContext() ?? execution,
+        contributionId,
+      );
+      return decisions.map(toModerationDecisionView);
+    },
+
+    async getModerationSummary(execution, contributionId) {
+      const summary = await moderationService.getModerationSummary(
+        getExecutionContext() ?? execution,
+        contributionId,
+      );
+      return toModerationSummaryView(summary);
+    },
   };
 
   const registry = createModuleRegistry(snapshot, logger);
@@ -4928,12 +5442,23 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     // NET-W011 campaigns (campaign policy/configuration) service.
     campaignService,
     helpfulnessService,
+    // NET-W013 quality/moderation/anti-spam services + LLM providers.
+    qualityService,
+    moderationService,
+    llmProviders,
+    llmProvider,
     // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
     idempotency,
     async initialize() {
       // Provider-neutral measurement adapters initialize with the
       // runtime (concrete providers establish their clients here).
       for (const provider of measurementProviders) {
+        await provider.initialize();
+      }
+      // NET-W013: the provider-neutral LLM adapters initialize with
+      // the runtime as well (concrete providers establish clients
+      // here; the echo reference adapter is a no-op).
+      for (const provider of llmProviders) {
         await provider.initialize();
       }
       const states = await registry.initializeAll();

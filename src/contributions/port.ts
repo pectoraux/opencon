@@ -45,6 +45,19 @@ import type {
   LifecycleState,
   LifecycleSubject,
 } from "../core/workflow.ts";
+import type {
+  ContributionModerationStatus,
+  ModerationDecision,
+  ModerationReasonKind,
+  QualityAdvisoryKind,
+  QualityAdvisoryRules,
+  QualityBand,
+  QualityInputKind,
+  QualityInputRule,
+  QualityPolicyShapeInput,
+  QualityStructuralRules,
+  QualityThresholds,
+} from "../core/moderation.ts";
 
 /**
  * The kind of contribution. Provider-neutral — the string discriminator
@@ -203,6 +216,11 @@ export interface ContributionsPort {
     readonly helpfulnessBasisAttached: "helpfulness_basis.attached";
     readonly helpfulnessAdvisoryRecorded: "helpfulness_advisory.recorded";
     readonly proofOfHelpfulnessEvaluated: "proof_of_helpfulness.evaluated";
+    // NET-W013 (quality, moderation and anti-spam controls):
+    readonly qualityPolicyVersionCreated: "quality_policy.version_created";
+    readonly qualityAdvisoryScoreRecorded: "quality_advisory.recorded";
+    readonly qualityEvaluationRecorded: "quality_evaluation.recorded";
+    readonly moderationDecisionRecorded: "moderation_decision.recorded";
   };
 }
 
@@ -623,6 +641,15 @@ export interface ProofOfHelpfulnessRepository {
     id: string,
     tx: AuthorityTransaction,
   ): Promise<ProofOfHelpfulness | null>;
+  /**
+   * NET-W013 (additive, non-breaking): the transaction-boundary twin
+   * of findByContributionId — the quality service re-reads the PoH
+   * INSIDE the evaluation transaction (staleness re-check).
+   */
+  findByContributionIdWithinTx(
+    contributionId: string,
+    tx: AuthorityTransaction,
+  ): Promise<ProofOfHelpfulness | null>;
   createWithinTx(
     record: ProofOfHelpfulness,
     tx: AuthorityTransaction,
@@ -768,6 +795,476 @@ export interface HelpfulnessService {
     execution: ExecutionContext,
     input: RecordPublicationInput,
   ): Promise<ProofOfHelpfulness>;
+}
+
+// ===========================================================================
+// NET-W013 — Quality, moderation and anti-spam controls
+// (spec/work-orders/NET-W013.md; the W012 §2 domain-placement precedent:
+// quality/moderation semantics live IN /contributions — no 17th domain,
+// no new LifecycleSubjectKind; spam/abuse signals are emitted into
+// /disputes ONLY at the composition root).
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Quality policies (deterministic, versioned, auditable — work order §3.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * A QualityPolicy — an immutable, versioned record of the deterministic
+ * quality-evaluation parameters (the RiskPolicy/HelpfulnessPolicy
+ * lineage pattern):
+ *  - `policyId` is stable across versions; `version` increases by
+ *    exactly 1; a (policyId, version) pair is unique;
+ *  - all versions of a policyId share one organizationScopeId — the
+ *    lineage cannot be forked across scopes (checked on EVERY create
+ *    including version 1, under the ORGANIZATION-INDEPENDENT lineage
+ *    mutex `quality_policy_lineage:{policyId}`);
+ *  - the shape is validated by the core validator (per-input weights,
+ *    monotonic thresholds, advisory cap ≤ ADEQUATE, missing-input
+ *    floor ≤ LOW_QUALITY — the fail-safe structural composition).
+ */
+export interface QualityPolicy {
+  /** Record id (unique per version). */
+  readonly id: string;
+  readonly policyId: string;
+  readonly version: number;
+  readonly organizationScopeId: string;
+  readonly formatVersion: string;
+  readonly inputs: readonly QualityInputRule[];
+  readonly advisory: QualityAdvisoryRules;
+  readonly minimumGrade: import("../core/evidence.ts").EvidenceGrade;
+  readonly qualifyingSourceTypes: readonly string[];
+  readonly qualifyingOutcomeTypes: readonly string[];
+  readonly minimumConfidence: number;
+  readonly thresholds: QualityThresholds;
+  readonly structural: QualityStructuralRules;
+  readonly description: string | null;
+  readonly createdBy: string;
+  readonly createdAt: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+export interface DefineQualityPolicyInput {
+  readonly organizationScopeId: string;
+  readonly policyId: string;
+  readonly shape: QualityPolicyShapeInput;
+  readonly idempotencyKey: string;
+}
+
+export interface DefineQualityPolicyResult {
+  readonly policy: QualityPolicy;
+  readonly created: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Advisory quality scores (AI-004 — provider-neutral, non-authoritative)
+// ---------------------------------------------------------------------------
+
+/**
+ * An AdvisoryQualityScore — an append-only advisory record. Method
+ * identity (`methodRef` + `methodVersion`) is REQUIRED for every kind
+ * (the frozen measurement rule). Model-generated scores carry the
+ * provider/model identity from the neutral LLM port (filled by the
+ * composition-root generate composite); heuristic scores leave them
+ * null. Advisory scores NEVER qualify an input, NEVER satisfy a
+ * minimum, and influence a quality evaluation only through the
+ * policy's bounded advisory weight factor.
+ */
+export interface AdvisoryQualityScore {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly contributionId: string;
+  readonly kind: QualityAdvisoryKind;
+  readonly methodRef: string;
+  readonly methodVersion: string;
+  /** Provider identity (model-generated scores only; else null). */
+  readonly provider: string | null;
+  readonly modelRef: string | null;
+  readonly score: number;
+  readonly recordedBy: string;
+  readonly recordedAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+export interface AttachAdvisoryQualityScoreInput {
+  readonly contributionId: string;
+  readonly organizationScopeId: string;
+  readonly kind: QualityAdvisoryKind;
+  readonly methodRef: string;
+  readonly methodVersion: string;
+  readonly provider?: string | null;
+  readonly modelRef?: string | null;
+  readonly score: number;
+  readonly idempotencyKey: string;
+}
+
+// ---------------------------------------------------------------------------
+// Quality evaluations (the RiskAssessment snapshot pattern)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-input contribution breakdown — the evaluation NEVER collapses
+ * into an opaque score: every input kind's count, attainment and
+ * advisory composition are recorded for audit and reconstruction.
+ */
+export interface QualityInputContribution {
+  readonly kind: QualityInputKind;
+  readonly count: number;
+  /** Attainment ∈ [0,1] against the rule's minimumCount. */
+  readonly attainment: number;
+  readonly weight: number;
+}
+
+/**
+ * A QualityEvaluation — the deterministic evaluation snapshot with an
+ * explicit `evaluatedAt` determinism anchor, a SHA-256 digest over the
+ * canonical evaluation payload, and an append-only supersession chain
+ * (atomic back-pointer flip — the RiskAssessment pattern).
+ */
+export interface QualityEvaluation {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly contributionId: string;
+  readonly qualityPolicyId: string;
+  readonly qualityPolicyVersion: number;
+  readonly formatVersion: string;
+  /** The explicit determinism anchor (caller-supplied ISO timestamp). */
+  readonly evaluatedAt: string;
+  readonly recordedAt: string;
+  readonly inputContributions: readonly QualityInputContribution[];
+  readonly advisoryCount: number;
+  readonly advisoryAverage: number | null;
+  readonly score: number;
+  readonly band: QualityBand;
+  readonly reasons: readonly string[];
+  readonly evaluator: string;
+  readonly digest: string;
+  readonly supersedesEvaluationId: string | null;
+  readonly supersededByEvaluationId: string | null;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+export interface PreviewQualityEvaluationInput {
+  readonly contributionId: string;
+  readonly organizationScopeId: string;
+  readonly qualityPolicyId: string;
+  readonly qualityPolicyVersion?: number;
+  readonly evaluatedAt: string;
+}
+
+export interface PreviewQualityEvaluationResult {
+  readonly policy: QualityPolicy;
+  readonly inputContributions: readonly QualityInputContribution[];
+  readonly advisoryCount: number;
+  readonly advisoryAverage: number | null;
+  readonly score: number;
+  readonly band: QualityBand;
+  readonly reasons: readonly string[];
+  readonly evaluator: string;
+}
+
+export interface RecordQualityEvaluationInput {
+  readonly contributionId: string;
+  readonly organizationScopeId: string;
+  readonly qualityPolicyId: string;
+  readonly qualityPolicyVersion?: number;
+  readonly evaluatedAt: string;
+  readonly idempotencyKey: string;
+}
+
+export interface RecordQualityEvaluationResult {
+  readonly evaluation: QualityEvaluation;
+  readonly created: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Moderation decisions (append-only history — work order §3.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * A ModerationDecisionRecord — an IMMUTABLE decision in the
+ * contribution's append-only moderation history. The current
+ * moderation status is DERIVED (latest decision), never stored.
+ * Decisions never rewrite history and never transition workflow state;
+ * decisions carrying spam/abuse reason kinds are emitted (by the
+ * composition root ONLY) as evidence-backed risk signals into
+ * /disputes.
+ */
+export interface ModerationDecisionRecord {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly contributionId: string;
+  readonly decision: ModerationDecision;
+  readonly reasonKinds: readonly ModerationReasonKind[];
+  readonly notes: string | null;
+  /** Quality evaluations cited as decision evidence (same contribution). */
+  readonly qualityEvaluationIds: readonly string[];
+  readonly decidedBy: string;
+  readonly decidedAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+export interface RecordModerationDecisionInput {
+  readonly contributionId: string;
+  readonly organizationScopeId: string;
+  readonly decision: ModerationDecision;
+  readonly reasonKinds: readonly ModerationReasonKind[];
+  readonly notes?: string | null;
+  readonly qualityEvaluationIds?: readonly string[];
+  readonly idempotencyKey: string;
+}
+
+/** The derived moderation summary (status + deciding record). */
+export interface ModerationSummary {
+  readonly contributionId: string;
+  readonly organizationScopeId: string;
+  readonly status: ContributionModerationStatus;
+  readonly latestDecision: ModerationDecisionRecord | null;
+  readonly decisionCount: number;
+}
+
+// ---------------------------------------------------------------------------
+// Neutral lookups (read-only, injected by the composition root)
+// ---------------------------------------------------------------------------
+
+/**
+ * The truth-authority reads the quality service needs (the SAME
+ * neutral lookup interfaces the helpfulness service consumes — the
+ * quality engine re-resolves the PoH's recorded bases at evaluation
+ * time, so truth is never taken from a cached snapshot).
+ */
+export interface QualityLookups {
+  readonly proofOfHelpfulness: {
+    resolveByContribution(
+      contributionId: string,
+    ): Promise<ProofOfHelpfulness | null>;
+  };
+  readonly evidence: {
+    resolveEvidence(id: string): Promise<{
+      organizationScopeId: string;
+      subjectId: string;
+      subjectType: string;
+      sourceType: string;
+      grade: import("../core/evidence.ts").EvidenceGrade;
+      confidence: { readonly point: number };
+      provenanceSourceId: string | null;
+    } | null>;
+  };
+  readonly measurement: {
+    resolveMeasuredOutcome(id: string): Promise<{
+      organizationScopeId: string;
+      subjectId: string;
+      subjectType: string;
+      outcomeType: string;
+      state: string;
+      rollupConfidence: { readonly point: number } | null;
+    } | null>;
+  };
+  readonly proofOfValue: {
+    resolveProofOfValue(id: string): Promise<{
+      organizationScopeId: string;
+      subjectId: string;
+      subjectType: string;
+      state: string;
+    } | null>;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Repositories (authority-backed; WithinTx twins for atomic mutation)
+// ---------------------------------------------------------------------------
+
+export interface QualityPolicyRepository {
+  findById(id: string): Promise<QualityPolicy | null>;
+  findVersion(
+    policyId: string,
+    version: number,
+  ): Promise<QualityPolicy | null>;
+  listByPolicyId(policyId: string): Promise<readonly QualityPolicy[]>;
+  findVersionWithinTx(
+    policyId: string,
+    version: number,
+    tx: AuthorityTransaction,
+  ): Promise<QualityPolicy | null>;
+  findLatestWithinTx(
+    policyId: string,
+    tx: AuthorityTransaction,
+  ): Promise<QualityPolicy | null>;
+  createWithinTx(
+    policy: QualityPolicy,
+    tx: AuthorityTransaction,
+  ): Promise<QualityPolicy>;
+}
+
+export interface QualityEvaluationRepository {
+  findById(id: string): Promise<QualityEvaluation | null>;
+  findLatestByContributionId(
+    contributionId: string,
+  ): Promise<QualityEvaluation | null>;
+  listByContributionId(
+    contributionId: string,
+  ): Promise<readonly QualityEvaluation[]>;
+  findByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<QualityEvaluation | null>;
+  findLatestByContributionIdWithinTx(
+    contributionId: string,
+    tx: AuthorityTransaction,
+  ): Promise<QualityEvaluation | null>;
+  createWithinTx(
+    evaluation: QualityEvaluation,
+    tx: AuthorityTransaction,
+  ): Promise<QualityEvaluation>;
+  saveWithinTx(
+    evaluation: QualityEvaluation,
+    tx: AuthorityTransaction,
+  ): Promise<QualityEvaluation>;
+}
+
+export interface AdvisoryQualityScoreRepository {
+  findById(id: string): Promise<AdvisoryQualityScore | null>;
+  listByContribution(
+    contributionId: string,
+  ): Promise<readonly AdvisoryQualityScore[]>;
+  listByContributionWithinTx(
+    contributionId: string,
+    tx: AuthorityTransaction,
+  ): Promise<readonly AdvisoryQualityScore[]>;
+  createWithinTx(
+    record: AdvisoryQualityScore,
+    tx: AuthorityTransaction,
+  ): Promise<AdvisoryQualityScore>;
+}
+
+export interface ModerationDecisionRepository {
+  findById(id: string): Promise<ModerationDecisionRecord | null>;
+  listByContribution(
+    contributionId: string,
+  ): Promise<readonly ModerationDecisionRecord[]>;
+  findByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<ModerationDecisionRecord | null>;
+  listByContributionWithinTx(
+    contributionId: string,
+    tx: AuthorityTransaction,
+  ): Promise<readonly ModerationDecisionRecord[]>;
+  createWithinTx(
+    record: ModerationDecisionRecord,
+    tx: AuthorityTransaction,
+  ): Promise<ModerationDecisionRecord>;
+}
+
+// ---------------------------------------------------------------------------
+// The domain services
+// ---------------------------------------------------------------------------
+
+/**
+ * QualityService — the NET-W013 quality authority (policy lineage,
+ * advisory scores, deterministic evaluations). Reads the truth
+ * authorities through the neutral lookups; pins the policy version
+ * IN-TX with same-scope validation (the PR #24 remediation lesson);
+ * never mutates lifecycle/economic/reputation state.
+ */
+export interface QualityService {
+  defineQualityPolicy(
+    execution: ExecutionContext,
+    input: DefineQualityPolicyInput,
+  ): Promise<DefineQualityPolicyResult>;
+  getQualityPolicy(
+    execution: ExecutionContext,
+    policyId: string,
+    version: number,
+  ): Promise<QualityPolicy>;
+  listQualityPolicyVersions(
+    execution: ExecutionContext,
+    policyId: string,
+  ): Promise<readonly QualityPolicy[]>;
+
+  /** Attach an advisory score (append-only; provider identity preserved). */
+  attachAdvisoryScore(
+    execution: ExecutionContext,
+    input: AttachAdvisoryQualityScoreInput,
+  ): Promise<AdvisoryQualityScore>;
+  listAdvisoryScores(
+    execution: ExecutionContext,
+    contributionId: string,
+  ): Promise<readonly AdvisoryQualityScore[]>;
+
+  /** Pure engine preview over re-resolved facts (no persistence). */
+  previewQualityEvaluation(
+    execution: ExecutionContext,
+    input: PreviewQualityEvaluationInput,
+  ): Promise<PreviewQualityEvaluationResult>;
+  /**
+   * Record the authoritative evaluation (re-resolves the facts,
+   * re-validates the pinned policy IN-TX, supersedes the previous
+   * latest with an atomic back-pointer flip).
+   */
+  recordQualityEvaluation(
+    execution: ExecutionContext,
+    input: RecordQualityEvaluationInput,
+  ): Promise<RecordQualityEvaluationResult>;
+  getQualityEvaluation(
+    execution: ExecutionContext,
+    evaluationId: string,
+  ): Promise<QualityEvaluation>;
+  listQualityEvaluationHistory(
+    execution: ExecutionContext,
+    contributionId: string,
+  ): Promise<readonly QualityEvaluation[]>;
+  getLatestQualityEvaluation(
+    execution: ExecutionContext,
+    contributionId: string,
+  ): Promise<QualityEvaluation | null>;
+}
+
+/**
+ * ModerationService — the NET-W013 moderation authority (append-only
+ * decision history + derived status). Decisions are person-actor
+ * (moderator-controlled) records; the spam/abuse RISK-SIGNAL emission
+ * lives at the composition root, never here (no second fraud
+ * authority).
+ */
+export interface ModerationService {
+  recordModerationDecision(
+    execution: ExecutionContext,
+    input: RecordModerationDecisionInput,
+  ): Promise<ModerationDecisionRecord>;
+  listModerationDecisions(
+    execution: ExecutionContext,
+    contributionId: string,
+  ): Promise<readonly ModerationDecisionRecord[]>;
+  getModerationSummary(
+    execution: ExecutionContext,
+    contributionId: string,
+  ): Promise<ModerationSummary>;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W013 audit event types
+// ---------------------------------------------------------------------------
+
+/**
+ * The NET-W013 audit vocabulary (transactional audit lineage).
+ */
+export interface QualityAuditEventTypes {
+  readonly qualityPolicyVersionCreated: "quality_policy.version_created";
+  readonly qualityAdvisoryScoreRecorded: "quality_advisory.recorded";
+  readonly qualityEvaluationRecorded: "quality_evaluation.recorded";
+  readonly moderationDecisionRecorded: "moderation_decision.recorded";
 }
 
 export type {

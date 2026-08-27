@@ -360,6 +360,19 @@ export interface RiskRecordLookup {
   resolveCase(id: string): Promise<RiskResolvedRiskRecordSource | null>;
 }
 
+/**
+ * NET-W013 (additive, non-breaking): over the contributions domain's
+ * MODERATION DECISION records — an authoritative upstream record the
+ * spam/abuse risk signals cite as their evidence base (work order
+ * §3.5). Read-only; the decisions themselves are appended by the
+ * contributions domain, never here.
+ */
+export interface RiskModerationDecisionLookup {
+  resolve(
+    id: string,
+  ): Promise<RiskResolvedRiskRecordSource | null>;
+}
+
 /** Over the NET-W007 reputation domain (read-only — never mutated here). */
 export interface RiskReputationSnapshotLookup {
   /** Resolve by subject (the latest snapshot for that person). */
@@ -380,6 +393,12 @@ export interface RiskLookups {
   readonly economic: RiskEconomicValueLookup;
   readonly reputation: RiskReputationSnapshotLookup;
   readonly risk: RiskRecordLookup;
+  /**
+   * NET-W013 (additive, non-breaking): moderation-decision source
+   * resolution for the spam/abuse signals emitted by the composition
+   * root.
+   */
+  readonly moderation: RiskModerationDecisionLookup;
 }
 
 // ---------------------------------------------------------------------------

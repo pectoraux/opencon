@@ -35,6 +35,25 @@ import { defineBoundaryModule } from "../core/domain-module.ts";
  *    the composition root);
  *  - The first fail-closed consumer of the NET-W011
  *    eligibility-policy reference.
+ *
+ * Concrete behaviour introduced in NET-W013 (quality, moderation and
+ * anti-spam controls — spec/work-orders/NET-W013.md):
+ *  - The versioned quality-policy lineage + the PURE deterministic
+ *    quality engine over re-resolved authoritative facts (the PoH
+ *    aggregate + its evidence/measurement/PoV bases re-resolved
+ *    through the neutral lookups; mentions structurally absent —
+ *    HELP-002);
+ *  - Append-only advisory quality scores with provider/method
+ *    identity (AI-004 — advisory, provider-neutral, structurally
+ *    non-authoritative; the LLM port is consumed ONLY at the
+ *    composition root);
+ *  - Deterministic quality-evaluation snapshots with in-transaction
+ *    same-scope policy pinning, digest and append-only supersession;
+ *  - Append-only moderation decision histories with DERIVED current
+ *    status (moderator-controlled, auditable);
+ *  - The spam/abuse risk-signal emission into the EXISTING /disputes
+ *    risk authority, composed ONLY at the composition root (no second
+ *    fraud authority).
  */
 export const contributionsModule = defineBoundaryModule({
   name: "contributions",
@@ -46,5 +65,11 @@ export const contributionsModule = defineBoundaryModule({
     "contributions — structured helpful submissions, versioned helpfulness " +
     "policy, the Proof-of-Helpfulness aggregate with evidenced qualifying " +
     "bases, first-class commercial disclosures, user-controlled " +
-    "publication, and fail-closed campaign-eligibility enforcement)",
+    "publication, and fail-closed campaign-eligibility enforcement. " +
+    "NET-W013: quality, moderation and anti-spam — versioned quality " +
+    "policies, the pure deterministic quality engine over re-resolved " +
+    "authoritative facts, provider-neutral advisory quality scores, " +
+    "append-only quality-evaluation supersession and moderation decision " +
+    "histories with derived status, and composition-root-only spam/abuse " +
+    "risk-signal emission into /disputes)",
 });

@@ -1166,6 +1166,97 @@ export interface ApiCommercialDisclosureView {
   readonly updatedAt: string;
 }
 
+/** The API view of a quality policy version (NET-W013). */
+export interface ApiQualityPolicyView {
+  readonly id: string;
+  readonly policyId: string;
+  readonly organizationScopeId: string;
+  readonly version: number;
+  readonly formatVersion: string;
+  readonly inputs: readonly Record<string, unknown>[];
+  readonly advisory: Record<string, unknown>;
+  readonly minimumGrade: string;
+  readonly qualifyingSourceTypes: readonly string[];
+  readonly qualifyingOutcomeTypes: readonly string[];
+  readonly minimumConfidence: number;
+  readonly thresholds: Record<string, unknown>;
+  readonly structural: Record<string, unknown>;
+  readonly description: string | null;
+  readonly createdBy: string;
+  readonly createdAt: string;
+}
+
+/** The API view of an advisory quality score (NET-W013). */
+export interface ApiAdvisoryQualityScoreView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly contributionId: string;
+  readonly kind: string;
+  readonly methodRef: string;
+  readonly methodVersion: string;
+  readonly provider: string | null;
+  readonly modelRef: string | null;
+  readonly score: number;
+  readonly recordedBy: string;
+  readonly recordedAt: string;
+}
+
+/** The API view of a recorded quality evaluation (NET-W013). */
+export interface ApiQualityEvaluationView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly contributionId: string;
+  readonly qualityPolicyId: string;
+  readonly qualityPolicyVersion: number;
+  readonly formatVersion: string;
+  readonly evaluatedAt: string;
+  readonly recordedAt: string;
+  readonly inputContributions: readonly Record<string, unknown>[];
+  readonly advisoryCount: number;
+  readonly advisoryAverage: number | null;
+  readonly score: number;
+  readonly band: string;
+  readonly reasons: readonly string[];
+  readonly evaluator: string;
+  readonly digest: string;
+  readonly supersedesEvaluationId: string | null;
+  readonly supersededByEvaluationId: string | null;
+}
+
+/** The API view of a quality-evaluation preview (NET-W013). */
+export interface ApiQualityEvaluationPreviewView {
+  readonly policy: ApiQualityPolicyView;
+  readonly inputContributions: readonly Record<string, unknown>[];
+  readonly advisoryCount: number;
+  readonly advisoryAverage: number | null;
+  readonly score: number;
+  readonly band: string;
+  readonly reasons: readonly string[];
+  readonly evaluator: string;
+}
+
+/** The API view of a moderation decision record (NET-W013). */
+export interface ApiModerationDecisionView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly contributionId: string;
+  readonly decision: string;
+  readonly reasonKinds: readonly string[];
+  readonly notes: string | null;
+  readonly qualityEvaluationIds: readonly string[];
+  readonly decidedBy: string;
+  readonly decidedAt: string;
+}
+
+/** The API view of a contribution's derived moderation status (NET-W013). */
+export interface ApiModerationSummaryView {
+  readonly contributionId: string;
+  readonly organizationScopeId: string;
+  readonly status: string;
+  readonly decisionCount: number;
+  readonly latestDecision: ApiModerationDecisionView | null;
+}
+
 export interface ApiCommands {
   /** Create a canonical person identity. Returns the public view. */
   createIdentity(
@@ -2238,6 +2329,121 @@ export interface ApiCommands {
     actorPersonId: string,
     input: Record<string, unknown>,
   ): Promise<ApiProofOfHelpfulnessView>;
+
+  // -----------------------------------------------------------------
+  // NET-W013 — quality, moderation and anti-spam controls.
+  // -----------------------------------------------------------------
+
+  /**
+   * Define the next immutable quality policy version (protected;
+   * person actor; deterministic evaluation criteria).
+   */
+  defineQualityPolicy(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ policy: ApiQualityPolicyView; created: boolean }>;
+
+  /** List a quality policy lineage's versions (public read). */
+  listQualityPolicies(
+    execution: ExecutionContext,
+    policyId: string,
+  ): Promise<readonly ApiQualityPolicyView[]>;
+
+  /**
+   * Attach an advisory quality score manually (protected; advisory
+   * only; method identity required; provider identity optional).
+   */
+  attachAdvisoryQualityScore(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiAdvisoryQualityScoreView>;
+
+  /** List a contribution's advisory quality scores (public read). */
+  listAdvisoryQualityScores(
+    execution: ExecutionContext,
+    contributionId: string,
+  ): Promise<readonly ApiAdvisoryQualityScoreView[]>;
+
+  /**
+   * Generate an advisory quality score through the provider-neutral
+   * LLM port (protected; the FIRST LlmPort consumer — neutral
+   * record-level facts only; the output is structurally
+   * non-authoritative evidence with provider identity preserved).
+   */
+  generateAdvisoryQualityScore(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{
+    advisoryScore: ApiAdvisoryQualityScoreView;
+    provider: string;
+    modelRef: string;
+    authoritative: false;
+  }>;
+
+  /**
+   * Preview a deterministic quality evaluation (protected; pure
+   * engine over re-resolved facts; no persistence).
+   */
+  previewQualityEvaluation(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiQualityEvaluationPreviewView>;
+
+  /**
+   * Record the authoritative quality evaluation (protected; the
+   * pinned policy is same-scope-validated IN-TX; append-only
+   * supersession).
+   */
+  recordQualityEvaluation(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ evaluation: ApiQualityEvaluationView; created: boolean }>;
+
+  /**
+   * A contribution's quality-evaluation history + latest (public
+   * read).
+   */
+  getQualityEvaluationHistory(
+    execution: ExecutionContext,
+    contributionId: string,
+  ): Promise<{
+    evaluations: readonly ApiQualityEvaluationView[];
+    latest: ApiQualityEvaluationView | null;
+  }>;
+
+  /**
+   * Record a moderation decision (protected; person actor —
+   * moderator-controlled; append-only history). When the decision
+   * carries a spam/abuse reason, the composite emits ONE
+   * evidence-backed risk signal into the EXISTING /disputes risk
+   * authority (no second fraud authority).
+   */
+  recordModerationDecision(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{
+    decision: ApiModerationDecisionView;
+    riskSignal: Record<string, unknown> | null;
+    signalCreated: boolean;
+  }>;
+
+  /** A contribution's append-only moderation history (public read). */
+  listModerationDecisions(
+    execution: ExecutionContext,
+    contributionId: string,
+  ): Promise<readonly ApiModerationDecisionView[]>;
+
+  /** A contribution's DERIVED moderation status (public read). */
+  getModerationSummary(
+    execution: ExecutionContext,
+    contributionId: string,
+  ): Promise<ApiModerationSummaryView>;
 }
 
 export type { ExecutionContext };
