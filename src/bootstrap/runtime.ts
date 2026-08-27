@@ -227,6 +227,42 @@ import type {
   RewardService,
 } from "../settlement/port.ts";
 
+// NET-W009 disputes boundary (the Phase-3 Trust domain): the fraud/risk
+// foundation — first-class provenance-backed risk signals, versioned
+// deterministic risk policies (org-independent lineage mutex),
+// multi-signal provenance-preserving assessments (pure deterministic
+// engine), evidence-backed review cases with append-only decision
+// history, and the control-decision registry the composition-root
+// economic gates consult (lock invariant 21 enforcement point). The
+// boundary is a decision-support and CONTROL authority ONLY: no
+// economic mutation, no reputation mutation, no lifecycle mutation.
+import { createAuthorityRiskSignalRepository } from "../disputes/authority-signal-repository.ts";
+import { createAuthorityRiskPolicyRepository } from "../disputes/authority-policy-repository.ts";
+import { createAuthorityRiskAssessmentRepository } from "../disputes/authority-assessment-repository.ts";
+import { createAuthorityRiskCaseRepository } from "../disputes/authority-case-repository.ts";
+import { createAuthorityRiskControlRepository } from "../disputes/authority-control-repository.ts";
+import { createRiskSignalService } from "../disputes/signal-service.ts";
+import { createRiskPolicyService } from "../disputes/policy-service.ts";
+import { createRiskAssessmentService } from "../disputes/assessment-service.ts";
+import { createRiskCaseService } from "../disputes/case-service.ts";
+import { createRiskControlService } from "../disputes/control-service.ts";
+import type {
+  ActivateRiskControlInput,
+  CreateRiskPolicyInput,
+  CreateRiskSignalInput,
+  OpenRiskCaseInput,
+  RecordRiskAssessmentInput,
+  RecordRiskCaseDecisionInput,
+  ResolveRiskControlInput,
+  RiskAssessmentService,
+  RiskCaseService,
+  RiskControlService,
+  RiskPolicyService,
+  RiskSignalService,
+  SupersedeRiskSignalInput,
+} from "../disputes/port.ts";
+import type { RiskOperationClass } from "../core/risk.ts";
+
 // Boundary module registrations (composition root imports all).
 import { identityModule } from "../identity/module.ts";
 import { organizationsModule } from "../organizations/module.ts";
@@ -350,6 +386,12 @@ export interface Runtime {
   readonly cashService: CashService;
   readonly conversionService: ConversionService;
   readonly economicLedgerService: EconomicLedgerService;
+  // NET-W009 disputes (fraud/risk foundation) services.
+  readonly riskSignalService: RiskSignalService;
+  readonly riskPolicyService: RiskPolicyService;
+  readonly riskAssessmentService: RiskAssessmentService;
+  readonly riskCaseService: RiskCaseService;
+  readonly riskControlService: RiskControlService;
   // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
   readonly idempotency: IdempotencyStore;
   initialize(): Promise<readonly { name: string; initialized: boolean }[]>;
@@ -1064,6 +1106,250 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     repository: economicLedgerRepo,
   });
 
+  // ------------------------------------------------------------------
+  // NET-W009 disputes boundary wiring (fraud/risk foundation).
+  //
+  // Cross-domain resolution arrives as thin adapters over the
+  // ALREADY-WIRED repositories of the owning domains (identity/
+  // evidence/outcomes/contributions/settlement/reputation) — the same
+  // dependency-inversion pattern as NET-W005/006/007/008; the disputes
+  // domain imports core only. Reputation is consulted READ-ONLY here
+  // (historical_reputation signals cite snapshots as authoritative
+  // sources; the risk boundary NEVER mutates reputation — work order
+  // §4 invariant 2).
+  // ------------------------------------------------------------------
+  const riskSubjectLookup = {
+    async exists(personId: string) {
+      return identityRepo.exists(personId);
+    },
+  };
+  const riskEvidenceLookup = {
+    async resolve(id: string) {
+      const evidence = await evidenceRepo.findById(id);
+      return evidence
+        ? {
+            organizationScopeId: evidence.organizationScopeId,
+            sourceType: evidence.provenance.sourceType,
+          }
+        : null;
+    },
+  };
+  const riskProofOfValueLookup = {
+    async resolve(id: string) {
+      const pov = await proofOfValueRepo.findById(id);
+      return pov
+        ? { organizationScopeId: pov.organizationScopeId, state: pov.state }
+        : null;
+    },
+  };
+  const riskMeasuredOutcomeLookup = {
+    async resolve(id: string) {
+      const measurement = await measuredOutcomeRepo.findById(id);
+      return measurement
+        ? {
+            organizationScopeId: measurement.organizationScopeId,
+            state: measurement.state,
+          }
+        : null;
+    },
+  };
+  const riskContributionLookup = {
+    async resolve(id: string) {
+      const contribution = await contributionRepo.findById(id);
+      return contribution
+        ? {
+            organizationScopeId: contribution.organizationScopeId,
+            state: contribution.state,
+          }
+        : null;
+    },
+  };
+  const riskEconomicLookup = {
+    async resolveValue(id: string) {
+      const value = await economicValueRepo.findById(id);
+      return value
+        ? {
+            organizationScopeId: value.organizationScopeId,
+            state: value.state,
+            beneficiaryPersonId: value.beneficiaryPersonId,
+          }
+        : null;
+    },
+    async resolveCreditIssuance(id: string) {
+      const issuance = await creditIssuanceRepo.findById(id);
+      return issuance
+        ? {
+            organizationScopeId: issuance.organizationScopeId,
+            state: issuance.status,
+            beneficiaryPersonId: issuance.beneficiaryPersonId,
+          }
+        : null;
+    },
+    async resolveCashObligation(id: string) {
+      const obligation = await cashObligationRepo.findById(id);
+      return obligation
+        ? {
+            organizationScopeId: obligation.organizationScopeId,
+            state: obligation.status,
+            beneficiaryPersonId: obligation.counterpartyPersonId,
+          }
+        : null;
+    },
+  };
+  const riskReputationLookup = {
+    async resolve(organizationScopeId: string, subjectPersonId: string) {
+      const snapshots = await reputationSnapshotRepo.listBySubject(
+        organizationScopeId,
+        subjectPersonId,
+      );
+      const latest = snapshots.length > 0 ? snapshots[snapshots.length - 1]! : null;
+      return latest
+        ? {
+            organizationScopeId: latest.organizationScopeId,
+            subjectPersonId: latest.subjectPersonId,
+            policyId: latest.policyId,
+            policyVersion: latest.policyVersion,
+            digest: latest.digest,
+          }
+        : null;
+    },
+    async resolveById(id: string) {
+      const snapshot = await reputationSnapshotRepo.findById(id);
+      return snapshot
+        ? {
+            organizationScopeId: snapshot.organizationScopeId,
+            subjectPersonId: snapshot.subjectPersonId,
+            policyId: snapshot.policyId,
+            policyVersion: snapshot.policyVersion,
+            digest: snapshot.digest,
+          }
+        : null;
+    },
+  };
+  const riskRecordLookup = {
+    async resolveSignal(id: string) {
+      const signal = await riskSignalRepo.findById(id);
+      return signal ? { organizationScopeId: signal.organizationScopeId } : null;
+    },
+    async resolveAssessment(id: string) {
+      const assessment = await riskAssessmentRepo.findById(id);
+      return assessment
+        ? { organizationScopeId: assessment.organizationScopeId }
+        : null;
+    },
+  };
+  const riskLookups = {
+    subject: riskSubjectLookup,
+    evidence: riskEvidenceLookup,
+    proofOfValue: riskProofOfValueLookup,
+    measuredOutcome: riskMeasuredOutcomeLookup,
+    contribution: riskContributionLookup,
+    economic: riskEconomicLookup,
+    reputation: riskReputationLookup,
+    risk: riskRecordLookup,
+  };
+  const riskSignalRepo = createAuthorityRiskSignalRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("disputes").debug(m, f) },
+  });
+  const riskPolicyRepo = createAuthorityRiskPolicyRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("disputes").debug(m, f) },
+  });
+  const riskAssessmentRepo = createAuthorityRiskAssessmentRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("disputes").debug(m, f) },
+  });
+  const riskCaseRepo = createAuthorityRiskCaseRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("disputes").debug(m, f) },
+  });
+  const riskControlRepo = createAuthorityRiskControlRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("disputes").debug(m, f) },
+  });
+  const riskSignalService = createRiskSignalService({
+    repository: riskSignalRepo,
+    lookups: riskLookups,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("disputes"),
+  });
+  const riskPolicyService = createRiskPolicyService({
+    repository: riskPolicyRepo,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("disputes"),
+  });
+  const riskAssessmentService = createRiskAssessmentService({
+    assessmentRepository: riskAssessmentRepo,
+    signalRepository: riskSignalRepo,
+    policyRepository: riskPolicyRepo,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("disputes"),
+  });
+  const riskCaseService = createRiskCaseService({
+    repository: riskCaseRepo,
+    lookups: riskLookups,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("disputes"),
+  });
+  const riskControlService = createRiskControlService({
+    repository: riskControlRepo,
+    assessmentRepository: riskAssessmentRepo,
+    caseRepository: riskCaseRepo,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("disputes"),
+  });
+
+  // ------------------------------------------------------------------
+  // NET-W009 §3.7 ECONOMIC GATE (the lock-invariant-21 enforcement
+  // point). The composition root — NOT the risk domain, NOT the
+  // settlement domain — consults the active-control registry before
+  // the guarded settlement commands and refuses the call when an
+  // ACTIVE HOLD/BLOCK control matches (operation class + subject:
+  // record id OR beneficiary person). The settlement code is
+  // untouched; the fraud boundary never mutates economic state (it
+  // can only refuse to allow the wrapped operation to proceed).
+  // ------------------------------------------------------------------
+  async function refuseWhenGated(
+    execution: import("../core/execution-context.ts").ExecutionContext,
+    organizationScopeId: string,
+    operationClass: RiskOperationClass,
+    recordSubjectId: string | null,
+    personSubjectId: string | null,
+  ): Promise<void> {
+    const control = await riskControlService.findGatingControl(
+      execution,
+      organizationScopeId,
+      operationClass,
+      recordSubjectId,
+      personSubjectId,
+    );
+    if (control && (control.action === "HOLD" || control.action === "BLOCK")) {
+      const { OpenConError: GateError } = await import("../core/errors.ts");
+      throw new GateError({
+        code: "RISK_CONTROL",
+        classification: "precondition",
+        message: `operation ${operationClass} is refused: active risk control ${control.id} (${control.action}) covers this subject`,
+        context: {
+          controlDecisionId: control.id,
+          action: control.action,
+          operationClass,
+          originAssessmentId: control.originAssessmentId,
+          originCaseId: control.originCaseId,
+          reasonCodes: control.reasonCodes,
+          organizationScopeId,
+          recordSubjectId,
+          personSubjectId,
+        },
+      });
+    }
+  }
+
   // API auth + commands adapter (dependency inversion: the API server
   // consumes ApiAuth/ApiCommands; we bridge to the real domain services).
   const apiAuth: ApiAuth = {
@@ -1355,6 +1641,105 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       entries: transaction.entries as unknown as readonly Record<string, unknown>[],
       recordedAt: transaction.recordedAt,
       idempotencyKey: transaction.idempotencyKey,
+    };
+  }
+  // NET-W009 view helpers (domain entity → API view).
+  function toRiskSignalView(signal: import("../disputes/port.ts").RiskSignal) {
+    return {
+      id: signal.id,
+      organizationScopeId: signal.organizationScopeId,
+      subjectPersonId: signal.subjectPersonId,
+      subjectRef: signal.subjectRef,
+      category: signal.category,
+      severity: signal.severity,
+      confidence: signal.confidence,
+      provenance: signal.provenance,
+      advisory: signal.advisory,
+      description: signal.description,
+      detectedAt: signal.detectedAt,
+      recordedAt: signal.recordedAt,
+      supersedesSignalId: signal.supersedesSignalId,
+      supersededBySignalId: signal.supersededBySignalId,
+    };
+  }
+  function toRiskPolicyView(policy: import("../disputes/port.ts").RiskPolicy) {
+    return {
+      id: policy.id,
+      policyId: policy.policyId,
+      version: policy.version,
+      organizationScopeId: policy.organizationScopeId,
+      description: policy.description,
+      rules: policy.rules as unknown as readonly Record<string, unknown>[],
+      thresholds: policy.thresholds as unknown as Record<string, unknown>,
+      criticalFloorState: policy.criticalFloorState,
+      advisoryOnlyCapState: policy.advisoryOnlyCapState,
+      requiredCategories: policy.requiredCategories,
+      missingDataState: policy.missingDataState,
+      createdAt: policy.createdAt,
+    };
+  }
+  function toRiskAssessmentView(
+    assessment: import("../disputes/port.ts").RiskAssessment,
+  ) {
+    return {
+      id: assessment.id,
+      organizationScopeId: assessment.organizationScopeId,
+      subjectPersonId: assessment.subjectPersonId,
+      subjectRef: assessment.subjectRef,
+      policyId: assessment.policyId,
+      policyVersion: assessment.policyVersion,
+      evaluatedAt: assessment.evaluatedAt,
+      recordedAt: assessment.recordedAt,
+      signalIds: assessment.signalIds,
+      contributions: assessment.contributions as unknown as readonly Record<
+        string,
+        unknown
+      >[],
+      score: assessment.score,
+      state: assessment.state,
+      missingCategories: assessment.missingCategories,
+      digest: assessment.digest,
+      supersedesAssessmentId: assessment.supersedesAssessmentId,
+      supersededByAssessmentId: assessment.supersededByAssessmentId,
+    };
+  }
+  function toRiskCaseView(riskCase: import("../disputes/port.ts").RiskCase) {
+    return {
+      id: riskCase.id,
+      organizationScopeId: riskCase.organizationScopeId,
+      subjectPersonId: riskCase.subjectPersonId,
+      subjectRef: riskCase.subjectRef,
+      title: riskCase.title,
+      description: riskCase.description,
+      state: riskCase.state,
+      reasonCodes: riskCase.reasonCodes,
+      decisions: riskCase.decisions as unknown as readonly Record<string, unknown>[],
+      openedBy: riskCase.openedBy,
+      openedAt: riskCase.openedAt,
+      resolvedAt: riskCase.resolvedAt,
+      resolution: riskCase.resolution,
+    };
+  }
+  function toRiskControlView(
+    control: import("../disputes/port.ts").RiskControlDecision,
+  ) {
+    return {
+      id: control.id,
+      organizationScopeId: control.organizationScopeId,
+      operationClass: control.operationClass,
+      action: control.action,
+      subjectPersonId: control.subjectPersonId,
+      subjectRef: control.subjectRef,
+      originAssessmentId: control.originAssessmentId,
+      originCaseId: control.originCaseId,
+      reasonCodes: control.reasonCodes,
+      description: control.description,
+      state: control.state,
+      activatedBy: control.activatedBy,
+      activatedAt: control.activatedAt,
+      resolvedBy: control.resolvedBy,
+      resolvedAt: control.resolvedAt,
+      resolvedViaCaseDecisionId: control.resolvedViaCaseDecisionId,
     };
   }
 
@@ -2291,6 +2676,20 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     },
 
     async matureEconomicValue(execution, input) {
+      // NET-W009 economic gate (lock invariant 21): an ACTIVE risk
+      // control (HOLD/BLOCK) on value_maturation covering this record
+      // or its beneficiary refuses the maturation. The composition
+      // root consults the risk control registry BEFORE the settlement
+      // mutation — the settlement domain code is untouched and the
+      // fraud boundary never mutates economic state.
+      const gated = await economicValueService.getValue(execution, input.valueRecordId);
+      await refuseWhenGated(
+        execution,
+        gated.organizationScopeId,
+        "value_maturation",
+        gated.id,
+        gated.beneficiaryPersonId,
+      );
       const value = await economicValueService.matureValue(execution, {
         valueRecordId: input.valueRecordId,
         ...(input.effectiveAt !== undefined
@@ -2311,6 +2710,16 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     },
 
     async issueCredits(execution, input) {
+      // NET-W009 economic gate: an ACTIVE risk control on
+      // credit_issuance covering the source record or the beneficiary
+      // refuses the issuance.
+      await refuseWhenGated(
+        execution,
+        input.organizationScopeId,
+        "credit_issuance",
+        input.sourceValueRecordId,
+        input.beneficiaryPersonId,
+      );
       const result = await creditService.issueCredits(execution, {
         organizationScopeId: input.organizationScopeId,
         beneficiaryPersonId: input.beneficiaryPersonId,
@@ -2388,6 +2797,20 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     },
 
     async allocateRewards(execution, input) {
+      // NET-W009 economic gate: an ACTIVE risk control on
+      // reward_allocation covering the source record or its
+      // beneficiary refuses the allocation.
+      const gatedValue = await economicValueService.getValue(
+        execution,
+        input.sourceValueRecordId,
+      );
+      await refuseWhenGated(
+        execution,
+        input.organizationScopeId,
+        "reward_allocation",
+        input.sourceValueRecordId,
+        gatedValue.beneficiaryPersonId,
+      );
       const result = await rewardService.allocateRewards(execution, {
         organizationScopeId: input.organizationScopeId,
         sourceValueRecordId: input.sourceValueRecordId,
@@ -2466,6 +2889,20 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     },
 
     async settleCashObligation(execution, input) {
+      // NET-W009 economic gate: an ACTIVE risk control on
+      // cash_settlement covering the obligation or its counterparty
+      // refuses the settlement.
+      const gatedObligation = await cashService.getObligation(
+        execution,
+        input.obligationId,
+      );
+      await refuseWhenGated(
+        execution,
+        gatedObligation.organizationScopeId,
+        "cash_settlement",
+        gatedObligation.id,
+        gatedObligation.counterpartyPersonId,
+      );
       const obligation = await cashService.settleCashObligation(execution, {
         obligationId: input.obligationId,
         ...(input.reference !== undefined ? { reference: input.reference } : {}),
@@ -2580,6 +3017,426 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         rewards: summary.rewards,
         cashPayable: summary.cashPayable,
         cashReceivable: summary.cashReceivable,
+      };
+    },
+
+    // -- NET-W009 fraud/risk commands -------------------------------------
+
+    async createRiskSignal(execution, _actorPersonId, input) {
+      const result = await riskSignalService.createSignal(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+        subjectPersonId: input.subjectPersonId as string,
+        ...(input.subjectRef !== undefined
+          ? {
+              subjectRef: input.subjectRef as unknown as CreateRiskSignalInput["subjectRef"],
+            }
+          : {}),
+        category: input.category as string,
+        severity: input.severity as string,
+        confidence: input.confidence as number,
+        provenance: input.provenance as unknown as CreateRiskSignalInput["provenance"],
+        ...(input.description !== undefined ? { description: input.description as string } : {}),
+        detectedAt: input.detectedAt as string,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return { signal: toRiskSignalView(result.signal), created: result.created };
+    },
+
+    async supersedeRiskSignal(execution, _actorPersonId, input) {
+      const result = await riskSignalService.supersedeSignal(execution, {
+        signalId: input.signalId as string,
+        category: input.category as string,
+        severity: input.severity as string,
+        confidence: input.confidence as number,
+        provenance: input.provenance as unknown as SupersedeRiskSignalInput["provenance"],
+        ...(input.description !== undefined ? { description: input.description as string } : {}),
+        detectedAt: input.detectedAt as string,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toRiskSignalView(result.correction);
+    },
+
+    async getRiskSignal(execution, id) {
+      try {
+        const signal = await riskSignalService.getSignal(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toRiskSignalView(signal);
+      } catch {
+        return null;
+      }
+    },
+
+    async listRiskSignals(execution, organizationScopeId, subjectPersonId) {
+      const signals = await riskSignalService.listSignals(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        subjectPersonId,
+      );
+      return signals.map(toRiskSignalView);
+    },
+
+    async createRiskPolicy(execution, _actorPersonId, input) {
+      const policy = await riskPolicyService.createPolicyVersion(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+        policyId: input.policyId as string,
+        version: input.version as number,
+        ...(input.description !== undefined ? { description: input.description as string } : {}),
+        rules: input.rules as unknown as CreateRiskPolicyInput["rules"],
+        thresholds: input.thresholds as unknown as CreateRiskPolicyInput["thresholds"],
+        criticalFloorState: input.criticalFloorState as string,
+        advisoryOnlyCapState: input.advisoryOnlyCapState as string,
+        requiredCategories: input.requiredCategories as readonly string[],
+        missingDataState: input.missingDataState as string,
+      });
+      return toRiskPolicyView(policy);
+    },
+
+    async listRiskPolicyVersions(execution, policyId, organizationScopeId) {
+      const versions = await riskPolicyService.listPolicyVersions(
+        getExecutionContext() ?? execution,
+        policyId,
+        organizationScopeId,
+      );
+      return versions.map(toRiskPolicyView);
+    },
+
+    async recordRiskAssessment(execution, _actorPersonId, input) {
+      const result = await riskAssessmentService.recordAssessment(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+        subjectPersonId: input.subjectPersonId as string,
+        ...(input.subjectRef !== undefined
+          ? {
+              subjectRef: input.subjectRef as unknown as RecordRiskAssessmentInput["subjectRef"],
+            }
+          : {}),
+        policyId: input.policyId as string,
+        ...(input.version !== undefined ? { version: input.version as number } : {}),
+        evaluatedAt: input.evaluatedAt as string,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return { assessment: toRiskAssessmentView(result.assessment), created: result.created };
+    },
+
+    async previewRiskAssessment(execution, input) {
+      const preview = await riskAssessmentService.previewAssessment(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+        subjectPersonId: input.subjectPersonId as string,
+        ...(input.subjectRef !== undefined
+          ? {
+              subjectRef: input.subjectRef as unknown as RecordRiskAssessmentInput["subjectRef"],
+            }
+          : {}),
+        policyId: input.policyId as string,
+        ...(input.version !== undefined ? { version: input.version as number } : {}),
+        evaluatedAt: input.evaluatedAt as string,
+      });
+      return {
+        organizationScopeId: preview.organizationScopeId,
+        subjectPersonId: preview.subjectPersonId,
+        subjectRef: preview.subjectRef,
+        policyId: preview.policyId,
+        policyVersion: preview.policyVersion,
+        evaluatedAt: preview.evaluatedAt,
+        signalIds: preview.signalIds,
+        contributions: preview.contributions as unknown as readonly Record<string, unknown>[],
+        score: preview.score,
+        state: preview.state,
+        missingCategories: preview.missingCategories,
+        digest: preview.digest,
+      };
+    },
+
+    async getRiskAssessment(execution, id) {
+      try {
+        const assessment = await riskAssessmentService.getAssessment(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toRiskAssessmentView(assessment);
+      } catch {
+        return null;
+      }
+    },
+
+    async listRiskAssessments(execution, organizationScopeId, subjectPersonId) {
+      const history = await riskAssessmentService.getAssessmentHistory(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        subjectPersonId,
+      );
+      return history.map(toRiskAssessmentView);
+    },
+
+    async openRiskCase(execution, _actorPersonId, input) {
+      const result = await riskCaseService.openCase(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+        ...(input.subjectPersonId !== undefined
+          ? { subjectPersonId: input.subjectPersonId as string }
+          : {}),
+        ...(input.subjectRef !== undefined
+          ? { subjectRef: input.subjectRef as unknown as OpenRiskCaseInput["subjectRef"] }
+          : {}),
+        title: input.title as string,
+        ...(input.description !== undefined ? { description: input.description as string } : {}),
+        reasonCodes: input.reasonCodes as readonly string[],
+        sourceRefs: input.sourceRefs as unknown as OpenRiskCaseInput["sourceRefs"],
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return { riskCase: toRiskCaseView(result.riskCase), created: result.created };
+    },
+
+    async recordRiskCaseDecision(execution, _actorPersonId, input) {
+      const riskCase = await riskCaseService.recordDecision(execution, {
+        caseId: input.caseId as string,
+        decision: input.decision as string,
+        reasonCodes: input.reasonCodes as readonly string[],
+        ...(input.note !== undefined ? { note: input.note as string } : {}),
+        sourceRefs: input.sourceRefs as unknown as RecordRiskCaseDecisionInput["sourceRefs"],
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toRiskCaseView(riskCase);
+    },
+
+    async getRiskCase(execution, id) {
+      try {
+        const riskCase = await riskCaseService.getCase(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toRiskCaseView(riskCase);
+      } catch {
+        return null;
+      }
+    },
+
+    async listRiskCases(execution, organizationScopeId, states) {
+      const cases = await riskCaseService.listCases(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        states,
+      );
+      return cases.map(toRiskCaseView);
+    },
+
+    async activateRiskControl(execution, _actorPersonId, input) {
+      const result = await riskControlService.activateControl(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+        operationClass: input.operationClass as string,
+        action: input.action as string,
+        ...(input.subjectPersonId !== undefined
+          ? { subjectPersonId: input.subjectPersonId as string }
+          : {}),
+        ...(input.subjectRef !== undefined
+          ? { subjectRef: input.subjectRef as unknown as ActivateRiskControlInput["subjectRef"] }
+          : {}),
+        ...(input.originAssessmentId !== undefined
+          ? { originAssessmentId: input.originAssessmentId as string }
+          : {}),
+        ...(input.originCaseId !== undefined
+          ? { originCaseId: input.originCaseId as string }
+          : {}),
+        reasonCodes: input.reasonCodes as readonly string[],
+        ...(input.description !== undefined ? { description: input.description as string } : {}),
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return { control: toRiskControlView(result.control), created: result.created };
+    },
+
+    async resolveRiskControl(execution, _actorPersonId, input) {
+      const control = await riskControlService.resolveControl(execution, {
+        controlDecisionId: input.controlDecisionId as string,
+        ...(input.caseDecisionId !== undefined
+          ? { caseDecisionId: input.caseDecisionId as string }
+          : {}),
+        ...(input.note !== undefined ? { note: input.note as string } : {}),
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toRiskControlView(control);
+    },
+
+    async getRiskControl(execution, id) {
+      try {
+        const control = await riskControlService.getControl(
+          getExecutionContext() ?? execution,
+          id,
+        );
+        return toRiskControlView(control);
+      } catch {
+        return null;
+      }
+    },
+
+    async listRiskControls(execution, organizationScopeId, states) {
+      const controls = await riskControlService.listControls(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        states,
+      );
+      return controls.map(toRiskControlView);
+    },
+
+    async getRiskSubjectSummary(execution, organizationScopeId, subjectPersonId) {
+      const [latest, signals, controls, cases] = await Promise.all([
+        riskAssessmentService.getLatestAssessment(
+          getExecutionContext() ?? execution,
+          organizationScopeId,
+          subjectPersonId,
+        ),
+        riskSignalService.listSignals(
+          getExecutionContext() ?? execution,
+          organizationScopeId,
+          subjectPersonId,
+        ),
+        riskControlService.listControls(
+          getExecutionContext() ?? execution,
+          organizationScopeId,
+        ),
+        riskCaseService.listCases(
+          getExecutionContext() ?? execution,
+          organizationScopeId,
+        ),
+      ]);
+      return {
+        organizationScopeId,
+        subjectPersonId,
+        latestAssessment: latest ? toRiskAssessmentView(latest) : null,
+        activeControls: controls
+          .filter(
+            (c) =>
+              c.state === "ACTIVE" &&
+              (c.subjectPersonId === subjectPersonId ||
+                (c.subjectRef !== null && c.subjectRef.subjectId === subjectPersonId)),
+          )
+          .map(toRiskControlView),
+        openCases: cases
+          .filter(
+            (c) =>
+              c.state !== "RESOLVED" &&
+              (c.subjectPersonId === subjectPersonId ||
+                (c.subjectRef !== null && c.subjectRef.subjectId === subjectPersonId)),
+          )
+          .map(toRiskCaseView),
+        signalCount: signals.length,
+      };
+    },
+
+    async applyWorkflowHold(execution, actorPersonId, input) {
+      // NET-W009 §3.7 WORKFLOW GATE: the composition root requests the
+      // FRAUD_REVIEW transition THROUGH the workflow service (the
+      // sole lifecycle authority) for a contribution, and records the
+      // control that motivated it. The risk domain never mutates
+      // lifecycle state itself.
+      const contributionId = input.contributionId as string;
+      const originCaseId = input.originCaseId as string | undefined;
+      const originAssessmentId = input.originAssessmentId as string | undefined;
+      const idempotencyKey = input.idempotencyKey as string;
+      const contribution = await contributionService.getContribution(
+        execution,
+        contributionId,
+      );
+      // 1. The control FIRST (evidence-backed origin required): an
+      //    ACTIVE workflow_transition HOLD covering the contribution.
+      const control = await riskControlService.activateControl(execution, {
+        organizationScopeId: contribution.organizationScopeId,
+        operationClass: "workflow_transition",
+        action: "HOLD",
+        subjectPersonId: contribution.contributorId,
+        subjectRef: { subjectType: "contribution", subjectId: contributionId },
+        ...(originAssessmentId !== undefined ? { originAssessmentId } : {}),
+        ...(originCaseId !== undefined ? { originCaseId } : {}),
+        reasonCodes: (input.reasonCodes as readonly string[]) ?? ["workflow_hold"],
+        ...(input.description !== undefined
+          ? { description: input.description as string }
+          : {}),
+        idempotencyKey: `${idempotencyKey}:control`,
+      });
+      // 2. The authorized transition THROUGH the workflow service.
+      const { policyActionFor } = await import("../core/workflow.ts");
+      const transition = await workflowService.requestTransition(
+        {
+          subjectId: contributionId,
+          subjectKind: "contribution",
+          targetState: "FRAUD_REVIEW",
+          expectedVersion: contribution.version,
+          idempotencyKey: `${idempotencyKey}:transition`,
+          actorPersonId,
+          policyAction: policyActionFor(
+            "contribution",
+            contribution.state as import("../core/workflow.ts").LifecycleState,
+            "FRAUD_REVIEW",
+          ),
+          metadata: {
+            riskControlDecisionId: control.control.id,
+            ...(originCaseId !== undefined ? { originCaseId } : {}),
+            ...(originAssessmentId !== undefined ? { originAssessmentId } : {}),
+          },
+        },
+        execution,
+      );
+      return {
+        control: toRiskControlView(control.control),
+        transition: {
+          subjectId: transition.subject.id,
+          subjectKind: transition.subject.kind,
+          state: transition.subject.state,
+          version: transition.subject.version,
+          executed: transition.executed,
+          transitionId: transition.transitionId,
+          transactionId: transition.transactionId,
+        },
+      };
+    },
+
+    async clearWorkflowHold(execution, actorPersonId, input) {
+      // Clear the workflow hold: resolve the active control and
+      // request the cleared return transition (FRAUD_REVIEW →
+      // SUBMITTED) through the workflow service.
+      const contributionId = input.contributionId as string;
+      const controlDecisionId = input.controlDecisionId as string;
+      const idempotencyKey = input.idempotencyKey as string;
+      const contribution = await contributionService.getContribution(
+        execution,
+        contributionId,
+      );
+      const control = await riskControlService.resolveControl(execution, {
+        controlDecisionId,
+        ...(input.note !== undefined ? { note: input.note as string } : {}),
+        idempotencyKey: `${idempotencyKey}:resolve`,
+      });
+      const { policyActionFor } = await import("../core/workflow.ts");
+      const transition = await workflowService.requestTransition(
+        {
+          subjectId: contributionId,
+          subjectKind: "contribution",
+          targetState: "SUBMITTED",
+          expectedVersion: contribution.version,
+          idempotencyKey: `${idempotencyKey}:transition`,
+          actorPersonId,
+          policyAction: policyActionFor(
+            "contribution",
+            contribution.state as import("../core/workflow.ts").LifecycleState,
+            "SUBMITTED",
+          ),
+          metadata: {
+            riskControlDecisionId: controlDecisionId,
+            cleared: true,
+          },
+        },
+        execution,
+      );
+      return {
+        control: toRiskControlView(control),
+        transition: {
+          subjectId: transition.subject.id,
+          subjectKind: transition.subject.kind,
+          state: transition.subject.state,
+          version: transition.subject.version,
+          executed: transition.executed,
+          transitionId: transition.transitionId,
+          transactionId: transition.transactionId,
+        },
       };
     },
   };
@@ -2700,6 +3557,12 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     cashService,
     conversionService,
     economicLedgerService,
+    // NET-W009 disputes (fraud/risk foundation) services.
+    riskSignalService,
+    riskPolicyService,
+    riskAssessmentService,
+    riskCaseService,
+    riskControlService,
     // NET-W003 IdempotencyStore (exposed for NET-W004 integration tests).
     idempotency,
     async initialize() {

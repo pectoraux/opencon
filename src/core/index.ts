@@ -64,3 +64,14 @@ export * from "./reputation.ts";
 // NET-W011+, benefit pools NET-W028, external settlement NET-W030)
 // consume the vocabulary.
 export * from "./economics.ts";
+// NET-W009 shared fraud/risk vocabulary (the frozen signal categories
+// FRAUD-001/002/003, provenance kinds with the structural model-output
+// advisory rule AI-003, severities, the explicit risk states with the
+// normative ordering, control operation classes + actions for the
+// workflow/economic gates, and deterministic policy validation with
+// the fail-closed missing-data and advisory-cap invariants). The
+// /disputes domain (the Phase-3 Trust boundary — see the NET-W009 work
+// order §2 placement decision) implements the behaviour; later work
+// items (NET-W010 challenges/disputes, NET-W013 moderation, NET-W021
+// advertising fraud) consume the vocabulary.
+export * from "./risk.ts";

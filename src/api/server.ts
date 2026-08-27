@@ -1724,6 +1724,451 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // ------------------------------------------------------------------
+    // NET-W009 fraud/risk foundation (/disputes boundary).
+    // ------------------------------------------------------------------
+
+    // POST /api/risk/signals — record a risk signal (protected;
+    // provenance + authoritative source-ref gate).
+    if (path === "/api/risk/signals" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "riskSignal.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseRiskSignalInput(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createRiskSignal(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/risk/signals/:id/supersede — append a correction
+    // (protected; append-only history).
+    if (
+      path.startsWith("/api/risk/signals/") &&
+      path.endsWith("/supersede") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "riskSignal.supersede", "*", res);
+      if (!guarded) return true;
+      const signalId = path.slice("/api/risk/signals/".length, -"/supersede".length);
+      const body = await readBody(req);
+      const input = parseRiskSignalInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.supersedeRiskSignal(guarded.execution, guarded.personId, {
+          signalId,
+          category: input.category,
+          severity: input.severity,
+          confidence: input.confidence,
+          provenance: input.provenance,
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          detectedAt: input.detectedAt,
+          idempotencyKey: input.idempotencyKey,
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/risk/signals — list signals (public; org, optional
+    // subject filter).
+    if (path === "/api/risk/signals" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const subjectPersonId = url.searchParams.get("subjectPersonId") ?? undefined;
+      const views = await opts.commands.listRiskSignals(
+        ctx,
+        organizationScopeId,
+        subjectPersonId,
+      );
+      await send(res, 200, { organizationScopeId, signals: views });
+      return true;
+    }
+
+    // GET /api/risk/signals/:id — fetch a signal (public).
+    if (path.startsWith("/api/risk/signals/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/risk/signals/".length);
+      const view = await opts.commands.getRiskSignal(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `risk signal not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/risk/policies — create a policy version (protected;
+    // org-independent lineage mutex).
+    if (path === "/api/risk/policies" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "riskPolicy.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createRiskPolicy(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          policyId: strField(obj, "policyId"),
+          version: numField(obj, "version"),
+          ...(obj.description !== undefined ? { description: String(obj.description) } : {}),
+          rules: objField(obj, "rules"),
+          thresholds: objField(obj, "thresholds"),
+          criticalFloorState: strField(obj, "criticalFloorState"),
+          advisoryOnlyCapState: strField(obj, "advisoryOnlyCapState"),
+          requiredCategories: strArrayField(obj, "requiredCategories"),
+          missingDataState: strField(obj, "missingDataState"),
+        }),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // GET /api/risk/policies/:policyId/versions — a lineage's versions
+    // (public; optional org filter).
+    if (
+      path.startsWith("/api/risk/policies/") &&
+      path.endsWith("/versions") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const policyId = path.slice("/api/risk/policies/".length, -"/versions".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId") ?? undefined;
+      const versions = await opts.commands.listRiskPolicyVersions(
+        ctx,
+        policyId,
+        organizationScopeId,
+      );
+      await send(res, 200, { policyId, versions });
+      return true;
+    }
+
+    // POST /api/risk/assessments — record an assessment (protected;
+    // the deterministic engine + append-only supersession).
+    if (path === "/api/risk/assessments" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "riskAssessment.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recordRiskAssessment(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          subjectPersonId: strField(obj, "subjectPersonId"),
+          ...(obj.subjectRef !== undefined ? { subjectRef: obj.subjectRef } : {}),
+          policyId: strField(obj, "policyId"),
+          ...(obj.version !== undefined ? { version: numField(obj, "version") } : {}),
+          evaluatedAt: strField(obj, "evaluatedAt"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/risk/assessments/preview — deterministic preview
+    // (public read; pure computation, no persist).
+    if (path === "/api/risk/assessments/preview" && method === "POST" && opts.commands) {
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await opts.commands.previewRiskAssessment(ctx, {
+        organizationScopeId: strField(obj, "organizationScopeId"),
+        subjectPersonId: strField(obj, "subjectPersonId"),
+        ...(obj.subjectRef !== undefined ? { subjectRef: obj.subjectRef } : {}),
+        policyId: strField(obj, "policyId"),
+        ...(obj.version !== undefined ? { version: numField(obj, "version") } : {}),
+        evaluatedAt: strField(obj, "evaluatedAt"),
+      });
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/risk/assessments — a subject's assessment history
+    // (public).
+    if (path === "/api/risk/assessments" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      const subjectPersonId = url.searchParams.get("subjectPersonId");
+      if (!organizationScopeId || !subjectPersonId) {
+        throw apiValidationError(
+          'query parameters "organizationScopeId" and "subjectPersonId" are required',
+        );
+      }
+      const views = await opts.commands.listRiskAssessments(
+        ctx,
+        organizationScopeId,
+        subjectPersonId,
+      );
+      await send(res, 200, { subjectPersonId, assessments: views });
+      return true;
+    }
+
+    // GET /api/risk/assessments/:id — fetch an assessment (public).
+    if (path.startsWith("/api/risk/assessments/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/risk/assessments/".length);
+      const view = await opts.commands.getRiskAssessment(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `risk assessment not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/risk/cases — open a review case (protected; ≥1
+    // supporting reference).
+    if (path === "/api/risk/cases" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "riskCase.open", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.openRiskCase(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          ...(obj.subjectPersonId !== undefined
+            ? { subjectPersonId: strField(obj, "subjectPersonId") }
+            : {}),
+          ...(obj.subjectRef !== undefined ? { subjectRef: obj.subjectRef } : {}),
+          title: strField(obj, "title"),
+          ...(obj.description !== undefined ? { description: String(obj.description) } : {}),
+          reasonCodes: strArrayField(obj, "reasonCodes"),
+          sourceRefs: objField(obj, "sourceRefs"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/risk/cases/:id/decisions — append a decision
+    // (protected; deterministic state machine).
+    if (
+      path.startsWith("/api/risk/cases/") &&
+      path.endsWith("/decisions") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "riskCase.decide", "*", res);
+      if (!guarded) return true;
+      const caseId = path.slice("/api/risk/cases/".length, -"/decisions".length);
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recordRiskCaseDecision(guarded.execution, guarded.personId, {
+          caseId,
+          decision: strField(obj, "decision"),
+          reasonCodes: strArrayField(obj, "reasonCodes"),
+          ...(obj.note !== undefined ? { note: String(obj.note) } : {}),
+          sourceRefs: objField(obj, "sourceRefs"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/risk/cases — an org's cases (public; optional state
+    // filter).
+    if (path === "/api/risk/cases" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const stateParam = url.searchParams.get("state");
+      const states = stateParam !== null ? stateParam.split(",").map((x) => x.trim()) : undefined;
+      const views = await opts.commands.listRiskCases(ctx, organizationScopeId, states);
+      await send(res, 200, { organizationScopeId, cases: views });
+      return true;
+    }
+
+    // GET /api/risk/cases/:id — fetch a case with its decision history
+    // (public).
+    if (path.startsWith("/api/risk/cases/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/risk/cases/".length);
+      const view = await opts.commands.getRiskCase(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `risk case not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/risk/controls — activate a control (protected;
+    // evidence-backed origin gate).
+    if (path === "/api/risk/controls" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "riskControl.activate", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.activateRiskControl(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          operationClass: strField(obj, "operationClass"),
+          action: strField(obj, "action"),
+          ...(obj.subjectPersonId !== undefined
+            ? { subjectPersonId: strField(obj, "subjectPersonId") }
+            : {}),
+          ...(obj.subjectRef !== undefined ? { subjectRef: obj.subjectRef } : {}),
+          ...(obj.originAssessmentId !== undefined
+            ? { originAssessmentId: strField(obj, "originAssessmentId") }
+            : {}),
+          ...(obj.originCaseId !== undefined
+            ? { originCaseId: strField(obj, "originCaseId") }
+            : {}),
+          reasonCodes: strArrayField(obj, "reasonCodes"),
+          ...(obj.description !== undefined ? { description: String(obj.description) } : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/risk/controls/:id/resolve — resolve a control
+    // (protected).
+    if (
+      path.startsWith("/api/risk/controls/") &&
+      path.endsWith("/resolve") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "riskControl.resolve", "*", res);
+      if (!guarded) return true;
+      const controlDecisionId = path.slice("/api/risk/controls/".length, -"/resolve".length);
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.resolveRiskControl(guarded.execution, guarded.personId, {
+          controlDecisionId,
+          ...(obj.caseDecisionId !== undefined
+            ? { caseDecisionId: strField(obj, "caseDecisionId") }
+            : {}),
+          ...(obj.note !== undefined ? { note: String(obj.note) } : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/risk/controls — an org's controls (public; optional
+    // state filter).
+    if (path === "/api/risk/controls" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const stateParam = url.searchParams.get("state");
+      const states = stateParam !== null ? stateParam.split(",").map((x) => x.trim()) : undefined;
+      const views = await opts.commands.listRiskControls(ctx, organizationScopeId, states);
+      await send(res, 200, { organizationScopeId, controls: views });
+      return true;
+    }
+
+    // GET /api/risk/controls/:id — fetch a control (public).
+    if (path.startsWith("/api/risk/controls/") && method === "GET" && opts.commands) {
+      const id = path.slice("/api/risk/controls/".length);
+      const view = await opts.commands.getRiskControl(ctx, id);
+      if (!view) {
+        await send(res, 404, { error: "not_found", message: `risk control decision not found: ${id}` });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/risk/subjects/:personId/summary — a subject's risk
+    // summary (public).
+    if (
+      path.startsWith("/api/risk/subjects/") &&
+      path.endsWith("/summary") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const personId = path.slice("/api/risk/subjects/".length, -"/summary".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const view = await opts.commands.getRiskSubjectSummary(ctx, organizationScopeId, personId);
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/risk/workflow-holds — apply a workflow hold
+    // (protected; records the control + requests the FRAUD_REVIEW
+    // transition through the workflow service — the sole lifecycle
+    // authority).
+    if (path === "/api/risk/workflow-holds" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "riskWorkflowHold.apply", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.applyWorkflowHold(guarded.execution, guarded.personId, {
+          contributionId: strField(obj, "contributionId"),
+          ...(obj.originCaseId !== undefined
+            ? { originCaseId: strField(obj, "originCaseId") }
+            : {}),
+          ...(obj.originAssessmentId !== undefined
+            ? { originAssessmentId: strField(obj, "originAssessmentId") }
+            : {}),
+          ...(obj.reasonCodes !== undefined
+            ? { reasonCodes: strArrayField(obj, "reasonCodes") }
+            : {}),
+          ...(obj.description !== undefined ? { description: String(obj.description) } : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/risk/workflow-holds/:contributionId/clear — clear a
+    // workflow hold (protected; resolves the control + requests the
+    // cleared return transition through the workflow service).
+    if (
+      path.startsWith("/api/risk/workflow-holds/") &&
+      path.endsWith("/clear") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "riskWorkflowHold.clear", "*", res);
+      if (!guarded) return true;
+      const contributionId = path.slice(
+        "/api/risk/workflow-holds/".length,
+        -"/clear".length,
+      );
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.clearWorkflowHold(guarded.execution, guarded.personId, {
+          contributionId,
+          controlDecisionId: strField(obj, "controlDecisionId"),
+          ...(obj.note !== undefined ? { note: String(obj.note) } : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
     return false;
   }
 
@@ -2356,6 +2801,75 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       throw apiValidationError(`field "${key}" must be a finite number`);
     }
     return v;
+  }
+
+  function requireBodyObject(body: unknown): Record<string, unknown> {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    return body as Record<string, unknown>;
+  }
+
+  function objField(obj: Record<string, unknown>, key: string): Record<string, unknown> {
+    const v = obj[key];
+    if (!v || typeof v !== "object" || Array.isArray(v)) {
+      throw apiValidationError(`field "${key}" must be a JSON object`);
+    }
+    return v as Record<string, unknown>;
+  }
+
+  function strArrayField(obj: Record<string, unknown>, key: string): readonly string[] {
+    const v = obj[key];
+    if (
+      !Array.isArray(v) ||
+      v.length === 0 ||
+      v.some((x) => typeof x !== "string" || !x.trim())
+    ) {
+      throw apiValidationError(`field "${key}" must be a non-empty array of non-empty strings`);
+    }
+    return v as readonly string[];
+  }
+
+  // NET-W009 risk-signal body parser (create + supersede shapes).
+  function parseRiskSignalInput(body: unknown): {
+    organizationScopeId?: string;
+    subjectPersonId?: string;
+    subjectRef?: unknown;
+    category: string;
+    severity: string;
+    confidence: number;
+    provenance: Record<string, unknown>;
+    description?: string;
+    detectedAt: string;
+    idempotencyKey: string;
+  } {
+    const obj = requireBodyObject(body);
+    const provenance = objField(obj, "provenance");
+    const sources = obj.provenance;
+    if (!Array.isArray(sources) || sources.length === 0) {
+      throw apiValidationError('field "provenance.sources" must be a non-empty array');
+    }
+    void provenance;
+    const confidenceV = obj.confidence;
+    if (typeof confidenceV !== "number" || !Number.isFinite(confidenceV)) {
+      throw apiValidationError('field "confidence" must be a finite number in [0, 1]');
+    }
+    return {
+      ...(obj.organizationScopeId !== undefined
+        ? { organizationScopeId: strField(obj, "organizationScopeId") }
+        : {}),
+      ...(obj.subjectPersonId !== undefined
+        ? { subjectPersonId: strField(obj, "subjectPersonId") }
+        : {}),
+      ...(obj.subjectRef !== undefined ? { subjectRef: obj.subjectRef } : {}),
+      category: strField(obj, "category"),
+      severity: strField(obj, "severity"),
+      confidence: confidenceV,
+      provenance: provenance as Record<string, unknown>,
+      ...(obj.description !== undefined ? { description: String(obj.description) } : {}),
+      detectedAt: strField(obj, "detectedAt"),
+      idempotencyKey: strField(obj, "idempotencyKey"),
+    };
   }
 
   // A validation error for the request-body parsers. Uses the OpenConError

@@ -919,6 +919,110 @@ export interface ApiParticipantEconomicSummaryView {
  * been authorized by the {@link ApiAuth.authorize} guard before the
  * command is invoked. The adapter is the dependency-inversion seam.
  */
+// ---------------------------------------------------------------------------
+// NET-W009 fraud/risk foundation views + inputs (/disputes boundary)
+// ---------------------------------------------------------------------------
+
+export interface ApiRiskSignalView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string;
+  readonly subjectRef: { subjectType: string; subjectId: string } | null;
+  readonly category: string;
+  readonly severity: string;
+  readonly confidence: number;
+  readonly provenance: {
+    kind: string;
+    detectionMethod: string;
+    detectionVersion: string;
+    sources: readonly { kind: string; id: string }[];
+  };
+  readonly advisory: boolean;
+  readonly description: string | null;
+  readonly detectedAt: string;
+  readonly recordedAt: string;
+  readonly supersedesSignalId: string | null;
+  readonly supersededBySignalId: string | null;
+}
+
+export interface ApiRiskPolicyView {
+  readonly id: string;
+  readonly policyId: string;
+  readonly version: number;
+  readonly organizationScopeId: string;
+  readonly description: string | null;
+  readonly rules: readonly Record<string, unknown>[];
+  readonly thresholds: Record<string, unknown>;
+  readonly criticalFloorState: string;
+  readonly advisoryOnlyCapState: string;
+  readonly requiredCategories: readonly string[];
+  readonly missingDataState: string;
+  readonly createdAt: string;
+}
+
+export interface ApiRiskAssessmentView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string;
+  readonly subjectRef: { subjectType: string; subjectId: string } | null;
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly evaluatedAt: string;
+  readonly recordedAt: string;
+  readonly signalIds: readonly string[];
+  readonly contributions: readonly Record<string, unknown>[];
+  readonly score: number;
+  readonly state: string;
+  readonly missingCategories: readonly string[];
+  readonly digest: string;
+  readonly supersedesAssessmentId: string | null;
+  readonly supersededByAssessmentId: string | null;
+}
+
+export interface ApiRiskCaseView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string | null;
+  readonly subjectRef: { subjectType: string; subjectId: string } | null;
+  readonly title: string;
+  readonly description: string | null;
+  readonly state: string;
+  readonly reasonCodes: readonly string[];
+  readonly decisions: readonly Record<string, unknown>[];
+  readonly openedBy: string;
+  readonly openedAt: string;
+  readonly resolvedAt: string | null;
+  readonly resolution: string | null;
+}
+
+export interface ApiRiskControlView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly operationClass: string;
+  readonly action: string;
+  readonly subjectPersonId: string | null;
+  readonly subjectRef: { subjectType: string; subjectId: string } | null;
+  readonly originAssessmentId: string | null;
+  readonly originCaseId: string | null;
+  readonly reasonCodes: readonly string[];
+  readonly description: string | null;
+  readonly state: string;
+  readonly activatedBy: string;
+  readonly activatedAt: string;
+  readonly resolvedBy: string | null;
+  readonly resolvedAt: string | null;
+  readonly resolvedViaCaseDecisionId: string | null;
+}
+
+export interface ApiRiskSubjectSummaryView {
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string;
+  readonly latestAssessment: ApiRiskAssessmentView | null;
+  readonly activeControls: readonly ApiRiskControlView[];
+  readonly openCases: readonly ApiRiskCaseView[];
+  readonly signalCount: number;
+}
+
 export interface ApiCommands {
   /** Create a canonical person identity. Returns the public view. */
   createIdentity(
@@ -1507,6 +1611,148 @@ export interface ApiCommands {
     organizationScopeId: string,
     personId: string,
   ): Promise<ApiParticipantEconomicSummaryView>;
+
+  // -- NET-W009 fraud/risk commands ---------------------------------------
+
+  /** Record a risk signal (protected; provenance + source-ref gate). */
+  createRiskSignal(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ signal: ApiRiskSignalView; created: boolean }>;
+
+  /** Supersede a signal with a correction (protected; append-only). */
+  supersedeRiskSignal(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiRiskSignalView>;
+
+  /** Fetch a risk signal (public read). */
+  getRiskSignal(execution: ExecutionContext, id: string): Promise<ApiRiskSignalView | null>;
+
+  /** List signals for an org, optionally narrowed to a subject (public read). */
+  listRiskSignals(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    subjectPersonId?: string,
+  ): Promise<readonly ApiRiskSignalView[]>;
+
+  /** Create a risk policy version (protected; lineage mutex). */
+  createRiskPolicy(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiRiskPolicyView>;
+
+  /** List a policy lineage's versions (public read). */
+  listRiskPolicyVersions(
+    execution: ExecutionContext,
+    policyId: string,
+    organizationScopeId?: string,
+  ): Promise<readonly ApiRiskPolicyView[]>;
+
+  /** Record a risk assessment (protected; deterministic engine). */
+  recordRiskAssessment(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ assessment: ApiRiskAssessmentView; created: boolean }>;
+
+  /** Deterministic assessment preview — pure, no persist (public read). */
+  previewRiskAssessment(
+    execution: ExecutionContext,
+    input: Record<string, unknown>,
+  ): Promise<Omit<ApiRiskAssessmentView, "id" | "recordedAt" | "supersedesAssessmentId" | "supersededByAssessmentId">>;
+
+  /** Fetch an assessment (public read). */
+  getRiskAssessment(execution: ExecutionContext, id: string): Promise<ApiRiskAssessmentView | null>;
+
+  /** List a subject's assessment history (public read). */
+  listRiskAssessments(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    subjectPersonId: string,
+  ): Promise<readonly ApiRiskAssessmentView[]>;
+
+  /** Open a risk case (protected; ≥1 supporting reference). */
+  openRiskCase(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ riskCase: ApiRiskCaseView; created: boolean }>;
+
+  /** Append a case decision (protected; deterministic state machine). */
+  recordRiskCaseDecision(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiRiskCaseView>;
+
+  /** Fetch a case with its decision history (public read). */
+  getRiskCase(execution: ExecutionContext, id: string): Promise<ApiRiskCaseView | null>;
+
+  /** List an org's cases, optionally filtered by state (public read). */
+  listRiskCases(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    states?: readonly string[],
+  ): Promise<readonly ApiRiskCaseView[]>;
+
+  /** Activate a risk control (protected; evidence-backed origin gate). */
+  activateRiskControl(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ control: ApiRiskControlView; created: boolean }>;
+
+  /** Resolve a risk control (protected). */
+  resolveRiskControl(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<ApiRiskControlView>;
+
+  /** Fetch a control decision (public read). */
+  getRiskControl(execution: ExecutionContext, id: string): Promise<ApiRiskControlView | null>;
+
+  /** List an org's controls, optionally filtered by state (public read). */
+  listRiskControls(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    states?: readonly string[],
+  ): Promise<readonly ApiRiskControlView[]>;
+
+  /** A subject's risk summary (public read). */
+  getRiskSubjectSummary(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    subjectPersonId: string,
+  ): Promise<ApiRiskSubjectSummaryView>;
+
+  /**
+   * Apply a workflow hold (protected): record/require an active
+   * workflow_transition control and request the FRAUD_REVIEW
+   * transition THROUGH the workflow service (the sole lifecycle
+   * authority). The composition root — not the risk domain — performs
+   * the authorized request.
+   */
+  applyWorkflowHold(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ control: ApiRiskControlView; transition: Record<string, unknown> }>;
+
+  /**
+   * Clear a workflow hold (protected): resolve the control and request
+   * the cleared return transition (FRAUD_REVIEW → SUBMITTED) through
+   * the workflow service.
+   */
+  clearWorkflowHold(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ control: ApiRiskControlView; transition: Record<string, unknown> }>;
 }
 
 export type { ExecutionContext };
