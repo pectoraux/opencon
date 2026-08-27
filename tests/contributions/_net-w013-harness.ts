@@ -145,6 +145,12 @@ export interface QualityShapeOptions {
   readonly advisoryOnlyCapBand?: string;
   readonly requiredInputs?: readonly string[];
   readonly missingInputFloorBand?: string;
+  /** NET-W014: explicit input rules (default: PoH + evidence + outcome). */
+  readonly inputs?: readonly {
+    readonly kind: string;
+    readonly weight: number;
+    readonly minimumCount: number;
+  }[];
 }
 
 /**
@@ -159,11 +165,11 @@ export function defaultQualityShape(
   opts: QualityShapeOptions = {},
 ): QualityPolicyShape {
   return {
-    inputs: [
+    inputs: (opts.inputs ?? [
       { kind: "proof_of_helpfulness", weight: 0.5, minimumCount: 1 },
       { kind: "evidence_record", weight: 0.3, minimumCount: 1 },
       { kind: "measured_outcome", weight: 0.2, minimumCount: 1 },
-    ],
+    ]) as QualityPolicyShape["inputs"],
     advisory: {
       allowedKinds: ["model_score", "heuristic_score"],
       advisoryWeightFactor: opts.advisoryWeightFactor ?? 0.2,

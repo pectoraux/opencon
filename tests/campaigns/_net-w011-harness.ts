@@ -166,6 +166,12 @@ export interface PolicySectionsOptions {
   readonly specId?: string;
   readonly withSpec?: boolean;
   readonly rewardPolicyScope?: "same" | "second-org";
+  /** NET-W014: override the default clearing rule's draw kind. */
+  readonly clearingDrawKind?: "reward_allocation" | "credit_issuance" | "cash_obligation";
+  /** NET-W014: override the default clearing rule's basis. */
+  readonly clearingBasis?: "attributed_outcome" | "verified_evidence" | "measured_value";
+  /** NET-W014: override the default clearing rule's max draw amount. */
+  readonly clearingMaxDrawAmount?: number;
 }
 
 /**
@@ -276,10 +282,10 @@ export async function defaultPolicySections(
             {
               id: "clear-1",
               objectiveId: "obj-1",
-              basis: "attributed_outcome",
-              drawKind: "reward_allocation",
+              basis: opts.clearingBasis ?? "attributed_outcome",
+              drawKind: opts.clearingDrawKind ?? "reward_allocation",
               rewardPolicyId,
-              maxDrawAmount: totalAmount,
+              maxDrawAmount: opts.clearingMaxDrawAmount ?? totalAmount,
             },
           ]
         : [],

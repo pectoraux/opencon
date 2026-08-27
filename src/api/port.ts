@@ -2444,6 +2444,64 @@ export interface ApiCommands {
     execution: ExecutionContext,
     contributionId: string,
   ): Promise<ApiModerationSummaryView>;
+
+  // -----------------------------------------------------------------
+  // NET-W014 — reward and settlement integration (issue #27).
+  // -----------------------------------------------------------------
+
+  /**
+   * Recognize qualifying verified contribution value as canonical
+   * PENDING economic value (protected; the deterministic qualification
+   * gate: VERIFIED lifecycle + QUALIFIED Proof-of-Helpfulness +
+   * moderation + quality floor; the AUTHORITATIVE source gate runs
+   * inside /settlement's recordPendingValue as always).
+   */
+  recognizeContributionValue(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{
+    value: Record<string, unknown>;
+    created: boolean;
+    proofOfHelpfulnessId: string;
+  }>;
+
+  /**
+   * Execute a declared campaign clearing rule — the deterministic
+   * draw of ONE mature value record through the canonical /settlement
+   * primitive the rule selects (protected; capped by the rule's
+   * maxDrawAmount; risk/dispute-gated over the record + beneficiary +
+   * all upstream sources; recorded as campaign bookkeeping).
+   */
+  executeCampaignClearing(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{
+    drawKind: string;
+    allocation?: Record<string, unknown>;
+    issuance?: Record<string, unknown>;
+    obligation?: Record<string, unknown>;
+    created: boolean;
+    value: Record<string, unknown>;
+    campaignEventCount: number;
+  }>;
+
+  /**
+   * Feed ONE evidence-backed reputation input from a MATERIAL
+   * settlement outcome (protected; MATURE/CONSUMED value records
+   * only; the reputation input service DERIVES the basis — never
+   * caller-asserted; references only, no amounts).
+   */
+  applySettlementReputationEffect(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{
+    input: Record<string, unknown>;
+    created: boolean;
+    valueState: string;
+  }>;
 }
 
 export type { ExecutionContext };

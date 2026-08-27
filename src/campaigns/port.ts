@@ -92,6 +92,9 @@ export const CAMPAIGN_EVENTS = [
   "budget_committed",
   "budget_released",
   "opportunity_published",
+  // NET-W014 AMENDMENT: the executed clearing draw bookkeeping
+  // (REFERENCES ONLY — the economic records live in /settlement).
+  "clearing_executed",
 ] as const;
 
 export type CampaignEventKind = (typeof CAMPAIGN_EVENTS)[number];
@@ -475,6 +478,32 @@ export interface RecordBudgetReleaseInput {
 }
 
 /**
+ * Record that the composition root executed a clearing draw for a
+ * campaign clearing rule (NET-W014 — REFERENCES ONLY, the exact
+ * `recordBudgetCommitment`/`recordOpportunityPublication`
+ * bookkeeping precedent). The economic records (reward allocation /
+ * credit issuance / cash obligation) live in /settlement — this event
+ * carries their ids for lineage; no balances, no postings, no second
+ * ledger. Verifies the clearing rule exists in the campaign's
+ * current policy version. Owner-only; ACTIVE campaign.
+ */
+export interface RecordClearingExecutionInput {
+  readonly campaignId: string;
+  /** The clearing rule id (must exist in the current policy version). */
+  readonly clearingRuleId: string;
+  /** The settlement primitive executed (reward_allocation | credit_issuance | cash_obligation). */
+  readonly drawKind: string;
+  /** The mature value record the draw consumed (or referenced for cash). */
+  readonly valueRecordId: string;
+  /** The settlement result id (allocation id / issuance id / obligation id). */
+  readonly resultId: string;
+  /** The drawn amount (the settlement primitive's own amount semantics). */
+  readonly amount: number;
+  readonly description?: string;
+  readonly idempotencyKey: string;
+}
+
+/**
  * Record that the composition root published the opportunity for a
  * spec of a policy version (append-only bookkeeping). Verifies through
  * the read-only opportunity lookup: same scope, opportunity type and
@@ -649,6 +678,17 @@ export interface CampaignService {
   recordBudgetRelease(
     execution: ExecutionContext,
     input: RecordBudgetReleaseInput,
+  ): Promise<CampaignRecord>;
+
+  /**
+   * RECORD a clearing execution the composition root performed for a
+   * declared clearing rule (NET-W014; owner-only; ACTIVE campaign;
+   * REFERENCES ONLY — no economic mutation). Commits atomically with
+   * the `campaign.clearing_executed` audit event.
+   */
+  recordClearingExecution(
+    execution: ExecutionContext,
+    input: RecordClearingExecutionInput,
   ): Promise<CampaignRecord>;
 
   /**

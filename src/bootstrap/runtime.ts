@@ -1102,6 +1102,20 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         : null;
     },
   };
+  // NET-W014: the verified helpful contribution as a first-class
+  // economic source (read-only over the contributions repository —
+  // the same dependency inversion as the lookups above).
+  const economicContributionLookup = {
+    async resolve(id: string) {
+      const contribution = await contributionRepo.findById(id);
+      return contribution
+        ? {
+            organizationScopeId: contribution.organizationScopeId,
+            state: contribution.state,
+          }
+        : null;
+    },
+  };
   const economicLedgerRepo = createAuthorityEconomicLedgerRepository({
     authority: postgresAuthority,
     logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
@@ -1137,6 +1151,7 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     proofOfValueLookup: economicProofOfValueLookup,
     measuredOutcomeLookup: economicMeasuredOutcomeLookup,
     evidenceLookup: economicEvidenceLookup,
+    contributionLookup: economicContributionLookup,
     idempotency,
     auditWriter,
     logger: logger.forModule("settlement"),
@@ -3544,19 +3559,27 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
 
     async matureEconomicValue(execution, input) {
       // NET-W009 economic gate (lock invariant 21): an ACTIVE risk
-      // control (HOLD/BLOCK) on value_maturation covering this record
-      // or its beneficiary refuses the maturation. The composition
-      // root consults the risk control registry BEFORE the settlement
-      // mutation — the settlement domain code is untouched and the
-      // fraud boundary never mutates economic state.
+      // control (HOLD/BLOCK) on value_maturation covering this record,
+      // its beneficiary OR any of its upstream SOURCE records
+      // (NET-W014 extension: contribution-level controls now gate
+      // value recognized from that contribution) refuses the
+      // maturation. The composition root consults the risk control
+      // registry BEFORE the settlement mutation — the settlement
+      // domain code is untouched and the fraud boundary never
+      // mutates economic state.
       const gated = await economicValueService.getValue(execution, input.valueRecordId);
-      await refuseWhenGated(
-        execution,
-        gated.organizationScopeId,
-        "value_maturation",
+      for (const riskSubjectId of [
         gated.id,
-        gated.beneficiaryPersonId,
-      );
+        ...gated.sources.map((s) => s.id),
+      ]) {
+        await refuseWhenGated(
+          execution,
+          gated.organizationScopeId,
+          "value_maturation",
+          riskSubjectId,
+          gated.beneficiaryPersonId,
+        );
+      }
       // NET-W010 dispute gate (lock invariant 21, disputed half): an
       // ACTIVE dispute covering this record OR any of its upstream
       // sources refuses the maturation until the dispute resolves.
@@ -3585,15 +3608,25 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
 
     async issueCredits(execution, input) {
       // NET-W009 economic gate: an ACTIVE risk control on
-      // credit_issuance covering the source record or the beneficiary
-      // refuses the issuance.
-      await refuseWhenGated(
+      // credit_issuance covering the source record, the beneficiary
+      // or any upstream SOURCE record (NET-W014 extension) refuses
+      // the issuance.
+      const gatedIssue = await economicValueService.getValue(
         execution,
-        input.organizationScopeId,
-        "credit_issuance",
         input.sourceValueRecordId,
-        input.beneficiaryPersonId,
       );
+      for (const riskSubjectId of [
+        gatedIssue.id,
+        ...gatedIssue.sources.map((s) => s.id),
+      ]) {
+        await refuseWhenGated(
+          execution,
+          input.organizationScopeId,
+          "credit_issuance",
+          riskSubjectId,
+          input.beneficiaryPersonId,
+        );
+      }
       // NET-W010 dispute gate: an ACTIVE dispute covering the source
       // record or its upstream sources refuses the consumption.
       const gatedValue = await economicValueService.getValue(
@@ -3682,19 +3715,25 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
 
     async allocateRewards(execution, input) {
       // NET-W009 economic gate: an ACTIVE risk control on
-      // reward_allocation covering the source record or its
-      // beneficiary refuses the allocation.
+      // reward_allocation covering the source record, its beneficiary
+      // or any upstream SOURCE record (NET-W014 extension) refuses
+      // the allocation.
       const gatedValue = await economicValueService.getValue(
         execution,
         input.sourceValueRecordId,
       );
-      await refuseWhenGated(
-        execution,
-        input.organizationScopeId,
-        "reward_allocation",
-        input.sourceValueRecordId,
-        gatedValue.beneficiaryPersonId,
-      );
+      for (const riskSubjectId of [
+        gatedValue.id,
+        ...gatedValue.sources.map((s) => s.id),
+      ]) {
+        await refuseWhenGated(
+          execution,
+          input.organizationScopeId,
+          "reward_allocation",
+          riskSubjectId,
+          gatedValue.beneficiaryPersonId,
+        );
+      }
       // NET-W010 dispute gate: an ACTIVE dispute covering the source
       // record or its upstream sources refuses the consumption.
       await refuseWhenDisputed(execution, gatedValue.organizationScopeId, [
@@ -5310,6 +5349,523 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         contributionId,
       );
       return toModerationSummaryView(summary);
+    },
+
+    // ------------------------------------------------------------------
+    // NET-W014 — reward and settlement integration composites.
+    //
+    // The integration layer (issue #27): orchestration ONLY over the
+    // existing authority services. Every economic mutation goes
+    // through /settlement's canonical commands (recordPendingValue /
+    // allocateRewards / issueCredits / recordCashObligation — each
+    // atomic, idempotent, conserved and audited); reputation goes
+    // through /reputation's input service (basis DERIVED, never
+    // caller-asserted); campaigns only record REFERENCES. No parallel
+    // ledger, no payment execution, no AI authority.
+    // ------------------------------------------------------------------
+
+    /**
+     * Composite 1 (AC-01): recognize qualifying verified contribution
+     * value as canonical PENDING economic value. The deterministic
+     * qualification gate (VERIFIED lifecycle + QUALIFIED
+     * Proof-of-Helpfulness + moderation + quality floor) runs here;
+     * the AUTHORITATIVE input gate (each source resolved same-scope +
+     * VERIFIED) runs inside recordPendingValue as always.
+     */
+    async recognizeContributionValue(execution, _actorPersonId, input) {
+      const contributionId = input.contributionId as string;
+      const idempotencyKey = input.idempotencyKey as string;
+      const contribution = await contributionService.getContribution(
+        execution,
+        contributionId,
+      );
+      const organizationScopeId = contribution.organizationScopeId;
+      // Gate 1 — the /workflows authority's terminal confirmation.
+      if (contribution.state !== "VERIFIED") {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "ECONOMIC_VALIDATION",
+          classification: "precondition",
+          message: `contribution ${contributionId} is in lifecycle state ${contribution.state}, not VERIFIED — only verified contributions can enter pending settlement`,
+          context: {
+            contributionId,
+            contributionState: contribution.state,
+            organizationScopeId,
+          },
+        });
+      }
+      // Gate 2 — the W012 verified-usefulness claim.
+      const poh = await helpfulnessService.getProofOfHelpfulness(
+        execution,
+        contributionId,
+      );
+      if (poh.state !== "QUALIFIED") {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "ECONOMIC_VALIDATION",
+          classification: "precondition",
+          message: `contribution ${contributionId} has Proof-of-Helpfulness state ${poh.state}, not QUALIFIED — unverified helpfulness cannot create economic value`,
+          context: {
+            contributionId,
+            pohState: poh.state,
+            organizationScopeId,
+          },
+        });
+      }
+      // Gate 3 — the W013 derived moderation status.
+      const moderation = await moderationService.getModerationSummary(
+        execution,
+        contributionId,
+      );
+      if (
+        moderation.status === "REJECTED" ||
+        moderation.status === "FLAGGED_FOR_REVIEW"
+      ) {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "ECONOMIC_VALIDATION",
+          classification: "precondition",
+          message: `contribution ${contributionId} moderation status is ${moderation.status} — a moderated-down contribution cannot enter pending settlement`,
+          context: {
+            contributionId,
+            moderationStatus: moderation.status,
+            organizationScopeId,
+          },
+        });
+      }
+      // Gate 4 — the W013 deterministic quality evaluation (IF one
+      // exists, its band must not be UNSATISFACTORY; advisory scores
+      // are never consulted here — only the deterministic record).
+      const latestEvaluation =
+        await qualityService.getLatestQualityEvaluation(execution, contributionId);
+      if (latestEvaluation && latestEvaluation.band === "UNSATISFACTORY") {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "ECONOMIC_VALIDATION",
+          classification: "precondition",
+          message: `contribution ${contributionId} has an UNSATISFACTORY latest quality evaluation (${latestEvaluation.id}) — bottom-band quality cannot enter pending settlement`,
+          context: {
+            contributionId,
+            evaluationId: latestEvaluation.id,
+            band: latestEvaluation.band,
+            organizationScopeId,
+          },
+        });
+      }
+      // Deterministic source derivation: the contribution itself
+      // (first-class NET-W014 economic source) + the PoH's qualifying
+      // bases (re-resolved + VERIFIED-enforced by the settlement
+      // input gate). Basis kinds map 1:1 onto economic source kinds.
+      const basisKindToSourceKind: Record<string, string> = {
+        proof_of_value: "proof_of_value",
+        measured_outcome: "measured_outcome",
+        evidence_record: "evidence",
+      };
+      const sources: { kind: string; id: string }[] = [
+        { kind: "contribution", id: contributionId },
+      ];
+      for (const basis of poh.bases) {
+        const kind = basisKindToSourceKind[basis.kind];
+        if (kind) {
+          sources.push({ kind, id: basis.referenceId });
+        }
+      }
+      const result = await economicValueService.recordPendingValue(execution, {
+        organizationScopeId,
+        beneficiaryPersonId: contribution.contributorId,
+        amount: input.amount as number,
+        sources,
+        ...(input.maturation !== undefined
+          ? {
+              maturation: input.maturation as {
+                strategy: string;
+                windowEndAt?: string;
+              },
+            }
+          : {}),
+        ...(input.description !== undefined
+          ? { description: input.description as string }
+          : {}),
+        idempotencyKey,
+      });
+      return {
+        value: toEconomicValueView(result.value),
+        created: result.created,
+        proofOfHelpfulnessId: poh.id,
+      };
+    },
+
+    /**
+     * Composite 2 (AC-03): execute a declared campaign clearing rule —
+     * the deterministic draw of ONE mature value record through the
+     * canonical /settlement primitive the rule selects, capped by the
+     * rule's declared maxDrawAmount, gated by risk controls and
+     * ACTIVE disputes over the record + beneficiary + ALL upstream
+     * sources, and recorded as campaign bookkeeping (references only).
+     */
+    async executeCampaignClearing(execution, _actorPersonId, input) {
+      const campaignId = input.campaignId as string;
+      const idempotencyKey = input.idempotencyKey as string;
+      const campaign = await campaignService.getCampaign(execution, campaignId);
+      // The value record FIRST (the tenant-isolation boundary — a
+      // cross-scope reference is rejected before any status or rule
+      // logic runs): same scope as the campaign.
+      const value = await economicValueService.getValue(
+        execution,
+        input.valueRecordId as string,
+      );
+      if (value.organizationScopeId !== campaign.organizationScopeId) {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "ECONOMIC_VALIDATION",
+          classification: "precondition",
+          message: `value record ${value.id} belongs to organization scope ${value.organizationScopeId}, not the campaign's ${campaign.organizationScopeId}`,
+          context: {
+            valueRecordId: value.id,
+            valueScope: value.organizationScopeId,
+            campaignScope: campaign.organizationScopeId,
+          },
+        });
+      }
+      if (campaign.status !== "ACTIVE") {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "CAMPAIGN_VALIDATION",
+          classification: "precondition",
+          message: `campaign ${campaignId} is ${campaign.status} — clearing executes only from an ACTIVE campaign`,
+          context: { campaignId, status: campaign.status },
+        });
+      }
+      const organizationScopeId = campaign.organizationScopeId;
+      const policy = await campaignService.getPolicyVersion(
+        execution,
+        campaignId,
+        campaign.currentPolicyVersion ?? 1,
+      );
+      const rules = policy.clearingRules;
+      if (rules.length === 0) {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "CAMPAIGN_VALIDATION",
+          classification: "precondition",
+          message: `campaign ${campaignId} policy version ${String(policy.version)} declares no clearing rules`,
+          context: { campaignId, policyVersion: policy.version },
+        });
+      }
+      // Resolve the rule: by explicit id, else the single declared
+      // rule (deterministic when exactly one exists).
+      const ruleId = input.clearingRuleId as string | undefined;
+      const rule =
+        ruleId !== undefined && ruleId !== null && String(ruleId).trim() !== ""
+          ? rules.find((r) => r.id === ruleId)
+          : rules.length === 1
+            ? rules[0]!
+            : undefined;
+      if (!rule) {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "CAMPAIGN_VALIDATION",
+          classification: "precondition",
+          message: `clearing rule not found on campaign ${campaignId} policy version ${String(policy.version)}${ruleId ? ` (requested ${String(ruleId)})` : " (pass clearingRuleId — multiple rules are declared)"}`,
+          context: {
+            campaignId,
+            policyVersion: policy.version,
+            requestedRuleId: ruleId ?? null,
+            declaredRuleIds: rules.map((r) => r.id),
+          },
+        });
+      }
+      // The state gate: only MATURE value may be drawn. A CONSUMED
+      // record is tolerated ONLY as the replay path of a CONSUMING
+      // draw (reward/credit) — the underlying settlement primitive
+      // replays an idempotent draw (same compound key) and REFUSES a
+      // fresh one (consume-only-MATURE), so exactly-once semantics
+      // hold either way (the W012 publication-composite
+      // replay-tolerance pattern). Cash draws never consume and
+      // therefore always require MATURE.
+      const drawConsumes =
+        rule.drawKind === "reward_allocation" ||
+        rule.drawKind === "credit_issuance";
+      const isReplayPath = drawConsumes && value.state === "CONSUMED";
+      if (value.state !== "MATURE" && !isReplayPath) {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "ECONOMIC_VALIDATION",
+          classification: "precondition",
+          message: `value record ${value.id} is ${value.state}, not MATURE — only mature value may be cleared`,
+          context: { valueRecordId: value.id, state: value.state },
+        });
+      }
+      if (value.amount > rule.maxDrawAmount) {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "ECONOMIC_VALIDATION",
+          classification: "precondition",
+          message: `value record ${value.id} amount ${String(value.amount)} exceeds clearing rule ${rule.id} max draw amount ${String(rule.maxDrawAmount)}`,
+          context: {
+            valueRecordId: value.id,
+            amount: value.amount,
+            clearingRuleId: rule.id,
+            maxDrawAmount: rule.maxDrawAmount,
+          },
+        });
+      }
+      // Deterministic basis check (CAMP-005): the value record's
+      // sources must satisfy the rule's declared basis (the sources
+      // are immutable — replay-safe).
+      const sourceKinds = new Set(value.sources.map((s) => s.kind));
+      const basisSatisfied =
+        rule.basis === "attributed_outcome"
+          ? sourceKinds.has("measured_outcome")
+          : rule.basis === "verified_evidence"
+            ? sourceKinds.has("evidence")
+            : sourceKinds.has("proof_of_value");
+      if (!basisSatisfied) {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "ECONOMIC_VALIDATION",
+          classification: "precondition",
+          message: `value record ${value.id} sources (${value.sources.map((s) => s.kind).join(", ")}) do not satisfy clearing rule ${rule.id} basis ${rule.basis}`,
+          context: {
+            valueRecordId: value.id,
+            sourceKinds: [...sourceKinds],
+            clearingRuleId: rule.id,
+            basis: rule.basis,
+          },
+        });
+      }
+      // Gates: risk controls (record + person + EVERY source) and
+      // ACTIVE disputes (record + every source) — the composition
+      // root consults; neither domain mutates economic state. On the
+      // CONSUMED replay path the draw has already committed; the
+      // gates must not block the idempotent replay.
+      const allSubjectIds = [
+        value.id,
+        ...value.sources.map((s) => s.id),
+      ];
+      if (!isReplayPath) {
+        await refuseWhenDisputed(execution, organizationScopeId, allSubjectIds);
+        const drawOperationClass: RiskOperationClass =
+          rule.drawKind === "reward_allocation"
+            ? "reward_allocation"
+            : rule.drawKind === "credit_issuance"
+              ? "credit_issuance"
+              : "cash_settlement";
+        for (const subjectId of allSubjectIds) {
+          await refuseWhenGated(
+            execution,
+            organizationScopeId,
+            drawOperationClass,
+            subjectId,
+            value.beneficiaryPersonId,
+          );
+        }
+      }
+      // The draw itself — the EXISTING settlement primitive.
+      if (rule.drawKind === "reward_allocation") {
+        if (!rule.rewardPolicyId) {
+          const { OpenConError: GateError } = await import("../core/errors.ts");
+          throw new GateError({
+            code: "ECONOMIC_VALIDATION",
+            classification: "precondition",
+            message: `clearing rule ${rule.id} draw kind reward_allocation requires a reward policy reference`,
+            context: { clearingRuleId: rule.id },
+          });
+        }
+        const result = await rewardService.allocateRewards(execution, {
+          organizationScopeId,
+          sourceValueRecordId: value.id,
+          policyId: rule.rewardPolicyId,
+          idempotencyKey: `${idempotencyKey}:reward`,
+        });
+        const campaignAfter = await campaignService.recordClearingExecution(
+          execution,
+          {
+            campaignId,
+            clearingRuleId: rule.id,
+            drawKind: rule.drawKind,
+            valueRecordId: value.id,
+            resultId: result.allocation.id,
+            amount: result.allocation.totalAllocated,
+            description: `campaign clearing draw (reward allocation ${result.allocation.id})`,
+            idempotencyKey: `${idempotencyKey}:record`,
+          },
+        );
+        return {
+          drawKind: "reward_allocation",
+          allocation: toRewardAllocationView(result.allocation),
+          created: result.created,
+          value: toEconomicValueView(
+            await economicValueService.getValue(execution, value.id),
+          ),
+          campaignEventCount: campaignAfter.events.length,
+        };
+      }
+      if (rule.drawKind === "credit_issuance") {
+        const creditsPerValueUnit = input.creditsPerValueUnit as
+          | number
+          | undefined;
+        if (
+          creditsPerValueUnit === undefined ||
+          !Number.isFinite(creditsPerValueUnit) ||
+          creditsPerValueUnit <= 0
+        ) {
+          const { OpenConError: GateError } = await import("../core/errors.ts");
+          throw new GateError({
+            code: "ECONOMIC_VALIDATION",
+            classification: "validation",
+            message: "credit draw requires creditsPerValueUnit > 0",
+            context: { creditsPerValueUnit: creditsPerValueUnit ?? null },
+          });
+        }
+        const result = await creditService.issueCredits(execution, {
+          organizationScopeId,
+          beneficiaryPersonId: value.beneficiaryPersonId,
+          sourceValueRecordId: value.id,
+          creditsPerValueUnit,
+          description: `campaign clearing draw (credits) — rule ${rule.id}`,
+          idempotencyKey: `${idempotencyKey}:credit`,
+        });
+        const campaignAfter = await campaignService.recordClearingExecution(
+          execution,
+          {
+            campaignId,
+            clearingRuleId: rule.id,
+            drawKind: rule.drawKind,
+            valueRecordId: value.id,
+            resultId: result.issuance.id,
+            amount: result.issuance.creditAmount,
+            description: `campaign clearing draw (credit issuance ${result.issuance.id})`,
+            idempotencyKey: `${idempotencyKey}:record`,
+          },
+        );
+        return {
+          drawKind: "credit_issuance",
+          issuance: toCreditIssuanceView(result.issuance),
+          created: result.created,
+          value: toEconomicValueView(
+            await economicValueService.getValue(execution, value.id),
+          ),
+          campaignEventCount: campaignAfter.events.length,
+        };
+      }
+      // cash_obligation — internal payable/receivable state ONLY
+      // (NO external payment execution: /payments stays skeletal,
+      // NET-W030).
+      const cashKind = (input.cashKind as string | undefined) ?? "payable";
+      if (cashKind !== "payable" && cashKind !== "receivable") {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "ECONOMIC_VALIDATION",
+          classification: "validation",
+          message: `cashKind must be payable | receivable (got ${String(cashKind)})`,
+          context: { cashKind },
+        });
+      }
+      const counterpartyPersonId = input.counterpartyPersonId as
+        | string
+        | undefined;
+      if (!counterpartyPersonId || !String(counterpartyPersonId).trim()) {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "ECONOMIC_VALIDATION",
+          classification: "validation",
+          message: "cash draw requires counterpartyPersonId",
+          context: {},
+        });
+      }
+      const cashAmount = input.cashAmount as number | undefined;
+      if (
+        cashAmount === undefined ||
+        !Number.isFinite(cashAmount) ||
+        cashAmount <= 0 ||
+        cashAmount > rule.maxDrawAmount
+      ) {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "ECONOMIC_VALIDATION",
+          classification: "validation",
+          message: `cash draw amount must be > 0 and ≤ the rule max draw amount ${String(rule.maxDrawAmount)}`,
+          context: {
+            cashAmount: cashAmount ?? null,
+            maxDrawAmount: rule.maxDrawAmount,
+          },
+        });
+      }
+      const result = await cashService.recordCashObligation(execution, {
+        organizationScopeId,
+        kind: cashKind,
+        counterpartyPersonId,
+        amount: cashAmount,
+        description: `campaign clearing draw — rule ${rule.id}, value record ${value.id}`,
+        idempotencyKey: `${idempotencyKey}:cash`,
+      });
+      const campaignAfter = await campaignService.recordClearingExecution(
+        execution,
+        {
+          campaignId,
+          clearingRuleId: rule.id,
+          drawKind: rule.drawKind,
+          valueRecordId: value.id,
+          resultId: result.obligation.id,
+          amount: result.obligation.amount,
+          description: `campaign clearing draw (cash obligation ${result.obligation.id})`,
+          idempotencyKey: `${idempotencyKey}:record`,
+        },
+      );
+      return {
+        drawKind: "cash_obligation",
+        obligation: toCashObligationView(result.obligation),
+        created: result.created,
+        value: toEconomicValueView(value),
+        campaignEventCount: campaignAfter.events.length,
+      };
+    },
+
+    /**
+     * Composite 3 (AC-04): feed ONE evidence-backed reputation input
+     * from a MATERIAL settlement outcome (a MATURE or CONSUMED value
+     * record). The input service DERIVES the basis from the resolved
+     * sources (all verified-grade by construction); no economic field
+     * is copied — the reputation record carries references only.
+     */
+    async applySettlementReputationEffect(execution, _actorPersonId, input) {
+      const value = await economicValueService.getValue(
+        execution,
+        input.valueRecordId as string,
+      );
+      if (value.state !== "MATURE" && value.state !== "CONSUMED") {
+        const { OpenConError: GateError } = await import("../core/errors.ts");
+        throw new GateError({
+          code: "REPUTATION_VALIDATION",
+          classification: "precondition",
+          message: `value record ${value.id} is ${value.state} — only MATURE or CONSUMED outcomes (material, gate-passed) may feed reputation`,
+          context: { valueRecordId: value.id, state: value.state },
+        });
+      }
+      const dimension = (input.dimension as string | undefined) ?? "helpfulness";
+      const result = await reputationInputService.recordInput(execution, {
+        organizationScopeId: value.organizationScopeId,
+        subjectPersonId: value.beneficiaryPersonId,
+        dimension,
+        // The value record's sources — every kind is a legal
+        // reputation source kind (contribution / proof_of_value /
+        // measured_outcome / evidence), all verified-grade by the
+        // settlement input gate. References only: no amounts.
+        sources: value.sources.map((s) => ({ kind: s.kind, id: s.id })),
+        description:
+          (input.description as string | undefined) ??
+          `material settlement outcome (value record ${value.id}, ${value.state.toLowerCase()})`,
+        // The decay anchor: when the outcome HAPPENED (maturation /
+        // consumption), not when this effect was recorded.
+        occurredAt: value.maturedAt ?? value.recordedAt,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return {
+        input: toReputationInputView(result.input),
+        created: result.created,
+        valueState: value.state,
+      };
     },
   };
 

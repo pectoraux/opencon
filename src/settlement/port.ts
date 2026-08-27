@@ -138,6 +138,27 @@ export interface EconomicEvidenceLookup {
   resolve(id: string): Promise<ResolvedEvidenceRecordSource | null>;
 }
 
+/**
+ * Structural view of a resolved contribution source (NET-W014). The
+ * lifecycle state is the /workflows authority's field — read-only
+ * here.
+ */
+export interface ResolvedContributionSource {
+  readonly organizationScopeId: string;
+  readonly state: string;
+}
+
+/**
+ * EconomicContributionLookup — structural interface over the
+ * contributions boundary's repository (NET-W014). A `contribution`
+ * economic source qualifies ONLY when it resolves same-scope AND in
+ * lifecycle state VERIFIED — the identical qualifying bar as
+ * Proof-of-Value and measured-outcome sources.
+ */
+export interface EconomicContributionLookup {
+  resolve(id: string): Promise<ResolvedContributionSource | null>;
+}
+
 // ---------------------------------------------------------------------------
 // §3.3 Economic value records (pending → mature → consumed/reversed).
 // ---------------------------------------------------------------------------
