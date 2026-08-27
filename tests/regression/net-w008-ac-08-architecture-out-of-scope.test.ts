@@ -225,10 +225,17 @@ describe("NET-W008-AC-08 architecture/out-of-scope regression", () => {
   test("the core economic vocabulary exports the frozen unit/source/state sets", async () => {
     const core = await import("../../src/core/economics.ts");
     expect([...core.ECONOMIC_UNIT_TYPES]).toEqual(["value", "credits", "cash"]);
+    // NET-W014 AMENDMENT (the RISK_SIGNAL_CATEGORIES additive
+    // precedent from NET-W013): the verified helpful contribution is
+    // a first-class economic source, resolved through the neutral
+    // EconomicContributionLookup with the IDENTICAL qualifying bar
+    // (same scope + VERIFIED) — see
+    // tests/regression/net-w014-ac-07-architecture-out-of-scope.test.ts.
     expect([...core.ECONOMIC_VALUE_SOURCES]).toEqual([
       "proof_of_value",
       "measured_outcome",
       "evidence",
+      "contribution",
     ]);
     expect([...core.QUALIFYING_ECONOMIC_EVIDENCE_SOURCE_TYPES]).toEqual([
       "platform",

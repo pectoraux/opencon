@@ -48,6 +48,7 @@ import {
   type EconomicValueSourceKind,
 } from "../core/economics.ts";
 import type {
+  EconomicContributionLookup,
   EconomicEvidenceLookup,
   EconomicMeasuredOutcomeLookup,
   EconomicProofOfValueLookup,
@@ -59,6 +60,7 @@ import type {
   MatureValueInput,
   RecordPendingValueInput,
   RecordPendingValueResult,
+  ResolvedContributionSource,
   ResolvedEvidenceRecordSource,
   ResolvedMeasuredOutcomeSource,
   ResolvedProofOfValueSource,
@@ -100,6 +102,8 @@ export interface EconomicValueServiceDeps extends EconomicServiceDeps {
   readonly proofOfValueLookup: EconomicProofOfValueLookup;
   readonly measuredOutcomeLookup: EconomicMeasuredOutcomeLookup;
   readonly evidenceLookup: EconomicEvidenceLookup;
+  /** NET-W014: resolves `contribution` sources (same qualifying bar). */
+  readonly contributionLookup: EconomicContributionLookup;
 }
 
 /** A source ref narrowed to its kind + id (validation output). */
@@ -108,7 +112,7 @@ function narrowSources(
 ): EconomicValueSourceRef[] {
   if (!Array.isArray(sources) || sources.length === 0) {
     throw validationError(
-      "an economic value record requires at least one upstream source reference (proof of value, measured outcome or evidence) — a bare activity, spend, wealth or reputation assertion cannot create economic value",
+      "an economic value record requires at least one upstream source reference (proof of value, measured outcome, evidence or contribution) — a bare activity, spend, wealth or reputation assertion cannot create economic value",
       { sourceCount: Array.isArray(sources) ? sources.length : 0 },
     );
   }
@@ -119,7 +123,7 @@ function narrowSources(
     }
     if (!isEconomicValueSourceKind(source.kind)) {
       throw validationError(
-        `economic source kind must be one of proof_of_value | measured_outcome | evidence (got ${String(source.kind)}) — spend, wealth, deposits, raw activity and reputation are not economic sources`,
+        `economic source kind must be one of proof_of_value | measured_outcome | evidence | contribution (got ${String(source.kind)}) — spend, wealth, deposits, raw activity and reputation are not economic sources`,
         { kind: source.kind },
       );
     }
@@ -142,11 +146,18 @@ async function resolveQualifyingSource(
     | ResolvedProofOfValueSource
     | ResolvedMeasuredOutcomeSource
     | ResolvedEvidenceRecordSource
+    | ResolvedContributionSource
     | null = null;
   if (ref.kind === "proof_of_value") {
     resolved = await deps.proofOfValueLookup.resolve(ref.id);
   } else if (ref.kind === "measured_outcome") {
     resolved = await deps.measuredOutcomeLookup.resolve(ref.id);
+  } else if (ref.kind === "contribution") {
+    // NET-W014: the verified helpful contribution — the identical
+    // qualifying bar as the other lifecycle sources (same scope +
+    // state VERIFIED; the /workflows authority's terminal
+    // confirmation).
+    resolved = await deps.contributionLookup.resolve(ref.id);
   } else {
     resolved = await deps.evidenceLookup.resolve(ref.id);
   }
@@ -182,7 +193,8 @@ async function resolveQualifyingSource(
   }
   const lifecycle = resolved as
     | ResolvedProofOfValueSource
-    | ResolvedMeasuredOutcomeSource;
+    | ResolvedMeasuredOutcomeSource
+    | ResolvedContributionSource;
   if (lifecycle.state !== "VERIFIED") {
     throw validationError(
       `upstream ${ref.kind} ${ref.id} is in state ${lifecycle.state}, not VERIFIED — unverified value cannot create economic records`,

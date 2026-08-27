@@ -61,7 +61,16 @@ export function isEconomicUnitType(value: string): value is EconomicUnitType {
  *  - `measured_outcome` — a measured outcome in state VERIFIED
  *    (finalized measurement — NET-W006);
  *  - `evidence` — an evidence record from a platform/attested/provider
- *    source (see QUALIFYING_ECONOMIC_EVIDENCE_SOURCE_TYPES).
+ *    source (see QUALIFYING_ECONOMIC_EVIDENCE_SOURCE_TYPES);
+ *  - `contribution` — a helpful contribution in lifecycle state
+ *    VERIFIED (NET-W014 AMENDMENT — the reward-integration layer
+ *    consumes the verified-usefulness claim as a first-class economic
+ *    source; resolved through the settlement boundary's neutral
+ *    EconomicContributionLookup with the SAME qualifying bar: same
+ *    organization scope + VERIFIED. Including the contribution in the
+ *    value record's sources means the EXISTING dispute/risk gates —
+ *    which check source ids at the composition root — automatically
+ *    cover contribution-level disputes and controls).
  *
  * There is deliberately NO source kind for spend, wealth, deposits,
  * raw activity volume, reputation records or model output: a bare
@@ -73,6 +82,9 @@ export const ECONOMIC_VALUE_SOURCES = [
   "proof_of_value",
   "measured_outcome",
   "evidence",
+  // NET-W014 AMENDMENT (the RISK_SIGNAL_CATEGORIES additive precedent):
+  // the verified helpful contribution as a first-class economic source.
+  "contribution",
 ] as const;
 
 export type EconomicValueSourceKind =

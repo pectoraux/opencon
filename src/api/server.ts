@@ -3256,6 +3256,110 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // -- NET-W014 reward and settlement integration routes ----------
+
+    // POST /api/settlement/contribution-value — recognize qualifying
+    // verified contribution value as canonical PENDING economic value
+    // (protected; the deterministic qualification gate + the
+    // /settlement input gate).
+    if (
+      path === "/api/settlement/contribution-value" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "reward.recognize", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recognizeContributionValue(guarded.execution, guarded.personId, {
+          contributionId: strField(obj, "contributionId"),
+          amount: numField(obj, "amount"),
+          ...(obj.maturation !== undefined
+            ? { maturation: obj.maturation as Record<string, unknown> }
+            : {}),
+          ...(obj.description !== undefined
+            ? { description: String(obj.description) }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/settlement/clearing-executions — execute a declared
+    // campaign clearing rule (protected; the deterministic draw
+    // through the canonical /settlement primitive).
+    if (
+      path === "/api/settlement/clearing-executions" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "reward.clear", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.executeCampaignClearing(guarded.execution, guarded.personId, {
+          campaignId: strField(obj, "campaignId"),
+          valueRecordId: strField(obj, "valueRecordId"),
+          ...(obj.clearingRuleId !== undefined
+            ? { clearingRuleId: String(obj.clearingRuleId) }
+            : {}),
+          ...(obj.creditsPerValueUnit !== undefined
+            ? { creditsPerValueUnit: Number(obj.creditsPerValueUnit) }
+            : {}),
+          ...(obj.cashKind !== undefined
+            ? { cashKind: String(obj.cashKind) }
+            : {}),
+          ...(obj.counterpartyPersonId !== undefined
+            ? { counterpartyPersonId: String(obj.counterpartyPersonId) }
+            : {}),
+          ...(obj.cashAmount !== undefined
+            ? { cashAmount: Number(obj.cashAmount) }
+            : {}),
+          ...(obj.description !== undefined
+            ? { description: String(obj.description) }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/settlement/reputation-effects — feed ONE
+    // evidence-backed reputation input from a MATERIAL settlement
+    // outcome (protected; MATURE/CONSUMED value records only).
+    if (
+      path === "/api/settlement/reputation-effects" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "reward.reputation", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.applySettlementReputationEffect(guarded.execution, guarded.personId, {
+          valueRecordId: strField(obj, "valueRecordId"),
+          ...(obj.dimension !== undefined
+            ? { dimension: String(obj.dimension) }
+            : {}),
+          ...(obj.description !== undefined
+            ? { description: String(obj.description) }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
     return false;
   }
 
