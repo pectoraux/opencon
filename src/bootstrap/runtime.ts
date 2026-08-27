@@ -5067,6 +5067,12 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
      * score from the provider-neutral port, and attach it through the
      * domain's advisory API with provider identity preserved. The
      * model output is structurally non-authoritative evidence.
+     *
+     * PR #26 remediation (HELP-002): the fact set carries NO
+     * mention-derived feature. Product mentions are recorded metadata
+     * with no path into ANY quality signal — neither the deterministic
+     * engine (structurally absent input kind) NOR the advisory input
+     * assembled here. Mentions never enter the LLM scoring request.
      */
     async generateAdvisoryQualityScore(execution, _actorPersonId, input) {
       const contributionId = input.contributionId as string;
@@ -5078,11 +5084,12 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       const organizationScopeId = contribution.organizationScopeId;
       // Neutral record-level facts ONLY (no user content, no
       // authoritative assertions — the provider receives labels +
-      // values from the authoritative records).
+      // values from the authoritative records). NO mention-derived
+      // feature: a contribution's mentions must not move the advisory
+      // score (HELP-002 — mention ≠ helpfulness, mention ≠ quality).
       let pohState = "none";
       let qualifyingBasisCount = 0;
       let independentSourceCount = 0;
-      let mentionCount = 0;
       try {
         const poh = await helpfulnessService.getProofOfHelpfulness(
           execution,
@@ -5095,12 +5102,6 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
             : null;
         qualifyingBasisCount = latest ? latest.qualifyingBasisCount : 0;
         independentSourceCount = latest ? latest.independentSourceCount : 0;
-        const submission = contribution.submission as {
-          mentions?: readonly unknown[];
-        };
-        mentionCount = Array.isArray(submission?.mentions)
-          ? submission.mentions.length
-          : 0;
       } catch {
         // No PoH for this contribution — the facts stay at their
         // neutral defaults (quality evaluates non-helpful kinds too).
@@ -5124,7 +5125,6 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         neutralFacts: [
           { label: "contribution_type", value: contribution.contributionType },
           { label: "contribution_state", value: contribution.state },
-          { label: "mention_count", value: String(mentionCount) },
           { label: "poh_state", value: pohState },
           {
             label: "poh_qualifying_basis_count",

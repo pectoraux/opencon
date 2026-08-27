@@ -27,6 +27,7 @@ import {
   personCtx as w012PersonCtx,
   contributorCtx as w012ContributorCtx,
   key as w012Key,
+  type NetW008HarnessOptions,
   type NetW012Harness,
 } from "./_net-w012-harness.ts";
 import { createExecutionContext } from "../../src/core/execution-context.ts";
@@ -63,8 +64,10 @@ const GUARD_ACTIONS = [
   "moderation.decide",
 ];
 
-export async function createNetW013Harness(): Promise<NetW013Harness> {
-  const w012 = await createNetW012Harness();
+export async function createNetW013Harness(
+  opts: NetW008HarnessOptions = {},
+): Promise<NetW013Harness> {
+  const w012 = await createNetW012Harness(opts);
   const runtime = w012.runtime;
   const bootstrapCtx = w012.bootstrapCtx;
 

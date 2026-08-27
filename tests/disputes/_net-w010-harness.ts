@@ -18,7 +18,12 @@
  * double from NET-W003) so it runs without a real PostgreSQL.
  */
 
-import { createNetW009Harness, type NetW009Harness } from "./_net-w009-harness.ts";
+import {
+  createNetW009Harness,
+  type NetW008HarnessOptions,
+  type NetW009Harness,
+} from "./_net-w009-harness.ts";
+export type { NetW008HarnessOptions };
 import { createExecutionContext } from "../../src/core/execution-context.ts";
 import type { ExecutionContext } from "../../src/core/execution-context.ts";
 import type { DisputeRecord } from "../../src/disputes/port.ts";
@@ -42,8 +47,10 @@ export interface NetW010Harness {
   teardown(): Promise<void>;
 }
 
-export async function createNetW010Harness(): Promise<NetW010Harness> {
-  const w009 = await createNetW009Harness();
+export async function createNetW010Harness(
+  opts: NetW008HarnessOptions = {},
+): Promise<NetW010Harness> {
+  const w009 = await createNetW009Harness(opts);
   const runtime = w009.runtime;
   const bootstrapCtx = w009.bootstrapCtx;
 

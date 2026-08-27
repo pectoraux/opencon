@@ -420,6 +420,7 @@ describe("NET-W013-AC-07 architecture / out-of-scope", () => {
       "tests/contributions/net-w013-ac-04-moderation-append-only.test.ts",
       "tests/contributions/net-w013-ac-05-abuse-signal-integration.test.ts",
       "tests/contributions/net-w013-ac-06-atomicity-tenancy.test.ts",
+      "tests/contributions/net-w013-remediation-mention-isolation.test.ts",
       "tests/regression/net-w013-ac-07-architecture-out-of-scope.test.ts",
     ];
     for (const rel of expected) {

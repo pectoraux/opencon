@@ -33,8 +33,10 @@ import {
   ownerCtx,
   personCtx as w011PersonCtx,
   key as w011Key,
+  type NetW008HarnessOptions,
   type NetW011Harness,
 } from "../campaigns/_net-w011-harness.ts";
+export type { NetW008HarnessOptions };
 import { createExecutionContext } from "../../src/core/execution-context.ts";
 import type { ExecutionContext } from "../../src/core/execution-context.ts";
 import type {
@@ -83,8 +85,10 @@ const PUBLICATION_TRANSITIONS = [
   "contribution.transition.in_progress_to_submitted",
 ];
 
-export async function createNetW012Harness(): Promise<NetW012Harness> {
-  const w011 = await createNetW011Harness();
+export async function createNetW012Harness(
+  opts: NetW008HarnessOptions = {},
+): Promise<NetW012Harness> {
+  const w011 = await createNetW011Harness(opts);
   const runtime = w011.runtime;
   const bootstrapCtx = w011.bootstrapCtx;
 

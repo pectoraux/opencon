@@ -69,10 +69,13 @@ quality/moderation semantics live IN `/contributions`:
    values).
 5. **The first LlmPort consumer is a composition-root composite**:
    `generateAdvisoryQualityScore` builds the NEUTRAL record-level fact
-   set (contribution type/state, mention count, PoH state/counts —
-   never user content), calls the provider-neutral port, and attaches
-   the result through the domain's advisory API. Concrete external
-   providers are adapter-tier extensions of the same contract.
+   set (contribution type/state, PoH state/counts — never user
+   content, never mention-derived features), calls the
+   provider-neutral port, and attaches the result through the
+   domain's advisory API. Concrete external providers are
+   adapter-tier extensions of the same contract. (PR #26 remediation:
+   the original wiring passed a `mention_count` feature into the LLM
+   input — an actual mention → LLM score → AdvisoryQualityScore path;\n   it was removed and the isolation is regression-proven — see §7.)
 6. **Moderation history is append-only with derived status**: decisions
    are immutable; the current status is computed from the latest
    decision (`UNMODERATED` when none); a later APPROVE after REJECT
@@ -129,7 +132,7 @@ quality/moderation semantics live IN `/contributions`:
 |---|---|---|
 | NET-W013-AC-01 | first-class durable scoped quality/moderation records | `tests/contributions/net-w013-ac-01-quality-records.test.ts` (7) |
 | NET-W013-AC-02 | provider-independent scoring; AI advisory + non-authoritative (model-contract) | `tests/contributions/net-w013-ac-02-provider-independent.test.ts` (5) |
-| NET-W013-AC-03 | mention alone has no quality authority (HELP-002) | `tests/contributions/net-w013-ac-03-mention-not-quality.test.ts` (4) |
+| NET-W013-AC-03 | mention alone has no quality authority (HELP-002) | `tests/contributions/net-w013-ac-03-mention-not-quality.test.ts` (4) + `tests/contributions/net-w013-remediation-mention-isolation.test.ts` (4 — the ADVISORY path, PR #26 remediation) |
 | NET-W013-AC-04 | moderation auditable + append-only | `tests/contributions/net-w013-ac-04-moderation-append-only.test.ts` (6) |
 | NET-W013-AC-05 | spam/abuse integrates into /disputes (no second authority) | `tests/contributions/net-w013-ac-05-abuse-signal-integration.test.ts` (6) |
 | NET-W013-AC-06 | atomicity/idempotency/concurrency/tenancy/audit | `tests/contributions/net-w013-ac-06-atomicity-tenancy.test.ts` (7) |
@@ -143,3 +146,58 @@ non-skeletal (NET-W004); the NET-W012 module pin gains NET-W013 as a
 triple pin without amending the W012 test; the W012 denylist needed NO
 relaxation (the W013 naming avoids every banned pattern — sentiment
 stays banned forever).
+
+## §7 PR #26 remediation — mention isolation on the advisory path
+
+Architect review found one blocking violation: the composition-root
+`generateAdvisoryQualityScore` composite passed a `mention_count`
+feature (read from `contribution.submission.mentions`) into the LLM
+scoring input and persisted the resulting score as an
+`AdvisoryQualityScore` — an actual
+
+```text
+mention → LLM score → quality score
+```
+
+path, contradicting HELP-002 and the PR's own AC-03 claim that
+mentions have NO path into quality scoring.
+
+### The fix
+
+- `src/bootstrap/runtime.ts`: every mention-derived feature is removed
+  from the LLM scoring input. The composite assembles ONLY
+  contribution type/state + PoH state/counts; it never reads
+  `contribution.submission` (the sole mention source) at all.
+- Harness threading: `createNetW008Harness` … `createNetW013Harness`
+  gained an optional `llm.providers` option threaded to `createRuntime`
+  (default unchanged — the deterministic ECHO reference provider), so
+  regression tests can inject a RECORDING `LlmPort` double and assert
+  the exact scoring input the composition root assembles.
+
+### The regression — `tests/contributions/net-w013-remediation-mention-isolation.test.ts`
+
+Four mutation-checked tests (verified to FAIL 3/4 on the pre-fix code):
+
+1. **Provider-input identity**: contributions differing ONLY in
+   mentions (none / four plain / commercial-with-disclosure) reach the
+   LLM as BIT-FOR-BIT IDENTICAL `LlmScoringInput`s (deep-equal
+   purpose + rubricRef + neutralFacts), captured through the injected
+   recording double — robust to ANY provider implementation, not just
+   the echo hash. No captured label matches /mention/i. The persisted
+   advisory scores/providers/modelRefs are identical.
+2. **End-to-end**: mention-only differences produce identical advisory
+   results AND identical deterministic evaluation digests (score,
+   band, digest, advisoryCount, advisoryAverage, inputContributions,
+   reasons — all equal).
+3. **Control (teeth)**: the reference provider IS sensitive to a
+   `mention_count` fact — re-adding any mention-derived feature fails
+   test 1 loudly (the identity proof is non-vacuous).
+4. **Structural source pin**: the composite region of runtime.ts
+   contains no `mention_count` label, no `mentionCount` variable, no
+   `.mentions` read, and no `submission` read at all (mirroring the
+   quality-engine AC-03 token-level pin).
+
+Frozen specs: unchanged. The work order's invariant ("mentions have NO
+code path into the score — HELP-002") now holds on BOTH quality paths:
+the deterministic engine (always did) and the advisory LLM input (the
+remediation).

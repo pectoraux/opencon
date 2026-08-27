@@ -23,8 +23,10 @@ import {
   createNetW010Harness,
   ensureCreditsFor,
   personCtx as w010PersonCtx,
+  type NetW008HarnessOptions,
   type NetW010Harness,
 } from "../disputes/_net-w010-harness.ts";
+export type { NetW008HarnessOptions };
 import { createExecutionContext } from "../../src/core/execution-context.ts";
 import type { ExecutionContext } from "../../src/core/execution-context.ts";
 import type {
@@ -48,8 +50,10 @@ export interface NetW011Harness {
   teardown(): Promise<void>;
 }
 
-export async function createNetW011Harness(): Promise<NetW011Harness> {
-  const w010 = await createNetW010Harness();
+export async function createNetW011Harness(
+  opts: NetW008HarnessOptions = {},
+): Promise<NetW011Harness> {
+  const w010 = await createNetW010Harness(opts);
   const runtime = w010.runtime;
   const bootstrapCtx = w010.bootstrapCtx;
 

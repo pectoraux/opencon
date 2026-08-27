@@ -16,6 +16,8 @@
 import { createRuntime, type Runtime } from "../../src/bootstrap/runtime.ts";
 import { createExecutionContext } from "../../src/core/execution-context.ts";
 import type { ExecutionContext } from "../../src/core/execution-context.ts";
+import type { LlmPort } from "../../src/llm/port.ts";
+import type { ProviderAdapter } from "../../src/core/adapter.ts";
 import {
   CONTRIBUTION_TRANSITION_TABLE,
   OPPORTUNITY_TRANSITION_TABLE,
@@ -52,11 +54,30 @@ export interface NetW008Harness {
   teardown(): Promise<void>;
 }
 
-export async function createNetW008Harness(): Promise<NetW008Harness> {
+/**
+ * Harness construction options (PR #26 remediation): `llm.providers`
+ * is threaded to `createRuntime` so NET-W013 regression tests can
+ * inject a RECORDING LlmPort double and assert the exact scoring
+ * input the composition root assembles (e.g. that it carries no
+ * mention-derived feature — HELP-002). Omitted → the deterministic
+ * ECHO reference provider.
+ */
+export interface NetW008HarnessOptions {
+  readonly llm?: {
+    readonly providers?: readonly (LlmPort & ProviderAdapter)[];
+  };
+}
+
+export async function createNetW008Harness(
+  opts: NetW008HarnessOptions = {},
+): Promise<NetW008Harness> {
   const runtime = createRuntime({
     forceEnv: "test",
     env: { APP_ENV: "test", LOG_LEVEL: "warn" },
     port: 0,
+    ...(opts.llm?.providers
+      ? { llm: { providers: opts.llm.providers } }
+      : {}),
   });
   await runtime.initialize();
   await runtime.api.start();

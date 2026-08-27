@@ -128,9 +128,11 @@ No 17th domain, no new `LifecycleSubjectKind`, no architecture amendment.
 - the composition root wires `llmProviders` (opts override, echo default),
   initializes them with the runtime, and the
   `generateAdvisoryQualityScore` composite is the FIRST consumer: neutral
-  record-level facts (NO user content) → `llmProvider.score` → the domain's
-  advisory attachment with provider identity. Concrete external providers
-  remain adapter-tier extensions (no SDK in core/domain).
+  record-level facts (NO user content, NO mention-derived features —
+  HELP-002 holds on the advisory path too; PR #26 remediation) →
+  `llmProvider.score` → the domain's advisory attachment with provider
+  identity. Concrete external providers remain adapter-tier extensions
+  (no SDK in core/domain).
 
 ### §3.5 Spam/abuse integration (composition root ONLY)
 
