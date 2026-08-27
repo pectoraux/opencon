@@ -1,0 +1,548 @@
+/**
+ * Shared creator vocabulary (core contracts).
+ *
+ * Architecture ref: spec/architecture.md §18 (Module ownership:
+ * `/creators` owns creator domain rules — creator identity anchors,
+ * platform references, audience metadata, commercial preferences,
+ * rights, restrictions, availability), §13 (Provider neutrality);
+ * spec/architecture-lock.md §2 (the sixteen frozen core domains —
+ * `/creators` is the Phase-4 Creator boundary), §14 (provider
+ * neutrality — provider-specific semantics live OUTSIDE the domain).
+ *
+ * Work order ref: spec/work-orders/NET-W015.md
+ *   §3.1 First-class durable creator profile records (organization
+ *        scope + canonical person anchor, unique per person per org).
+ *   §3.2 Versioned profile sections (platforms, audience, commercial
+ *        preferences, rights, restrictions, availability,
+ *        participation rules, reputation references) — CRE-001.
+ *   §3.3 The privacy/secret boundary (credential-shaped and
+ *        raw-audience-shaped key guards, aggregate-only audience).
+ *   §3.4 Reputation references (CRE-005 — audience influence and
+ *        production reputation carried as SEPARATE canonical
+ *        references).
+ *
+ * Requirements: CRE-001 (creators define platform, audience, topic,
+ * language, format, rates, rights and restrictions), CRE-005
+ * (separate audience influence from production reputation).
+ *
+ * THE KEY RULES (work order §2 — authority separation):
+ *  - `/identity` remains the person identity authority: the creator
+ *    vocabulary carries person REFERENCES only — no identity fields;
+ *  - `/reputation` remains the trust-signal authority: the creator
+ *    vocabulary carries snapshot REFERENCES only — no scores, no
+ *    scoring parameters, no derived trust values;
+ *  - `/settlement` remains the economic authority: commercial rates
+ *    are DECLARED preferences validated with the shared economic
+ *    amount bounds — they are never economic state, and this module
+ *    introduces no economic-unit mutation;
+ *  - provider-specific platform semantics stay OUTSIDE the creator
+ *    domain (AC-06): every vocabulary here is closed and
+ *    provider-neutral, and the credential-shaped key guard makes
+ *    credential material structurally unable to enter creator
+ *    records.
+ *
+ * This module is data + pure validation ONLY — no I/O, no wall
+ * clock reads inside pure helpers, no lifecycle behaviour (the
+ * status machine validation lives in the creator service).
+ */
+
+import { OpenConError } from "./errors.ts";
+import {
+  ECONOMIC_DECIMALS,
+  ECONOMIC_MAX_AMOUNT,
+  ECONOMIC_SCALE,
+} from "./economics.ts";
+import { isReputationDimension, type ReputationDimension } from "./reputation.ts";
+
+/**
+ * The creator profile record's own administrative status machine
+ * (work order §3.1 — the campaign-record precedent: this is the
+ * RECORD's status, NOT a workflow lifecycle; opportunity/contribution
+ * lifecycle states stay with /workflows).
+ *
+ * ```text
+ * DRAFT ──activate──→ ACTIVE ⇄ pause/resume ⇄ PAUSED
+ *   │                    │
+ *   └── archive ────────┴── archive ──→ ARCHIVED (terminal)
+ * ```
+ */
+export const CREATOR_PROFILE_STATUSES = [
+  "DRAFT",
+  "ACTIVE",
+  "PAUSED",
+  "ARCHIVED",
+] as const;
+
+export type CreatorProfileStatus = (typeof CREATOR_PROFILE_STATUSES)[number];
+
+export function isCreatorProfileStatus(
+  value: string,
+): value is CreatorProfileStatus {
+  return (CREATOR_PROFILE_STATUSES as readonly string[]).includes(value);
+}
+
+/**
+ * Connected-platform kinds — the CLOSED, provider-neutral platform
+ * taxonomy (AC-06). A platform connection is a REFERENCE to an
+ * external presence; the concrete provider (e.g. a specific social
+ * network) is identified only through the free-form handle + profile
+ * URL on the connection record, NEVER through a provider-client type,
+ * token or connection state.
+ */
+export const CREATOR_PLATFORM_KINDS = [
+  "social",
+  "video",
+  "audio",
+  "written",
+  "community",
+] as const;
+
+export type CreatorPlatformKind = (typeof CREATOR_PLATFORM_KINDS)[number];
+
+export function isCreatorPlatformKind(
+  value: string,
+): value is CreatorPlatformKind {
+  return (CREATOR_PLATFORM_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * Content formats a creator can produce or a platform connection can
+ * carry as a capability (CRE-001 "format"). Closed and
+ * provider-neutral: a short-form vertical video is `short_video`
+ * regardless of which provider hosts it.
+ */
+export const CREATOR_CONTENT_FORMATS = [
+  "post",
+  "short_video",
+  "long_video",
+  "audio_episode",
+  "article",
+  "newsletter",
+  "live_stream",
+  "image_set",
+] as const;
+
+export type CreatorContentFormat = (typeof CREATOR_CONTENT_FORMATS)[number];
+
+export function isCreatorContentFormat(
+  value: string,
+): value is CreatorContentFormat {
+  return (CREATOR_CONTENT_FORMATS as readonly string[]).includes(value);
+}
+
+/**
+ * Audience size bands — the privacy-minimized representation of
+ * audience scale (work order §3.2/§3.3): a BAND, never an exact
+ * count, never a member list.
+ */
+export const CREATOR_AUDIENCE_SIZE_BANDS = [
+  "lt_1k",
+  "1k_10k",
+  "10k_100k",
+  "100k_1m",
+  "1m_10m",
+  "gt_10m",
+] as const;
+
+export type CreatorAudienceSizeBand =
+  (typeof CREATOR_AUDIENCE_SIZE_BANDS)[number];
+
+export function isCreatorAudienceSizeBand(
+  value: string,
+): value is CreatorAudienceSizeBand {
+  return (CREATOR_AUDIENCE_SIZE_BANDS as readonly string[]).includes(value);
+}
+
+/** Audience engagement bands (aggregate, qualitative). */
+export const CREATOR_ENGAGEMENT_BANDS = [
+  "low",
+  "medium",
+  "high",
+  "very_high",
+] as const;
+
+export type CreatorEngagementBand = (typeof CREATOR_ENGAGEMENT_BANDS)[number];
+
+export function isCreatorEngagementBand(
+  value: string,
+): value is CreatorEngagementBand {
+  return (CREATOR_ENGAGEMENT_BANDS as readonly string[]).includes(value);
+}
+
+/**
+ * Audience age bands for the aggregate age distribution (closed
+ * bands; shares are percentages 0–100).
+ */
+export const CREATOR_AUDIENCE_AGE_BANDS = [
+  "13_17",
+  "18_24",
+  "25_34",
+  "35_44",
+  "45_54",
+  "55_64",
+  "65_plus",
+] as const;
+
+export type CreatorAudienceAgeBand =
+  (typeof CREATOR_AUDIENCE_AGE_BANDS)[number];
+
+export function isCreatorAudienceAgeBand(
+  value: string,
+): value is CreatorAudienceAgeBand {
+  return (CREATOR_AUDIENCE_AGE_BANDS as readonly string[]).includes(value);
+}
+
+/** The maximum number of top-geography entries an aggregate may carry. */
+export const CREATOR_MAX_TOP_GEOGRAPHIES = 5;
+
+/**
+ * Rate units for declared commercial rate cards (CRE-001 "rates").
+ * A rate is DECLARED PREFERENCE (`amount` validated with the shared
+ * economic bounds) — never an economic commitment, posting or
+ * balance.
+ */
+export const CREATOR_RATE_UNITS = [
+  "per_deliverable",
+  "per_hour",
+  "per_campaign",
+] as const;
+
+export type CreatorRateUnit = (typeof CREATOR_RATE_UNITS)[number];
+
+export function isCreatorRateUnit(
+  value: string,
+): value is CreatorRateUnit {
+  return (CREATOR_RATE_UNITS as readonly string[]).includes(value);
+}
+
+/**
+ * Rights kinds a creator is willing to GRANT (CRE-001 "rights").
+ * DECLARED willingness only — rights EXECUTION (licensing,
+ * takedown, transfer) is NET-W017.
+ */
+export const CREATOR_RIGHTS_KINDS = [
+  "channel_publication",
+  "paid_amplification",
+  "reuse_license",
+  "exclusivity_window",
+  "derivative_works",
+] as const;
+
+export type CreatorRightsKind = (typeof CREATOR_RIGHTS_KINDS)[number];
+
+export function isCreatorRightsKind(
+  value: string,
+): value is CreatorRightsKind {
+  return (CREATOR_RIGHTS_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * The two creator reputation reference roles (CRE-005: separate
+ * audience influence from production reputation). Each role is
+ * carried by its OWN canonical `/reputation` snapshot reference —
+ * the separation lives in the DATA SHAPE so downstream consumers
+ * (NET-W016 matching) can never conflate the two signals.
+ */
+export const CREATOR_REPUTATION_ROLES = [
+  "audience_influence",
+  "production",
+] as const;
+
+export type CreatorReputationRole = (typeof CREATOR_REPUTATION_ROLES)[number];
+
+export function isCreatorReputationRole(
+  value: string,
+): value is CreatorReputationRole {
+  return (CREATOR_REPUTATION_ROLES as readonly string[]).includes(value);
+}
+
+/**
+ * The credential-shaped key fragment set (work order §3.3). ANY key
+ * matching one of these fragments — at ANY nesting depth of ANY
+ * creator section input — is rejected by
+ * {@link assertNoCredentialShapedKeys}: credentials and platform
+ * auth material never enter creator records (issue invariant 6).
+ * The fragment set deliberately mirrors the participants
+ * authorization-service redaction set plus platform-auth shapes
+ * (access/refresh keys).
+ */
+export const CREDENTIAL_KEY_FRAGMENTS = [
+  "password",
+  "token",
+  "secret",
+  "api-key",
+  "apikey",
+  "private-key",
+  "privatekey",
+  "credential",
+  "access-key",
+  "accesskey",
+  "refresh",
+  "auth",
+] as const;
+
+const CREDENTIAL_KEY_RE = new RegExp(
+  CREDENTIAL_KEY_FRAGMENTS.map((f) => f.replace(/[-]/g, "[-_]?")).join("|"),
+  "i",
+);
+
+/**
+ * The raw-audience-shaped key fragment set (work order §3.3). ANY
+ * key matching one of these fragments — at ANY nesting depth — is
+ * rejected by {@link assertNoRawAudienceKeys}: audience metadata is
+ * aggregate/qualified attributes ONLY; individual audience records
+ * (members, emails, contacts, device ids, …) can never enter creator
+ * records (issue invariant 3).
+ */
+export const RAW_AUDIENCE_KEY_FRAGMENTS = [
+  "member",
+  "individual",
+  "person",
+  "user",
+  "email",
+  "address",
+  "contact",
+  "device-id",
+  "deviceid",
+  "ip-address",
+  "ipaddress",
+  "raw-record",
+  "rawrecord",
+  "audience-record",
+  "audiencerecord",
+] as const;
+
+const RAW_AUDIENCE_KEY_RE = new RegExp(
+  RAW_AUDIENCE_KEY_FRAGMENTS.map((f) => f.replace(/[-]/g, "[-_]?")).join("|"),
+  "i",
+);
+
+/** Validation error for creator vocabulary/shape violations. */
+export class InvalidCreatorProfileError extends OpenConError {
+  constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+  ) {
+    super({
+      code: "CREATOR_VALIDATION",
+      classification: "validation",
+      message,
+      context,
+    });
+  }
+}
+
+/**
+ * Deep-scan a section input for credential-shaped keys. Throws
+ * {@link InvalidCreatorProfileError} naming the offending path —
+ * fail-closed, applied to EVERY creator section input so credential
+ * material has no path into creator records (invariant 6 / AC-03).
+ */
+export function assertNoCredentialShapedKeys(
+  value: unknown,
+  path = "section",
+): void {
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) {
+      assertNoCredentialShapedKeys(value[i], `${path}[${String(i)}]`);
+    }
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, child] of Object.entries(
+      value as Readonly<Record<string, unknown>>,
+    )) {
+      if (CREDENTIAL_KEY_RE.test(key)) {
+        throw new InvalidCreatorProfileError(
+          `credential-shaped field "${key}" is not permitted in creator records (at ${path}) — credentials stay behind the secret/adapter boundaries`,
+          { field: key, path },
+        );
+      }
+      assertNoCredentialShapedKeys(child, `${path}.${key}`);
+    }
+  }
+}
+
+/**
+ * Deep-scan a section input for raw-audience-shaped keys. Throws
+ * {@link InvalidCreatorProfileError} naming the offending path —
+ * fail-closed, applied to the audience section (and defensively to
+ * every section) so individual audience data has no path into
+ * creator records (invariant 3 / AC-03).
+ */
+export function assertNoRawAudienceKeys(
+  value: unknown,
+  path = "section",
+): void {
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) {
+      assertNoRawAudienceKeys(value[i], `${path}[${String(i)}]`);
+    }
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, child] of Object.entries(
+      value as Readonly<Record<string, unknown>>,
+    )) {
+      if (RAW_AUDIENCE_KEY_RE.test(key)) {
+        throw new InvalidCreatorProfileError(
+          `raw-audience-shaped field "${key}" is not permitted in creator records (at ${path}) — audience metadata is aggregate/qualified attributes only`,
+          { field: key, path },
+        );
+      }
+      assertNoRawAudienceKeys(child, `${path}.${key}`);
+    }
+  }
+}
+
+/**
+ * Validate a declared commercial rate amount: finite number > 0
+ * (a rate of zero is not a rate — use `negotiable` instead), at most
+ * {@link ECONOMIC_DECIMALS} decimals, not larger than
+ * {@link ECONOMIC_MAX_AMOUNT}. Mirrors the shared economic amount
+ * validator (the campaign-budget declaration precedent) while
+ * creating NO economic state.
+ */
+export function validateCreatorRateAmount(
+  field: string,
+  amount: number,
+): number {
+  if (typeof amount !== "number" || !Number.isFinite(amount)) {
+    throw new InvalidCreatorProfileError(
+      `${field} must be a finite number (got ${String(amount)})`,
+      { field, amount },
+    );
+  }
+  if (amount <= 0) {
+    throw new InvalidCreatorProfileError(
+      `${field} must be > 0 (got ${String(amount)}) — declared rates are positive preferences; negotiability is a separate flag`,
+      { field, amount },
+    );
+  }
+  if (amount > ECONOMIC_MAX_AMOUNT) {
+    throw new InvalidCreatorProfileError(
+      `${field} exceeds the maximum representable amount ${String(ECONOMIC_MAX_AMOUNT)} (got ${String(amount)})`,
+      { field, amount },
+    );
+  }
+  const minor = Math.round(amount * ECONOMIC_SCALE);
+  if (Math.abs(minor / ECONOMIC_SCALE - amount) > Number.EPSILON) {
+    throw new InvalidCreatorProfileError(
+      `${field} must have at most ${ECONOMIC_DECIMALS} decimals (got ${String(amount)})`,
+      { field, amount },
+    );
+  }
+  return amount;
+}
+
+/**
+ * Validate an aggregate audience share (a percentage): finite
+ * number, 0 ≤ share ≤ 100.
+ */
+export function validateCreatorAudienceShare(
+  field: string,
+  share: number,
+): number {
+  if (typeof share !== "number" || !Number.isFinite(share)) {
+    throw new InvalidCreatorProfileError(
+      `${field} must be a finite number (got ${String(share)})`,
+      { field, share },
+    );
+  }
+  if (share < 0 || share > 100) {
+    throw new InvalidCreatorProfileError(
+      `${field} must be a share between 0 and 100 (got ${String(share)})`,
+      { field, share },
+    );
+  }
+  return share;
+}
+
+const LANGUAGE_TAG_RE = /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
+
+/**
+ * Validate a language tag: lowercase primary subtag (2–3 letters)
+ * optionally followed by subtags (CRE-001 "language").
+ */
+export function validateCreatorLanguageTag(
+  field: string,
+  tag: string,
+): string {
+  if (!LANGUAGE_TAG_RE.test(tag)) {
+    throw new InvalidCreatorProfileError(
+      `${field} must be a language tag like "en" or "pt-BR" (got ${String(tag)})`,
+      { field, tag },
+    );
+  }
+  return tag;
+}
+
+const TERRITORY_RE = /^[A-Z]{2}$/;
+
+/**
+ * Validate an ISO 3166-1 alpha-2 territory code (uppercase).
+ */
+export function validateCreatorTerritoryCode(
+  field: string,
+  code: string,
+): string {
+  if (!TERRITORY_RE.test(code)) {
+    throw new InvalidCreatorProfileError(
+      `${field} must be an ISO 3166-1 alpha-2 territory code like "GH" (got ${String(code)})`,
+      { field, code },
+    );
+  }
+  return code;
+}
+
+const CURRENCY_RE = /^[A-Z]{3}$/;
+
+/**
+ * Validate an ISO 4217-style currency code (3 uppercase letters).
+ */
+export function validateCreatorCurrencyCode(
+  field: string,
+  code: string,
+): string {
+  if (!CURRENCY_RE.test(code)) {
+    throw new InvalidCreatorProfileError(
+      `${field} must be a 3-letter currency code like "USD" (got ${String(code)})`,
+      { field, code },
+    );
+  }
+  return code;
+}
+
+/**
+ * Validate that a reputation-reference dimension is one of the
+ * FROZEN canonical reputation dimensions (the creators domain never
+ * defines its own trust dimensions — it references /reputation's).
+ */
+export function validateCreatorReputationDimension(
+  field: string,
+  dimension: string,
+): ReputationDimension {
+  if (!isReputationDimension(dimension)) {
+    throw new InvalidCreatorProfileError(
+      `${field} must be one of the frozen canonical reputation dimensions (got ${String(dimension)})`,
+      { field, dimension },
+    );
+  }
+  return dimension;
+}
+
+/**
+ * A required-string helper (non-empty after trimming).
+ */
+export function requireCreatorString(
+  field: string,
+  value: unknown,
+): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new InvalidCreatorProfileError(
+      `${field} is required (non-empty string)`,
+      { field },
+    );
+  }
+  return value.trim();
+}

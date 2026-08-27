@@ -136,7 +136,23 @@ const NET_W009_DOMAINS = ["disputes"];
 // §4 authority separation).
 const NET_W011_DOMAINS = ["campaigns"];
 
-// Domains still deferred past NET-W011 (must remain skeletons).
+// Domains implemented in NET-W015 (no longer skeletons). The creators
+// domain (the Phase-4 Creator boundary) carries the CREATOR DOMAIN:
+// first-class creator profile records anchored to canonical person
+// identity (self-anchored, unique per person per org), immutable
+// versioned profile sections (provider-neutral platform references,
+// privacy-minimized audience aggregates, declared commercial
+// preferences, rights, restrictions, availability, participation
+// rules), and canonical reputation REFERENCES (audience_influence +
+// production roles, verified against /reputation snapshots — never
+// scores, never mutation). It introduces NO economically material
+// behaviour (declared rates are preferences, not commitments), NO
+// identity authority (anchor validation through the neutral person
+// lookup), NO reputation scoring and NO lifecycle mutation (NET-W015
+// work order §2 authority separation).
+const NET_W015_DOMAINS = ["creators"];
+
+// Domains still deferred past NET-W015 (must remain skeletons).
 const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
   (d) =>
     !NET_W002_DOMAINS.includes(d) &&
@@ -146,7 +162,8 @@ const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
     !NET_W007_DOMAINS.includes(d) &&
     !NET_W008_DOMAINS.includes(d) &&
     !NET_W009_DOMAINS.includes(d) &&
-    !NET_W011_DOMAINS.includes(d),
+    !NET_W011_DOMAINS.includes(d) &&
+    !NET_W015_DOMAINS.includes(d),
 );
 
 // Patterns that would indicate economically/material domain logic,
@@ -359,6 +376,28 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
       // /workflows per the NET-W011 work order §4).
       expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
       expect(moduleExport.describe?.() ?? "").toMatch(/NET-W011/);
+    }
+  });
+
+  test("NET-W015 domain modules are non-skeletal (tier domain, no 'skeleton' marker, reference NET-W015)", async () => {
+    for (const dir of NET_W015_DOMAINS) {
+      const modulePath = join(SRC, dir, "module.ts");
+      expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
+      const mod = await import(`../../src/${dir}/module.ts`);
+      const moduleExport = Object.values(mod)[0] as {
+        name: string;
+        tier: string;
+        describe?: () => string;
+      };
+      expect(moduleExport.tier).toBe("domain");
+      // NET-W015 modules are no longer skeletons — the creators
+      // boundary carries the creator domain (profile anchors,
+      // versioned preference sections, reputation references;
+      // identity/reputation/economic/lifecycle authority stay with
+      // /identity, /reputation, /settlement and /workflows per the
+      // NET-W015 work order §2).
+      expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
+      expect(moduleExport.describe?.() ?? "").toMatch(/NET-W015/);
     }
   });
 

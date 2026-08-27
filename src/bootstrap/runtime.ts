@@ -286,6 +286,11 @@ import {
   createAuthorityCampaignPolicyRepository,
 } from "../campaigns/authority-campaign-repository.ts";
 import { createCampaignService } from "../campaigns/campaign-service.ts";
+import {
+  createAuthorityCreatorProfileRepository,
+  createAuthorityCreatorProfileVersionRepository,
+} from "../creators/authority-creator-repository.ts";
+import { createCreatorService } from "../creators/creator-service.ts";
 import type {
   ActivateRiskControlInput,
   AppealDisputeInput,
@@ -311,6 +316,12 @@ import type {
   CampaignService,
   DefineCampaignPolicyInput,
 } from "../campaigns/port.ts";
+import type {
+  CreatorProfileRecord,
+  CreatorProfileSections,
+  CreatorProfileVersion,
+  CreatorService,
+} from "../creators/port.ts";
 import type { RiskOperationClass } from "../core/risk.ts";
 
 // Boundary module registrations (composition root imports all).
@@ -448,6 +459,8 @@ export interface Runtime {
   readonly disputeService: DisputeService;
   // NET-W011 campaigns (campaign policy/configuration) service.
   readonly campaignService: CampaignService;
+  // NET-W015 creators (creator identity and preferences) service.
+  readonly creatorService: CreatorService;
   // NET-W012 helpful contributions (Proof-of-Helpfulness) service.
   readonly helpfulnessService: HelpfulnessService;
   // NET-W013 quality/moderation/anti-spam services.
@@ -1668,6 +1681,60 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   });
 
   // ------------------------------------------------------------------
+  // NET-W015 creators wiring (creator identity and preferences).
+  //
+  // The creator lookups are thin READ-ONLY adapters over the OWNING
+  // domains' repositories (identity, reputation) — the same
+  // dependency-inversion pattern as the campaign lookups above. The
+  // /creators domain imports core contracts only: /identity stays
+  // the person identity authority (the profile anchor is validated
+  // through the neutral person lookup), /reputation stays the
+  // trust-signal authority (every reputation reference is verified
+  // through the neutral snapshot lookup — references only, never
+  // scores, never mutation). No economic command exists here at all
+  // (declared rates are preferences, not commitments); matching is
+  // NET-W016, UGC/rights NET-W017, sponsorship/disclosure NET-W018.
+  // ------------------------------------------------------------------
+  const creatorPersonLookup = {
+    async exists(personId: string) {
+      return identityRepo.exists(personId);
+    },
+  };
+  const creatorReputationSnapshotLookup = {
+    async resolve(snapshotId: string) {
+      const snapshot = await reputationSnapshotRepo.findById(snapshotId);
+      return snapshot
+        ? {
+            id: snapshot.id,
+            organizationScopeId: snapshot.organizationScopeId,
+            subjectPersonId: snapshot.subjectPersonId,
+            digest: snapshot.digest,
+          }
+        : null;
+    },
+  };
+  const creatorProfileRepo = createAuthorityCreatorProfileRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
+  });
+  const creatorProfileVersionRepo =
+    createAuthorityCreatorProfileVersionRepository({
+      authority: postgresAuthority,
+      logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
+    });
+  const creatorService = createCreatorService({
+    repository: creatorProfileRepo,
+    versionRepository: creatorProfileVersionRepo,
+    lookups: {
+      person: creatorPersonLookup,
+      reputation: creatorReputationSnapshotLookup,
+    },
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("creators"),
+  });
+
+  // ------------------------------------------------------------------
   // NET-W012 helpful contributions wiring (Proof-of-Helpfulness).
   //
   // The helpfulness lookups are thin READ-ONLY adapters over the
@@ -2444,6 +2511,30 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       >[],
       createdBy: policy.createdBy,
       createdAt: policy.createdAt,
+    };
+  }
+  function toCreatorProfileView(profile: CreatorProfileRecord) {
+    return {
+      id: profile.id,
+      organizationScopeId: profile.organizationScopeId,
+      creatorPersonId: profile.creatorPersonId,
+      displayName: profile.displayName,
+      status: profile.status,
+      currentVersion: profile.currentVersion,
+      events: profile.events as unknown as readonly Record<string, unknown>[],
+      createdAt: profile.createdAt,
+      updatedAt: profile.updatedAt,
+    };
+  }
+  function toCreatorProfileVersionView(version: CreatorProfileVersion) {
+    return {
+      id: version.id,
+      profileId: version.profileId,
+      organizationScopeId: version.organizationScopeId,
+      version: version.version,
+      sections: version.sections as unknown as Record<string, unknown>,
+      createdBy: version.createdBy,
+      createdAt: version.createdAt,
     };
   }
   function toHelpfulnessPolicyView(
@@ -4841,6 +4932,184 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       );
     },
 
+    // -- NET-W015 creator commands ---------------------------------------
+    // Composition-root orchestration (the authority-separation
+    // pattern): the /creators domain owns profile/policy decisions;
+    // /identity validates the anchor (neutral lookup); /reputation
+    // verifies every reference (neutral lookup — references only,
+    // never scores, never mutation). No economic command exists
+    // here; matching is NET-W016, UGC/rights NET-W017,
+    // sponsorship/disclosure NET-W018.
+
+    async createCreatorProfile(execution, _actorPersonId, input) {
+      const result = await creatorService.createProfile(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+        creatorPersonId: input.creatorPersonId as string,
+        displayName: input.displayName as string,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return {
+        profile: toCreatorProfileView(result.profile),
+        created: result.created,
+      };
+    },
+
+    async defineCreatorProfileVersion(execution, _actorPersonId, input) {
+      const result = await creatorService.defineProfileVersion(execution, {
+        profileId: input.profileId as string,
+        sections: input.sections as unknown as CreatorProfileSections,
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return {
+        version: toCreatorProfileVersionView(result.version),
+        created: result.created,
+      };
+    },
+
+    async activateCreatorProfile(execution, _actorPersonId, input) {
+      const updated = await creatorService.activateProfile(execution, {
+        profileId: input.profileId as string,
+        ...(input.reason !== undefined
+          ? { reason: input.reason as string }
+          : {}),
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toCreatorProfileView(updated);
+    },
+
+    async pauseCreatorProfile(execution, _actorPersonId, input) {
+      const updated = await creatorService.pauseProfile(execution, {
+        profileId: input.profileId as string,
+        ...(input.reason !== undefined
+          ? { reason: input.reason as string }
+          : {}),
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toCreatorProfileView(updated);
+    },
+
+    async resumeCreatorProfile(execution, _actorPersonId, input) {
+      const updated = await creatorService.resumeProfile(execution, {
+        profileId: input.profileId as string,
+        ...(input.reason !== undefined
+          ? { reason: input.reason as string }
+          : {}),
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toCreatorProfileView(updated);
+    },
+
+    async archiveCreatorProfile(execution, _actorPersonId, input) {
+      const updated = await creatorService.archiveProfile(execution, {
+        profileId: input.profileId as string,
+        ...(input.reason !== undefined
+          ? { reason: input.reason as string }
+          : {}),
+        idempotencyKey: input.idempotencyKey as string,
+      });
+      return toCreatorProfileView(updated);
+    },
+
+    async getCreatorProfile(execution, organizationScopeId, id) {
+      try {
+        const profile = await creatorService.getProfile(
+          getExecutionContext() ?? execution,
+          organizationScopeId,
+          id,
+        );
+        return toCreatorProfileView(profile);
+      } catch {
+        // Not found — including the cross-scope case, which stays
+        // indistinguishable from absence (tenant isolation, PR #30
+        // review remediation).
+        return null;
+      }
+    },
+
+    async getCreatorProfileByPerson(
+      execution,
+      organizationScopeId,
+      creatorPersonId,
+    ) {
+      const profile = await creatorService.getProfileByPerson(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        creatorPersonId,
+      );
+      return profile ? toCreatorProfileView(profile) : null;
+    },
+
+    async listCreatorProfiles(execution, organizationScopeId, statuses) {
+      const profiles = await creatorService.listProfiles(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        statuses,
+      );
+      return profiles.map(toCreatorProfileView);
+    },
+
+    async listCreatorProfileVersions(execution, organizationScopeId, profileId) {
+      const versions = await creatorService.listProfileVersions(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        profileId,
+      );
+      return versions.map(toCreatorProfileVersionView);
+    },
+
+    async resolveCreatorReputation(execution, organizationScopeId, profileId) {
+      // The reference-resolution read (work order §3.4): the profile
+      // record NEVER stores reputation scores — this read resolves
+      // the CURRENT profile version's references through the
+      // CANONICAL /reputation snapshot service at the composition
+      // root. The creator boundary never computes a score. The read
+      // is TENANT-SCOPED: the profile must resolve in the caller's
+      // organization scope (a foreign scope cannot resolve another
+      // tenant's creator reputation — PR #30 review remediation).
+      const profile = await creatorService.getProfile(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        profileId,
+      );
+      if (profile.currentVersion === null) {
+        return {
+          profileId,
+          currentVersion: null,
+          references: [] as readonly Record<string, unknown>[],
+        };
+      }
+      const version = await creatorService.getProfileVersion(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        profileId,
+        profile.currentVersion,
+      );
+      const references: Record<string, unknown>[] = [];
+      for (const reference of version.sections.reputationReferences) {
+        const snapshot = await reputationSnapshotService.getSnapshot(
+          getExecutionContext() ?? execution,
+          reference.snapshotId,
+        );
+        references.push({
+          role: reference.role,
+          dimension: reference.dimension,
+          snapshotId: reference.snapshotId,
+          declaredDigest: reference.digest,
+          resolvedDigest: snapshot.digest,
+          digestMatches: snapshot.digest === reference.digest,
+          computedAt: snapshot.computedAt,
+          policyId: snapshot.policyId,
+          policyVersion: snapshot.policyVersion,
+          referenceAt: snapshot.referenceAt,
+        });
+      }
+      return {
+        profileId,
+        currentVersion: profile.currentVersion,
+        references,
+      };
+    },
+
     // -- NET-W012 helpful-contribution commands -------------------------
     async defineHelpfulnessPolicy(execution, _actorPersonId, input) {
       const result = await helpfulnessService.defineHelpfulnessPolicy(
@@ -5997,6 +6266,8 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     disputeService,
     // NET-W011 campaigns (campaign policy/configuration) service.
     campaignService,
+    // NET-W015 creators (creator identity and preferences) service.
+    creatorService,
     helpfulnessService,
     // NET-W013 quality/moderation/anti-spam services + LLM providers.
     qualityService,

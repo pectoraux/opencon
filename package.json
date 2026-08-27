@@ -14,7 +14,8 @@
     "test": "bun test",
     "test:run": "bun test",
     "arch:check": "bun scripts/check-architecture.ts",
-    "verify": "bun run typecheck && bun run arch:check && bun test"
+    "authority:check": "bun scripts/check-authority-boundaries.ts",
+    "verify": "bun run typecheck && bun run arch:check && bun run authority:check && bun test"
   },
   "dependencies": {
     "ioredis": "^6.0.0",
