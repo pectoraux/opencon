@@ -1,27 +1,69 @@
 /**
- * Authority-boundary guardrails.
+ * Authority-boundary guardrails — BEHAVIORAL detection.
  *
- * These rules make architectural watchpoints mechanically enforceable
- * without changing frozen Architecture v1.0.
+ * These rules make the architectural authority watchpoints mechanically
+ * enforceable without changing frozen Architecture v1.0:
  *
  * 1. /disputes is the single fraud/risk control authority.
  * 2. /contributions owns quality/moderation semantics, but risk mutation
  *    remains a composition-root concern.
  * 3. /workflows is the only operational lifecycle authority. Other domains
- *    may have explicitly approved administrative status, but operational
- *    transition primitives cannot cross domain boundaries directly.
+ *    may carry explicitly approved administrative status, but operational
+ *    transition machinery cannot be re-implemented locally.
+ * 4. /settlement is the only economic mutation authority and /reputation
+ *    the only reputation mutation authority.
  *
- * This checker deliberately distinguishes semantic implementation code from
- * shared vocabulary/type contracts and HTTP transport names. The existing
- * tier checker remains responsible for dependency direction. An injected
- * provider-neutral callback named `requestTransition` is allowed; a direct
- * domain import remains forbidden by the tier checker.
+ * DETECTION SEMANTICS (architect-required correction, PR #30 review):
+ * the guard detects ACTUAL unauthorized authority/mutation behavior —
+ * call sites of reserved mutation primitives, construction or definition
+ * of another authority's machinery, and local administrative status
+ * machines — and only inside DOMAIN IMPLEMENTATION files. It
+ * deliberately does NOT match generic identifiers:
+ *
+ *   - Shared vocabulary/type contracts (e.g. the `TransitionRequest`
+ *     contract in /core) may be referenced anywhere. A type name is not
+ *     a mutation.
+ *   - The provider-neutral delegation callback `requestTransition`
+ *     (declared on domain ports, invoked by domain services, exposed on
+ *     the API command surface) is the SANCTIONED way every domain asks
+ *     /workflows to move lifecycle state. Delegating is not authority.
+ *   - /api transport calls the composition-root command surface
+ *     (`commands.createRiskSignal(...)`, `commands.issueCredits(...)`)
+ *     and is not a domain implementation.
+ *   - /bootstrap is the composition root: it is the place where
+ *     cross-authority orchestration is ALLOWED.
+ *   - port.ts / module.ts / index.ts files are contracts and wiring,
+ *     not semantic implementation.
+ *   - Comments are stripped before scanning.
+ *
+ * Already-approved precedents are explicitly preserved (see
+ * ADMINISTRATIVE_STATUS_DOMAINS below and the positive/negative fixture
+ * corpora under tests/regression/fixtures/authority-guard/ which pin
+ * both directions).
+ *
+ * The existing tier checker (scripts/check-architecture.ts) remains
+ * authoritative for dependency direction; this guard prevents semantic
+ * authority drift inside otherwise legal boundaries.
  */
 
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 
-/** Domain-local administrative state explicitly approved by architecture review. */
+/**
+ * Domain-local administrative state explicitly approved by architecture
+ * review. Every entry is a reviewed precedent, not a default:
+ *
+ * - "campaigns": the campaign administrative status machine —
+ *   architect-approved administrative campaign state (owner-only
+ *   campaign administration under the campaign record mutex; the
+ *   campaign clearing/reward work orders). Administrative state
+ *   intrinsic to the domain; never an operational lifecycle.
+ * - "creators": creator-profile administration (NET-W015:
+ *   DRAFT → ACTIVE ⇄ PAUSED → ARCHIVED, owner-only, activation-gated).
+ *
+ * New domain-local status machines require an explicit addition here
+ * plus regression evidence (see docs/architecture-authority-guardrails.md).
+ */
 export const ADMINISTRATIVE_STATUS_DOMAINS = new Set(["campaigns", "creators"]);
 
 const DOMAIN_DIRS = new Set([
@@ -30,29 +72,84 @@ const DOMAIN_DIRS = new Set([
   "evidence", "outcomes", "settlement", "disputes", "workflows",
 ]);
 
+/**
+ * Single-authority watchpoints: these domains must not directly import the
+ * authorities they could otherwise shadow. Cross-domain facts arrive through
+ * provider-neutral lookup contracts; cross-domain commands are composed at
+ * the bootstrap boundary.
+ */
 const SINGLE_AUTHORITY_FORBIDDEN_IMPORTS: Record<string, readonly string[]> = {
   disputes: ["settlement", "reputation", "workflows", "campaigns"],
   contributions: ["disputes", "settlement", "reputation", "workflows"],
 };
 
-const CONTRIBUTION_RISK_MUTATION_IDENTIFIERS = [
-  "createSignal",
-  "supersedeSignal",
-  "createRiskSignal",
-  "createRiskAssessment",
-  "createRiskCase",
+/**
+ * Reserved mutation primitives per owning authority. A hit is BEHAVIOR:
+ * a call site or a function definition (both match `identifier(`), or —
+ * for the workflow machinery — a construction/definition of the service
+ * type itself. The owning authority is exempt; every other domain
+ * implementation is policed. /core, /api, /bootstrap, adapters and
+ * infrastructure are not domain implementations and are never scanned
+ * for these rules.
+ */
+const AUTHORITY_MUTATION_RULES: readonly {
+  readonly owner: string;
+  readonly rule: string;
+  readonly detail: string;
+  readonly callIdentifiers: readonly string[];
+  readonly machineryPatterns?: readonly RegExp[];
+}[] = [
+  {
+    owner: "workflows",
+    rule: "workflow-authority-mutation",
+    detail:
+      "operational lifecycle mutation is reserved for /workflows; delegate through the provider-neutral requestTransition callback (composition-root orchestration)",
+    callIdentifiers: ["performTransition", "transitionWorkflow"],
+    machineryPatterns: [/\bclass\s+WorkflowService\b/g, /\bnew\s+WorkflowService\s*\(/g],
+  },
+  {
+    owner: "disputes",
+    rule: "risk-authority-mutation",
+    detail:
+      "risk mutation is reserved for /disputes; emit risk decisions only through composition-root orchestration",
+    callIdentifiers: [
+      "createSignal",
+      "supersedeSignal",
+      "createRiskSignal",
+      "createRiskAssessment",
+      "createRiskCase",
+    ],
+  },
+  {
+    owner: "settlement",
+    rule: "economic-authority-mutation",
+    detail:
+      "economic mutation is reserved for /settlement; compose economic effects at the bootstrap boundary",
+    callIdentifiers: [
+      "issueCredits",
+      "matureEconomicValue",
+      "allocateRewards",
+      "recordCashObligation",
+    ],
+  },
+  {
+    owner: "reputation",
+    rule: "reputation-authority-mutation",
+    detail:
+      "reputation mutation is reserved for /reputation; reference snapshots and compose effects at the bootstrap boundary",
+    callIdentifiers: [
+      "createReputationInput",
+      "createReputationSnapshot",
+      "addReputationInput",
+    ],
+  },
 ];
 
-const DISPUTES_ECONOMIC_OR_REPUTATION_IDENTIFIERS = [
-  "issueCredits",
-  "matureEconomicValue",
-  "allocateRewards",
-  "recordCashObligation",
-  "createReputationInput",
-  "createReputationSnapshot",
-  "addReputationInput",
-];
-
+/**
+ * Domain-local administrative status machinery (definition or call sites).
+ * Allowed only in /workflows (the operational authority itself) and the
+ * explicitly approved administrative-status precedents above.
+ */
 const LOCAL_STATUS_HELPER_PATTERNS: readonly RegExp[] = [
   /\bstatusTransition\s*\(/g,
   /\bstatusMachine\s*\(/g,
@@ -135,10 +232,15 @@ export async function scanAuthorityBoundaries(root = resolve("src")): Promise<Au
     const rel = relative(root, file).replaceAll("\\", "/");
     const importerDir = rel.split("/")[0] ?? "";
     const source = stripComments(await readFile(file, "utf8"));
-    const implementation = isDomainImplementation(importerDir, rel);
+
+    // All rules below police SEMANTIC IMPLEMENTATION only. Shared
+    // contracts (port/module/index), the /core vocabulary layer, /api
+    // transport, /bootstrap composition root, adapters and
+    // infrastructure are out of scope by design.
+    if (!isDomainImplementation(importerDir, rel)) continue;
 
     const forbiddenImports = SINGLE_AUTHORITY_FORBIDDEN_IMPORTS[importerDir];
-    if (forbiddenImports && implementation) {
+    if (forbiddenImports) {
       for (const { specifier, offset } of importTargets(source)) {
         const domain = targetDomain(importerDir, specifier);
         if (domain && forbiddenImports.includes(domain)) {
@@ -152,40 +254,34 @@ export async function scanAuthorityBoundaries(root = resolve("src")): Promise<Au
       }
     }
 
-    // An injected `requestTransition` callback is deliberately allowed here.
-    // The frozen tier scanner separately forbids direct domain→/workflows imports.
-
-    if (importerDir === "contributions" && implementation) {
-      const patterns = CONTRIBUTION_RISK_MUTATION_IDENTIFIERS.map(callPattern);
+    // Reserved authority-mutation behavior. The owner is exempt; a
+    // provider-neutral `requestTransition` callback injected into a
+    // domain is the sanctioned delegation path and is never matched.
+    for (const spec of AUTHORITY_MUTATION_RULES) {
+      if (importerDir === spec.owner) continue;
+      const patterns = [
+        ...spec.callIdentifiers.map(callPattern),
+        ...(spec.machineryPatterns ?? []),
+      ];
       for (const hit of regexHits(source, patterns)) {
         violations.push({
           file: rel,
           line: lineOf(source, hit.offset),
-          rule: "contributions-must-not-mutate-risk-authority",
-          detail: "risk mutation calls are reserved for composition-root orchestration",
+          rule: spec.rule,
+          detail: spec.detail,
         });
       }
     }
 
-    if (importerDir === "disputes" && implementation) {
-      const patterns = DISPUTES_ECONOMIC_OR_REPUTATION_IDENTIFIERS.map(callPattern);
-      for (const hit of regexHits(source, patterns)) {
-        violations.push({
-          file: rel,
-          line: lineOf(source, hit.offset),
-          rule: "disputes-must-not-own-economic-or-reputation-state",
-          detail: "economic/reputation mutation calls are forbidden inside /disputes",
-        });
-      }
-    }
-
-    if (implementation && importerDir !== "workflows" && !ADMINISTRATIVE_STATUS_DOMAINS.has(importerDir)) {
+    // Domain-local administrative status machinery is an architectural
+    // decision, not an accident. Only approved precedents may use it.
+    if (importerDir !== "workflows" && !ADMINISTRATIVE_STATUS_DOMAINS.has(importerDir)) {
       for (const hit of regexHits(source, LOCAL_STATUS_HELPER_PATTERNS)) {
         violations.push({
           file: rel,
           line: lineOf(source, hit.offset),
           rule: "administrative-status-requires-allowlist",
-          detail: `local administrative status machine in /${importerDir} is not allowlisted`,
+          detail: `local administrative status machine in /${importerDir} is not allowlisted; add an explicit architectural decision before introducing domain-local state transitions`,
         });
       }
     }
