@@ -107,7 +107,22 @@ const NET_W007_DOMAINS = ["reputation"];
 // patterns.
 const NET_W008_DOMAINS = ["settlement"];
 
-// Domains still deferred past NET-W008 (must remain skeletons).
+// Domains implemented in NET-W009 (no longer skeletons). The disputes
+// domain (the Phase-3 Trust boundary — see the NET-W009 work order §2
+// placement decision) introduces the FRAUD/RISK FOUNDATION: first-class
+// provenance-backed risk signals, immutable versioned deterministic
+// risk policies, multi-signal provenance-preserving assessments (pure
+// deterministic engine), evidence-backed review cases with append-only
+// decision history, and the control-decision registry consumed by the
+// composition-root workflow/economic gates. It introduces NO
+// economically material behaviour and NO trust mutation: fraud/risk is
+// a decision-support and CONTROL authority only — it can never mint,
+// destroy or transfer value, never mutates reputation, never mutates
+// lifecycle state (those belong to /settlement, /reputation and
+// /workflows; NET-W009 work order §4 invariants 1–2).
+const NET_W009_DOMAINS = ["disputes"];
+
+// Domains still deferred past NET-W009 (must remain skeletons).
 const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
   (d) =>
     !NET_W002_DOMAINS.includes(d) &&
@@ -115,7 +130,8 @@ const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
     !NET_W005_DOMAINS.includes(d) &&
     !NET_W006_DOMAINS.includes(d) &&
     !NET_W007_DOMAINS.includes(d) &&
-    !NET_W008_DOMAINS.includes(d),
+    !NET_W008_DOMAINS.includes(d) &&
+    !NET_W009_DOMAINS.includes(d),
 );
 
 // Patterns that would indicate economically/material domain logic,
@@ -288,6 +304,26 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
       // §18 assigns to /settlement).
       expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
       expect(moduleExport.describe?.() ?? "").toMatch(/NET-W008/);
+    }
+  });
+
+  test("NET-W009 domain modules are non-skeletal (tier domain, no 'skeleton' marker, reference NET-W009)", async () => {
+    for (const dir of NET_W009_DOMAINS) {
+      const modulePath = join(SRC, dir, "module.ts");
+      expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
+      const mod = await import(`../../src/${dir}/module.ts`);
+      const moduleExport = Object.values(mod)[0] as {
+        name: string;
+        tier: string;
+        describe?: () => string;
+      };
+      expect(moduleExport.tier).toBe("domain");
+      // NET-W009 modules are no longer skeletons — the disputes
+      // boundary carries the fraud/risk foundation (the Trust-domain
+      // authority the NET-W009 work order §2 placement decision
+      // assigns to /disputes).
+      expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
+      expect(moduleExport.describe?.() ?? "").toMatch(/NET-W009/);
     }
   });
 

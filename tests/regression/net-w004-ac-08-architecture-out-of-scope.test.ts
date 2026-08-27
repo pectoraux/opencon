@@ -54,9 +54,14 @@ const NET_W004_DOMAINS = ["opportunities", "contributions", "workflows"];
 // itself introduced NO economic behaviour — is preserved (the
 // economic ledger arrives only with the NET-W008 work item + its own
 // AC-08 regression).
+// NET-W009 UPDATE: disputes is implemented by NET-W009 (the fraud/risk
+// foundation — see the NET-W009 work order §2 placement decision) and
+// left this list the same way; the NET-W004 intent — NET-W004 itself
+// introduced NO fraud/risk behaviour — is preserved (the trust
+// foundation arrives only with the NET-W009 work item + its own AC-08
+// regression).
 const DEFERRED_DOMAINS = [
   "campaigns", "inventory", "creators", "demand", "benefits",
-  "disputes",
 ];
 
 async function listTsFiles(dir: string, out: string[] = []): Promise<string[]> {
