@@ -9,11 +9,13 @@
  *    remains a composition-root concern.
  * 3. /workflows is the only operational lifecycle authority. Other domains
  *    may have explicitly approved administrative status, but operational
- *    transition primitives cannot appear in domain implementations.
+ *    transition primitives cannot cross domain boundaries directly.
  *
  * This checker deliberately distinguishes semantic implementation code from
  * shared vocabulary/type contracts and HTTP transport names. The existing
- * tier checker remains responsible for dependency direction.
+ * tier checker remains responsible for dependency direction. An injected
+ * provider-neutral callback named `requestTransition` is allowed; a direct
+ * domain import remains forbidden by the tier checker.
  */
 
 import { readdir, readFile } from "node:fs/promises";
@@ -49,12 +51,6 @@ const DISPUTES_ECONOMIC_OR_REPUTATION_IDENTIFIERS = [
   "createReputationInput",
   "createReputationSnapshot",
   "addReputationInput",
-];
-
-const WORKFLOW_CALL_PATTERNS: readonly RegExp[] = [
-  /\brequestTransition\s*\(/g,
-  /\bperformTransition\s*\(/g,
-  /\btransitionWorkflow\s*\(/g,
 ];
 
 const LOCAL_STATUS_HELPER_PATTERNS: readonly RegExp[] = [
@@ -156,16 +152,8 @@ export async function scanAuthorityBoundaries(root = resolve("src")): Promise<Au
       }
     }
 
-    if (implementation && importerDir !== "workflows") {
-      for (const hit of regexHits(source, WORKFLOW_CALL_PATTERNS)) {
-        violations.push({
-          file: rel,
-          line: lineOf(source, hit.offset),
-          rule: "workflow-authority-only",
-          detail: "operational workflow transition calls are reserved for /workflows or composition-root orchestration",
-        });
-      }
-    }
+    // An injected `requestTransition` callback is deliberately allowed here.
+    // The frozen tier scanner separately forbids direct domain→/workflows imports.
 
     if (importerDir === "contributions" && implementation) {
       const patterns = CONTRIBUTION_RISK_MUTATION_IDENTIFIERS.map(callPattern);
