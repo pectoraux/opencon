@@ -30,6 +30,7 @@ import { createAuthorityOpportunityRepository } from "../../src/opportunities/au
 import { createAuthorityContributionRepository } from "../../src/contributions/authority-contribution-repository.ts";
 import { createAuthorityProofOfValueRepository } from "../../src/evidence/authority-proof-of-value-repository.ts";
 import { createAuthorityMeasuredOutcomeRepository } from "../../src/outcomes/authority-measured-outcome-repository.ts";
+import { createAuthorityEngagementRepository } from "../../src/creators/authority-engagement-repositories.ts";
 import { createPostgresIdempotencyStore } from "../../src/persistence/idempotency-store.ts";
 import { createEvidenceService } from "../../src/evidence/evidence-service.ts";
 import { createAuthorityEvidenceRepository } from "../../src/evidence/authority-evidence-repository.ts";
@@ -339,6 +340,9 @@ describe("NET-W005-AC-07 failure/replay/concurrency", () => {
       proofOfValueRepository: createLifecycleRepository(
         createAuthorityProofOfValueRepository({ authority: failingAuthority }),
       ),
+      engagementRepository: createLifecycleRepository(
+        createAuthorityEngagementRepository({ authority: harness.runtime.postgresAuthority }),
+      ),
       outcomeMeasurementRepository: createLifecycleRepository(
         createAuthorityMeasuredOutcomeRepository({ authority: failingAuthority }),
       ),
@@ -495,7 +499,10 @@ describe("NET-W005-AC-07 failure/replay/concurrency", () => {
         proofOfValueRepository: createLifecycleRepository(
           createAuthorityProofOfValueRepository({ authority: failingAuthority }),
         ),
-        outcomeMeasurementRepository: createLifecycleRepository(
+        engagementRepository: createLifecycleRepository(
+        createAuthorityEngagementRepository({ authority: harness.runtime.postgresAuthority }),
+      ),
+      outcomeMeasurementRepository: createLifecycleRepository(
           createAuthorityMeasuredOutcomeRepository({ authority: failingAuthority }),
         ),
         authorizer: allowAllAuthorizer,

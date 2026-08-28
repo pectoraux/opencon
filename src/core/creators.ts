@@ -787,3 +787,435 @@ export function validateCreatorMatchReputationThreshold(
   }
   return threshold;
 }
+
+// ---------------------------------------------------------------------------
+// NET-W017 — UGC workflow and rights (engagement / acceptance /
+// usage rights / production). Pure vocabulary + validators ONLY; the
+// lifecycle authority stays in /workflows (the engagement is a new
+// canonical lifecycle subject kind) and NO domain-local status
+// machinery is introduced here.
+// ---------------------------------------------------------------------------
+
+/**
+ * The closed channel vocabulary a usage-rights grant may scope to
+ * (work order §3.3). Provider-neutral — no platform names:
+ *  - `creator_owned_channel`  — the creator's own channels
+ *    (publication there REQUIRES an explicit grant — producing UGC
+ *    never confers it);
+ *  - `organizer_channel`      — the campaign organizer's own
+ *    channels/surfaces;
+ *  - `network_channel`        — protocol network surfaces;
+ *  - `paid_media`             — paid amplification placements.
+ */
+export const USAGE_RIGHTS_CHANNELS = [
+  "creator_owned_channel",
+  "organizer_channel",
+  "network_channel",
+  "paid_media",
+] as const;
+
+export type UsageRightsChannel = (typeof USAGE_RIGHTS_CHANNELS)[number];
+
+export function isUsageRightsChannel(
+  value: string,
+): value is UsageRightsChannel {
+  return (USAGE_RIGHTS_CHANNELS as readonly string[]).includes(value);
+}
+
+/**
+ * The frozen ownership vocabulary (work order §3.3, invariant 4 —
+ * CRE-004): the protocol NEVER takes ownership of creator content or
+ * channels merely because UGC is produced through it. Exactly one
+ * value exists and ever will — the grant input carries NO ownership
+ * field, so there is structurally no code path that transfers
+ * ownership.
+ */
+export const USAGE_RIGHTS_OWNERSHIP = ["creator_retained"] as const;
+
+export type UsageRightsOwnership = (typeof USAGE_RIGHTS_OWNERSHIP)[number];
+
+/**
+ * The DERIVED effective-status vocabulary of a usage-rights grant.
+ * The status is a pure function over immutable records (grant +
+ * optional revocation + the evaluation instant) — it is NEVER a
+ * stored/mutated field, so there is no local status machine:
+ *  - `REVOKED` — a revocation exists and asOf ≥ its effectiveAt;
+ *  - `EXPIRED` — asOf is past the grant's endsAt;
+ *  - `ACTIVE`  — otherwise.
+ */
+export const USAGE_RIGHTS_EFFECTIVE_STATUSES = [
+  "ACTIVE",
+  "REVOKED",
+  "EXPIRED",
+] as const;
+
+export type UsageRightsEffectiveStatus =
+  (typeof USAGE_RIGHTS_EFFECTIVE_STATUSES)[number];
+
+export function isUsageRightsEffectiveStatus(
+  value: string,
+): value is UsageRightsEffectiveStatus {
+  return (USAGE_RIGHTS_EFFECTIVE_STATUSES as readonly string[]).includes(
+    value,
+  );
+}
+
+/**
+ * The frozen engagement-record format lineage (the match-run
+ * precedent): pinned on every engagement-domain record so the
+ * contract shape stays reproducible.
+ */
+export const CREATOR_ENGAGEMENT_FORMAT = "NET-W017:1" as const;
+
+/**
+ * The closed auto-accept gate-reason vocabulary (work order §3.2).
+ * The evaluation is the conjunction of all gates; the trace carries
+ * every gate (passed or failed+reason).
+ */
+export const AUTO_ACCEPT_GATE_REASONS = [
+  "policy_not_auto_accept",
+  "policy_not_found",
+  "profile_not_active",
+  "not_accepting_work",
+  "too_many_active_engagements",
+  "rate_below_floor",
+  "rights_not_auto_grantable",
+  "grant_duration_exceeds_policy",
+  "active_risk_control",
+] as const;
+
+export type AutoAcceptGateReason =
+  (typeof AUTO_ACCEPT_GATE_REASONS)[number];
+
+export function isAutoAcceptGateReason(
+  value: string,
+): value is AutoAcceptGateReason {
+  return (AUTO_ACCEPT_GATE_REASONS as readonly string[]).includes(value);
+}
+
+/** Max requested/granted usage-rights uses per engagement offer. */
+export const USAGE_RIGHTS_MAX_USES = 8;
+
+/** Max channels per usage-rights grant. */
+export const USAGE_RIGHTS_MAX_CHANNELS = 4;
+
+/** Max territories per usage-rights grant. */
+export const USAGE_RIGHTS_MAX_TERRITORIES = 40;
+
+/** Max formats per usage-rights grant. */
+export const USAGE_RIGHTS_MAX_FORMATS = 8;
+
+/** Max exclusions per usage-rights grant. */
+export const USAGE_RIGHTS_MAX_EXCLUSIONS = 20;
+
+/** Maximum grant duration in days (explicit license window bound). */
+export const USAGE_RIGHTS_MAX_DURATION_DAYS = 3650;
+
+/** Maximum declared acceptance-policy floor amount (economic bounds). */
+export const ACCEPTANCE_POLICY_MAX_RATE_FLOOR = 1_000_000;
+
+/** Maximum concurrent engagements declared by an acceptance policy. */
+export const ACCEPTANCE_POLICY_MAX_ACTIVE_ENGAGEMENTS = 50;
+
+/** Validation error for engagement/production/rights request
+ * violations (NET-W017). */
+export class InvalidEngagementError extends OpenConError {
+  constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+  ) {
+    super({
+      code: "ENGAGEMENT_VALIDATION",
+      classification: "validation",
+      message,
+      context,
+    });
+  }
+}
+
+/** Stable conflict when the engagement unique-anchor is taken
+ * (a NON-terminal engagement already exists for the (org, campaign,
+ * creator) triple — work order §3.1) or a terminal precondition
+ * conflicts. */
+export class EngagementConflictError extends OpenConError {
+  constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+  ) {
+    super({
+      code: "ENGAGEMENT_CONFLICT",
+      classification: "conflict",
+      message,
+      context,
+    });
+  }
+}
+
+/** Stable conflict on usage-rights state (e.g. a second revocation
+ * for the same grant — work order §3.3). */
+export class UsageRightsConflictError extends OpenConError {
+  constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+  ) {
+    super({
+      code: "USAGE_RIGHTS_CONFLICT",
+      classification: "conflict",
+      message,
+      context,
+    });
+  }
+}
+
+/**
+ * Validate an ISO-8601 instant string (engagement-domain record
+ * timestamps + rights windows). Returns the input.
+ */
+export function validateEngagementInstant(
+  field: string,
+  value: string,
+): string {
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    throw new InvalidEngagementError(
+      `${field} must be an ISO-8601 instant (got ${String(value)})`,
+      { field, value },
+    );
+  }
+  return value;
+}
+
+/**
+ * Validate a usage-rights duration window: startsAt < endsAt, both
+ * ISO instants, and the span bounded by
+ * {@link USAGE_RIGHTS_MAX_DURATION_DAYS}.
+ */
+export function validateUsageRightsWindow(
+  startsAt: string,
+  endsAt: string,
+): { startsAt: string; endsAt: string } {
+  validateEngagementInstant("startsAt", startsAt);
+  validateEngagementInstant("endsAt", endsAt);
+  const start = Date.parse(startsAt);
+  const end = Date.parse(endsAt);
+  if (end <= start) {
+    throw new InvalidEngagementError(
+      "usage-rights window must satisfy endsAt > startsAt",
+      { startsAt, endsAt },
+    );
+  }
+  const days = (end - start) / 86_400_000;
+  if (days > USAGE_RIGHTS_MAX_DURATION_DAYS) {
+    throw new InvalidEngagementError(
+      `usage-rights duration must not exceed ${String(USAGE_RIGHTS_MAX_DURATION_DAYS)} days (got ${String(Math.ceil(days))})`,
+      { startsAt, endsAt, days: Math.ceil(days) },
+    );
+  }
+  return { startsAt, endsAt };
+}
+
+/**
+ * Validate a territory code list: non-empty unique strings matching
+ * the provider-neutral territory shape (UN M49 / ISO-3166-1 alpha-2
+ * style — two uppercase letters), bounded by
+ * {@link USAGE_RIGHTS_MAX_TERRITORIES}.
+ */
+export function validateUsageRightsTerritories(
+  territories: readonly string[],
+): readonly string[] {
+  if (
+    !Array.isArray(territories) ||
+    territories.length === 0 ||
+    territories.length > USAGE_RIGHTS_MAX_TERRITORIES
+  ) {
+    throw new InvalidEngagementError(
+      `territories must be a non-empty list of at most ${String(USAGE_RIGHTS_MAX_TERRITORIES)} codes`,
+      { count: territories?.length },
+    );
+  }
+  const seen = new Set<string>();
+  for (const code of territories) {
+    if (typeof code !== "string" || !/^[A-Z]{2}$/.test(code)) {
+      throw new InvalidEngagementError(
+        `territory code must be an ISO-3166-1 alpha-2 style code (got ${String(code)})`,
+        { code },
+      );
+    }
+    if (seen.has(code)) {
+      throw new InvalidEngagementError(
+        `duplicate territory code: ${code}`,
+        { code },
+      );
+    }
+    seen.add(code);
+  }
+  return territories;
+}
+
+/**
+ * Validate a channel list against the closed vocabulary (unique,
+ * non-empty, bounded).
+ */
+export function validateUsageRightsChannels(
+  channels: readonly string[],
+): readonly UsageRightsChannel[] {
+  if (
+    !Array.isArray(channels) ||
+    channels.length === 0 ||
+    channels.length > USAGE_RIGHTS_MAX_CHANNELS
+  ) {
+    throw new InvalidEngagementError(
+      `channels must be a non-empty list of at most ${String(USAGE_RIGHTS_MAX_CHANNELS)} closed-vocabulary channels`,
+      { count: channels?.length },
+    );
+  }
+  const seen = new Set<string>();
+  for (const channel of channels) {
+    if (typeof channel !== "string" || !isUsageRightsChannel(channel)) {
+      throw new InvalidEngagementError(
+        `unknown usage-rights channel: ${String(channel)} (closed vocabulary: ${USAGE_RIGHTS_CHANNELS.join(", ")})`,
+        { channel },
+      );
+    }
+    if (seen.has(channel)) {
+      throw new InvalidEngagementError(
+        `duplicate channel: ${channel}`,
+        { channel },
+      );
+    }
+    seen.add(channel);
+  }
+  return channels as readonly UsageRightsChannel[];
+}
+
+/**
+ * Validate a permitted-uses list: unique rights kinds from the frozen
+ * CREATOR_RIGHTS_KINDS vocabulary, each with optional human-readable
+ * terms, bounded by {@link USAGE_RIGHTS_MAX_USES}.
+ */
+export function validateUsageRightsUses(
+  uses: readonly { kind: string; terms?: string | null }[],
+): readonly { kind: CreatorRightsKind; terms: string | null }[] {
+  if (!Array.isArray(uses) || uses.length === 0) {
+    throw new InvalidEngagementError(
+      "uses must be a non-empty list of permitted uses",
+      { count: uses?.length },
+    );
+  }
+  if (uses.length > USAGE_RIGHTS_MAX_USES) {
+    throw new InvalidEngagementError(
+      `uses must carry at most ${String(USAGE_RIGHTS_MAX_USES)} kinds`,
+      { count: uses.length },
+    );
+  }
+  const seen = new Set<string>();
+  const out: { kind: CreatorRightsKind; terms: string | null }[] = [];
+  for (const use of uses) {
+    if (!use || typeof use !== "object" || typeof use.kind !== "string") {
+      throw new InvalidEngagementError(
+        "each use must be an object with a kind",
+        { use },
+      );
+    }
+    if (!isCreatorRightsKind(use.kind)) {
+      throw new InvalidEngagementError(
+        `unknown usage-rights kind: ${String(use.kind)} (frozen vocabulary: ${CREATOR_RIGHTS_KINDS.join(", ")})`,
+        { kind: use.kind },
+      );
+    }
+    if (seen.has(use.kind)) {
+      throw new InvalidEngagementError(
+        `duplicate usage-rights kind: ${use.kind}`,
+        { kind: use.kind },
+      );
+    }
+    seen.add(use.kind);
+    const terms =
+      use.terms === undefined || use.terms === null
+        ? null
+        : String(use.terms);
+    if (terms !== null && terms.length > 500) {
+      throw new InvalidEngagementError(
+        "use terms must be at most 500 characters",
+        { kind: use.kind },
+      );
+    }
+    out.push({ kind: use.kind, terms });
+  }
+  return out;
+}
+
+/**
+ * Validate a format list against the frozen
+ * {@link CREATOR_CONTENT_FORMATS} vocabulary (unique, bounded).
+ */
+export function validateUsageRightsFormats(
+  formats: readonly string[],
+): readonly CreatorContentFormat[] {
+  if (!Array.isArray(formats) || formats.length === 0) {
+    throw new InvalidEngagementError(
+      "formats must be a non-empty list of content formats",
+      { count: formats?.length },
+    );
+  }
+  if (formats.length > USAGE_RIGHTS_MAX_FORMATS) {
+    throw new InvalidEngagementError(
+      `formats must carry at most ${String(USAGE_RIGHTS_MAX_FORMATS)} entries`,
+      { count: formats.length },
+    );
+  }
+  const seen = new Set<string>();
+  for (const format of formats) {
+    if (typeof format !== "string" || !isCreatorContentFormat(format)) {
+      throw new InvalidEngagementError(
+        `unknown content format: ${String(format)} (frozen vocabulary: ${CREATOR_CONTENT_FORMATS.join(", ")})`,
+        { format },
+      );
+    }
+    if (seen.has(format)) {
+      throw new InvalidEngagementError(
+        `duplicate format: ${format}`,
+        { format },
+      );
+    }
+    seen.add(format);
+  }
+  return formats as readonly CreatorContentFormat[];
+}
+
+/**
+ * Validate an exclusions list: unique non-empty strings bounded by
+ * {@link USAGE_RIGHTS_MAX_EXCLUSIONS} (explicit exclusions a
+ * counterparty must respect — work order §3.3).
+ */
+export function validateUsageRightsExclusions(
+  exclusions: readonly string[],
+): readonly string[] {
+  if (!Array.isArray(exclusions)) {
+    throw new InvalidEngagementError("exclusions must be a list", {
+      exclusions,
+    });
+  }
+  if (exclusions.length > USAGE_RIGHTS_MAX_EXCLUSIONS) {
+    throw new InvalidEngagementError(
+      `exclusions must carry at most ${String(USAGE_RIGHTS_MAX_EXCLUSIONS)} entries`,
+      { count: exclusions.length },
+    );
+  }
+  const seen = new Set<string>();
+  for (const exclusion of exclusions) {
+    if (typeof exclusion !== "string" || !exclusion.trim()) {
+      throw new InvalidEngagementError(
+        "each exclusion must be a non-empty string",
+        { exclusion },
+      );
+    }
+    if (seen.has(exclusion)) {
+      throw new InvalidEngagementError(
+        `duplicate exclusion: ${exclusion}`,
+        { exclusion },
+      );
+    }
+    seen.add(exclusion);
+  }
+  return exclusions;
+}

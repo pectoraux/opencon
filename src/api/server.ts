@@ -2872,6 +2872,516 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // ------------------------------------------------------------------
+    // NET-W017 — UGC workflow and rights (creator engagements). The
+    // engagement is a canonical /workflows lifecycle subject; the
+    // composed commands are guarded below, pure lifecycle transitions
+    // (tender/verify/reject/cancel) go through the EXISTING
+    // POST /api/workflows/transitions endpoint with subjectKind
+    // "engagement" (the Proof-of-Value precedent).
+    // ------------------------------------------------------------------
+
+    // POST /api/creators/engagements — create an engagement offer
+    // (protected; guard action creators.engagements.create).
+    if (path === "/api/creators/engagements" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "creators.engagements.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createEngagement(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          creatorPersonId: strField(obj, "creatorPersonId"),
+          campaignId: strField(obj, "campaignId"),
+          ...(obj.campaignPolicyVersion !== undefined && obj.campaignPolicyVersion !== null
+            ? { campaignPolicyVersion: obj.campaignPolicyVersion as number }
+            : {}),
+          ...(obj.matchRunId !== undefined && obj.matchRunId !== null
+            ? { matchRunId: obj.matchRunId as string }
+            : {}),
+          ...(obj.opportunityId !== undefined && obj.opportunityId !== null
+            ? { opportunityId: obj.opportunityId as string }
+            : {}),
+          requestedRights: objField(obj, "requestedRights"),
+          ...(obj.compensation !== undefined && obj.compensation !== null
+            ? { compensation: obj.compensation }
+            : {}),
+          ...(obj.brief !== undefined && obj.brief !== null
+            ? { brief: obj.brief }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/creators/engagements/from-match — the auto-match
+    // batch (protected; guard action
+    // creators.engagements.createFromMatch).
+    if (path === "/api/creators/engagements/from-match" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "creators.engagements.createFromMatch",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createEngagementsFromMatch(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          matchRunId: strField(obj, "matchRunId"),
+          ...(obj.limit !== undefined && obj.limit !== null
+            ? { limit: obj.limit as number }
+            : {}),
+          offer: objField(obj, "offer"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/creators/engagements/:id/accept — manual acceptance
+    // with the granted usage rights (protected; guard action
+    // creators.engagements.accept).
+    if (
+      path.startsWith("/api/creators/engagements/") &&
+      path.endsWith("/accept") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/creators/engagements/".length, -"/accept".length);
+      const guarded = await guardMutation(ctx, req, "creators.engagements.accept", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.acceptEngagement(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          engagementId: id,
+          expectedVersion: numField(obj, "expectedVersion"),
+          grantedRights: objField(obj, "grantedRights"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/creators/engagements/:id/auto-accept — the
+    // deterministic auto-accept evaluation + execution (protected;
+    // guard action creators.engagements.autoAccept).
+    if (
+      path.startsWith("/api/creators/engagements/") &&
+      path.endsWith("/auto-accept") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/creators/engagements/".length, -"/auto-accept".length);
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "creators.engagements.autoAccept",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.autoAcceptEngagement(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          engagementId: id,
+          expectedVersion: numField(obj, "expectedVersion"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/creators/engagements/:id/productions — open UGC
+    // production (protected; guard action creators.productions.open).
+    if (
+      path.startsWith("/api/creators/engagements/") &&
+      path.endsWith("/productions") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/creators/engagements/".length, -"/productions".length);
+      const guarded = await guardMutation(ctx, req, "creators.productions.open", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.openUgcProduction(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          engagementId: id,
+          expectedVersion: numField(obj, "expectedVersion"),
+          ...(obj.contributionId !== undefined && obj.contributionId !== null
+            ? { contributionId: obj.contributionId as string }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/creators/productions/:id/deliverables — record an
+    // immutable deliverable version (protected; guard action
+    // creators.productions.deliverable).
+    if (
+      path.startsWith("/api/creators/productions/") &&
+      path.endsWith("/deliverables") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/creators/productions/".length, -"/deliverables".length);
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "creators.productions.deliverable",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recordUgcDeliverable(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          productionId: id,
+          deliverableKey: strField(obj, "deliverableKey"),
+          format: strField(obj, "format"),
+          ...(obj.title !== undefined && obj.title !== null
+            ? { title: obj.title as string }
+            : {}),
+          ...(obj.contentReference !== undefined && obj.contentReference !== null
+            ? { contentReference: obj.contentReference as string }
+            : {}),
+          ...(obj.externalPlatform !== undefined && obj.externalPlatform !== null
+            ? { externalPlatform: obj.externalPlatform }
+            : {}),
+          ...(obj.notes !== undefined && obj.notes !== null
+            ? { notes: obj.notes as string }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/creators/productions/:id/submission — submit the
+    // production with canonical evidence references (protected;
+    // guard action creators.productions.submit).
+    if (
+      path.startsWith("/api/creators/productions/") &&
+      path.endsWith("/submission") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/creators/productions/".length, -"/submission".length);
+      const guarded = await guardMutation(ctx, req, "creators.productions.submit", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const evidenceReferences = obj.evidenceReferences;
+      if (
+        !Array.isArray(evidenceReferences) ||
+        evidenceReferences.length === 0 ||
+        evidenceReferences.some((x) => typeof x !== "string" || !x.trim())
+      ) {
+        throw apiValidationError(
+          'field "evidenceReferences" must be a non-empty list of evidence ids',
+        );
+      }
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.submitUgcProduction(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          productionId: id,
+          expectedVersion: numField(obj, "expectedVersion"),
+          evidenceReferences: evidenceReferences as string[],
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/creators/usage-rights/:id/revocation — revoke a
+    // usage-rights grant (protected; guard action
+    // creators.usageRights.revoke; grantor-only).
+    if (
+      path.startsWith("/api/creators/usage-rights/") &&
+      path.endsWith("/revocation") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/creators/usage-rights/".length, -"/revocation".length);
+      const guarded = await guardMutation(ctx, req, "creators.usageRights.revoke", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.revokeUsageRights(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          grantId: id,
+          ...(obj.effectiveAt !== undefined && obj.effectiveAt !== null
+            ? { effectiveAt: obj.effectiveAt as string }
+            : {}),
+          ...(obj.reason !== undefined && obj.reason !== null
+            ? { reason: obj.reason as string }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/creators/acceptance-policy — set the next acceptance
+    // policy version (protected; guard action
+    // creators.acceptancePolicy.set).
+    if (path === "/api/creators/acceptance-policy" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "creators.acceptancePolicy.set",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.setCreatorAcceptancePolicy(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          creatorPersonId: strField(obj, "creatorPersonId"),
+          mode: strField(obj, "mode"),
+          ...(obj.maxActiveEngagements !== undefined && obj.maxActiveEngagements !== null
+            ? { maxActiveEngagements: obj.maxActiveEngagements as number }
+            : {}),
+          ...(obj.rateFloor !== undefined && obj.rateFloor !== null
+            ? { rateFloor: obj.rateFloor }
+            : {}),
+          ...(obj.autoGrantableRights !== undefined && obj.autoGrantableRights !== null
+            ? { autoGrantableRights: obj.autoGrantableRights }
+            : {}),
+          ...(obj.maxGrantDurationDays !== undefined && obj.maxGrantDurationDays !== null
+            ? { maxGrantDurationDays: obj.maxGrantDurationDays as number }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/creators/engagements/:id — one engagement (public;
+    // tenant-scoped; a cross-scope id is not found).
+    if (
+      path.startsWith("/api/creators/engagements/") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/creators/engagements/".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const view = await opts.commands.getEngagement(ctx, organizationScopeId, id);
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/creators/engagements — an org's engagements,
+    // optionally filtered by campaign/creator (public; tenant-scoped).
+    if (path === "/api/creators/engagements" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const campaignId = url.searchParams.get("campaignId") ?? undefined;
+      const creatorPersonId = url.searchParams.get("creatorPersonId") ?? undefined;
+      const views = await opts.commands.listEngagements(
+        ctx,
+        organizationScopeId,
+        campaignId,
+        creatorPersonId,
+      );
+      await send(res, 200, { organizationScopeId, engagements: views });
+      return true;
+    }
+
+    // GET /api/creators/acceptance-policy?organizationScopeId&creatorPersonId
+    // — the creator's effective acceptance policy (public read).
+    if (path === "/api/creators/acceptance-policy" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      const creatorPersonId = url.searchParams.get("creatorPersonId");
+      if (!organizationScopeId || !creatorPersonId) {
+        throw apiValidationError(
+          'query parameters "organizationScopeId" and "creatorPersonId" are required',
+        );
+      }
+      const view = await opts.commands.getCreatorAcceptancePolicy(
+        ctx,
+        organizationScopeId,
+        creatorPersonId,
+      );
+      if (!view) {
+        await send(res, 404, {
+          error: "not_found",
+          message: `acceptance policy not found for person ${creatorPersonId} in organization scope ${organizationScopeId}`,
+        });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/creators/usage-rights/:id — one usage-rights grant
+    // view (public; tenant-scoped; optional asOf for deterministic
+    // derived-status evaluation).
+    if (
+      path.startsWith("/api/creators/usage-rights/") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/creators/usage-rights/".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const asOf = url.searchParams.get("asOf");
+      const view = await opts.commands.getUsageRights(
+        ctx,
+        organizationScopeId,
+        id,
+        asOf,
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/creators/usage-rights — an org's usage-rights grants,
+    // optionally narrowed by engagement (public; tenant-scoped).
+    if (path === "/api/creators/usage-rights" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const engagementId = url.searchParams.get("engagementId") ?? undefined;
+      const views = await opts.commands.listUsageRights(
+        ctx,
+        organizationScopeId,
+        engagementId,
+      );
+      await send(res, 200, { organizationScopeId, grants: views });
+      return true;
+    }
+
+    // GET /api/creators/productions — an org's UGC productions,
+    // optionally narrowed by engagement (public; tenant-scoped).
+    if (path === "/api/creators/productions" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const engagementId = url.searchParams.get("engagementId") ?? undefined;
+      const views = await opts.commands.listUgcProductions(
+        ctx,
+        organizationScopeId,
+        engagementId,
+      );
+      await send(res, 200, { organizationScopeId, productions: views });
+      return true;
+    }
+
+    // GET /api/creators/productions/:id/deliverables — a production's
+    // deliverable versions (public; tenant-scoped).
+    if (
+      path.startsWith("/api/creators/productions/") &&
+      path.endsWith("/deliverables") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/creators/productions/".length, -"/deliverables".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const views = await opts.commands.listUgcDeliverables(
+        ctx,
+        organizationScopeId,
+        id,
+      );
+      await send(res, 200, { organizationScopeId, productionId: id, deliverables: views });
+      return true;
+    }
+
+    // GET /api/creators/productions/:id/submissions — a production's
+    // submissions (public; tenant-scoped).
+    if (
+      path.startsWith("/api/creators/productions/") &&
+      path.endsWith("/submissions") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/creators/productions/".length, -"/submissions".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const views = await opts.commands.listUgcSubmissions(
+        ctx,
+        organizationScopeId,
+        id,
+      );
+      await send(res, 200, { organizationScopeId, productionId: id, submissions: views });
+      return true;
+    }
+
+    // GET /api/creators/productions/:id — one UGC production (public;
+    // tenant-scoped; a cross-scope id is not found).
+    if (
+      path.startsWith("/api/creators/productions/") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/creators/productions/".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const view = await opts.commands.getUgcProduction(ctx, organizationScopeId, id);
+      await send(res, 200, view);
+      return true;
+    }
+
     // GET /api/creators/by-person?organizationScopeId&creatorPersonId —
     // the profile anchored to a person in an org (public).
     if (path === "/api/creators/by-person" && method === "GET" && opts.commands) {
@@ -3751,9 +4261,10 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       subjectKind !== "opportunity" &&
       subjectKind !== "contribution" &&
       subjectKind !== "proof_of_value" &&
-      subjectKind !== "outcome_measurement"
+      subjectKind !== "outcome_measurement" &&
+      subjectKind !== "engagement"
     ) {
-      throw apiValidationError(`subjectKind must be "opportunity", "contribution", "proof_of_value" or "outcome_measurement" (got ${String(subjectKind)})`);
+      throw apiValidationError(`subjectKind must be "opportunity", "contribution", "proof_of_value", "outcome_measurement" or "engagement" (got ${String(subjectKind)})`);
     }
     const targetState = strField(obj, "targetState");
     const expectedVersion = numField(obj, "expectedVersion");

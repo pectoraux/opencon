@@ -261,11 +261,18 @@ describe("NET-W016-AC-07 architecture / out-of-scope", () => {
     );
   });
 
-  test("no auto-match/auto-accept or workflow execution leaked into the matching boundary (NET-W017 stays out of scope)", async () => {
+  test("no auto-match/auto-accept or workflow execution leaked into the matching IMPLEMENTATION (NET-W017 refined pin)", async () => {
+    // NET-W017 (merged) legitimately extended the SHARED /creators
+    // port with engagement contracts (createEngagement,
+    // autoAcceptEngagement…) — the port is the boundary-wide
+    // interface. This pin is therefore REFINED (not weakened — the
+    // W016→W015 refinement precedent): the matching IMPLEMENTATION
+    // (engine + service) still carries NO engagement machinery, and
+    // the MATCHING CONTRACT SECTION of the port stays free of
+    // engagement concepts.
     const files = [
       "src/creators/matching-engine.ts",
       "src/creators/matching-service.ts",
-      "src/creators/port.ts",
     ];
     for (const rel of files) {
       const content = await readFile(join(REPO, rel), "utf8");
@@ -279,6 +286,18 @@ describe("NET-W016-AC-07 architecture / out-of-scope", () => {
       expect(content).not.toMatch(/\bcreateEngagement\b/i);
       expect(content).not.toMatch(/\bissueInvitation\b/i);
     }
+    // The matching CONTRACT SECTION of the port (the NET-W016 section
+    // header → the NET-W017 section header) stays free of engagement
+    // concepts.
+    const port = await readFile(join(REPO, "src/creators/port.ts"), "utf8");
+    const start = port.indexOf("NET-W016 — Creator matching");
+    const end = port.indexOf("NET-W017 — UGC workflow and rights");
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const matchingSection = port.slice(start, end);
+    expect(matchingSection).not.toMatch(/\bautoAccept\b/i);
+    expect(matchingSection).not.toMatch(/\bcreateEngagement\b/i);
+    expect(matchingSection).not.toMatch(/\bissueInvitation\b/i);
   });
 
   test("the NET-W016 file list (every artifact this work order introduced exists)", async () => {

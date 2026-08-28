@@ -122,6 +122,7 @@ export function createWorkflowService(
     contributionRepository,
     proofOfValueRepository,
     outcomeMeasurementRepository,
+    engagementRepository,
     authorizer,
     auditWriter,
     idempotency,
@@ -132,7 +133,8 @@ export function createWorkflowService(
     if (kind === "opportunity") return opportunityRepository;
     if (kind === "contribution") return contributionRepository;
     if (kind === "proof_of_value") return proofOfValueRepository;
-    return outcomeMeasurementRepository;
+    if (kind === "outcome_measurement") return outcomeMeasurementRepository;
+    return engagementRepository;
   }
 
   /**
@@ -316,6 +318,25 @@ export function createWorkflowService(
   }
 
   const service: WorkflowService = {
+    /**
+     * The in-tx composition twin (NET-W017 remediation decision of
+     * record): runs the SHARED performTransition machinery inside a
+     * CALLER-OPENED authoritative transaction so a domain's coupled
+     * material mutation + this lifecycle transition commit as ONE
+     * authoritative unit (all-or-nothing). No lock, no idempotency
+     * bookkeeping here — the composite caller owns both (see the port
+     * contract). /workflows remains the sole lifecycle authority:
+     * there is exactly ONE transition path (performTransition).
+     */
+    async requestTransitionWithinTx(
+      request,
+      execution,
+      tx,
+      idempotencyRecordId,
+    ) {
+      return performTransition(request, execution, tx, idempotencyRecordId);
+    },
+
     async requestTransition(request, execution) {
       // 1. Per-subject coordination lock (non-authoritative serializer).
       //    Losing the coordination store cannot corrupt authoritative

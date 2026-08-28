@@ -81,6 +81,13 @@ import type {
 import type { TransactionalAuditWriter } from "../core/audit.ts";
 import type { IdempotencyStore } from "../core/idempotency.ts";
 import type { ReputationDimension } from "../core/reputation.ts";
+import type { Logger } from "../core/logger.ts";
+import type {
+  LifecycleState,
+  LifecycleSubject,
+  TransitionRequest,
+  TransitionResult,
+} from "../core/workflow.ts";
 import type {
   CreatorContentFormat,
   CreatorEngagementBand,
@@ -94,6 +101,10 @@ import type {
   CreatorMatchSignal,
   CreatorMatchGateReason,
   CreatorMatchWeightsShape,
+  UsageRightsChannel,
+  UsageRightsEffectiveStatus,
+  UsageRightsOwnership,
+  AutoAcceptGateReason,
 } from "../core/creators.ts";
 
 // ---------------------------------------------------------------------------
@@ -989,6 +1000,1132 @@ export interface CreatorMatchingService {
 }
 
 // ---------------------------------------------------------------------------
+// NET-W017 — UGC workflow and rights (engagement / acceptance /
+// usage rights / UGC production). The engagement is a NEW canonical
+// lifecycle subject kind owned by /workflows (the SOLE lifecycle
+// authority — this boundary only validates preconditions and
+// REQUESTS transitions through the provider-neutral delegation
+// callback below). Every record here is append-only, tenant-scoped,
+// idempotent and transactionally audited. NO local status machine
+// exists in this boundary: the usage-rights effective status is
+// DERIVED (a pure function over immutable records).
+// ---------------------------------------------------------------------------
+
+/**
+ * The requested usage-rights terms an engagement OFFER carries
+ * (work order §3.1): the explicit envelope within which any granted
+ * rights must fall. Everything the organizer may ever receive from
+ * this engagement is enumerated here — nothing is implicit.
+ */
+export interface EngagementRequestedRights {
+  /** Permitted-use kinds the offer requests (frozen vocabulary). */
+  readonly uses: readonly {
+    readonly kind: CreatorRightsKind;
+    readonly terms: string | null;
+  }[];
+  /** Channels the offer requests (closed vocabulary). */
+  readonly channels: readonly UsageRightsChannel[];
+  /** Territories the offer requests (ISO-3166-1 alpha-2 codes). */
+  readonly territories: readonly string[];
+  /** Media/content scope the offer requests (frozen formats). */
+  readonly formats: readonly CreatorContentFormat[];
+  /** The requested license window (ISO instants). */
+  readonly startsAt: string;
+  readonly endsAt: string;
+  /** Explicit exclusions a counterparty must respect. */
+  readonly exclusions: readonly string[];
+}
+
+/**
+ * Declared offer compensation — REFERENCE DATA ONLY (work order §2:
+ * /settlement stays the economic authority; NET-W017 creates NO
+ * economic units, commitments or ledger entries). Optionally pins
+ * the reward-policy reference the campaign declared.
+ */
+export interface EngagementCompensationTerms {
+  readonly format: CreatorContentFormat;
+  readonly unit: CreatorRateUnit;
+  readonly amount: number;
+  readonly currency: string;
+  /** Optional stable reward-policy reference (data only). */
+  readonly rewardPolicyReference: string | null;
+}
+
+/**
+ * A creator Engagement — the workflow-mediated creator↔campaign work
+ * object (work order §3.1). Satisfies the LifecycleSubject contract
+ * so the canonical WorkflowService can transition its state; the
+ * record is STATIC after creation except the lifecycle fields
+ * /workflows owns (the Opportunity/Contribution precedent).
+ *
+ * Invariants:
+ *  - `kind` is always "engagement"; `state` moves ONLY through
+ *    /workflows (DRAFT → READY → ASSIGNED → IN_PROGRESS → SUBMITTED
+ *    → VERIFIED / REJECTED / CANCELLED).
+ *  - `creatorPersonId` + `creatorProfileId` (+ pinned
+ *    `creatorProfileVersion`) preserve the creator lineage.
+ *  - `campaignId` (+ optional pinned `campaignPolicyVersion`)
+ *    references the campaign whose policy governs the offer.
+ *  - `matchRunId` (optional) references the NET-W016 run whose
+ *    ELIGIBLE candidate produced this engagement (verified at
+ *    creation; the run is never mutated here).
+ *  - `opportunityId` (optional) preserves opportunity lineage.
+ *  - `requestedRights` is the explicit envelope (validated against
+ *    the frozen vocabularies).
+ */
+export interface Engagement extends LifecycleSubject {
+  readonly creatorPersonId: string;
+  readonly creatorProfileId: string;
+  readonly creatorProfileVersion: number | null;
+  readonly campaignId: string;
+  readonly campaignPolicyVersion: number | null;
+  readonly matchRunId: string | null;
+  readonly opportunityId: string | null;
+  readonly requestedRights: EngagementRequestedRights;
+  readonly compensation: EngagementCompensationTerms | null;
+  /** Provider-neutral offer brief (opaque structured data). */
+  readonly brief: Readonly<Record<string, unknown>> | null;
+  readonly formatVersion: string;
+}
+
+export interface CreateEngagementInput {
+  readonly organizationScopeId: string;
+  readonly creatorPersonId: string;
+  readonly creatorProfileId?: string | null;
+  readonly campaignId: string;
+  readonly campaignPolicyVersion?: number | null;
+  readonly matchRunId?: string | null;
+  readonly opportunityId?: string | null;
+  readonly requestedRights: {
+    readonly uses: readonly { kind: string; terms?: string | null }[];
+    readonly channels: readonly string[];
+    readonly territories: readonly string[];
+    readonly formats: readonly string[];
+    readonly startsAt: string;
+    readonly endsAt: string;
+    readonly exclusions?: readonly string[];
+  };
+  readonly compensation?: {
+    readonly format: string;
+    readonly unit: string;
+    readonly amount: number;
+    readonly currency: string;
+    readonly rewardPolicyReference?: string | null;
+  } | null;
+  readonly brief?: Readonly<Record<string, unknown>> | null;
+  readonly idempotencyKey: string;
+}
+
+export interface CreateEngagementResult {
+  readonly engagement: Engagement;
+  /** false when the idempotency key replayed the committed offer. */
+  readonly created: boolean;
+}
+
+/** Closed skip reasons of the auto-match batch (work order §3.2). */
+export const ENGAGEMENT_BATCH_SKIP_REASONS = [
+  "open_engagement_exists",
+  "profile_not_active",
+] as const;
+
+export type EngagementBatchSkipReason =
+  (typeof ENGAGEMENT_BATCH_SKIP_REASONS)[number];
+
+/** One candidate outcome of an auto-match batch. */
+export interface EngagementBatchOutcome {
+  readonly creatorPersonId: string;
+  readonly creatorProfileId: string;
+  /** Present when the offer was (or already had been) created. */
+  readonly engagementId: string | null;
+  readonly created: boolean;
+  readonly skipped: EngagementBatchSkipReason | null;
+}
+
+/**
+ * The batch execution status (saga journal bookkeeping — NET-W017
+ * remediation, architect CHANGES REQUESTED on PR #34). This is NOT a
+ * lifecycle subject and NOT a domain state machine: it is the
+ * bookkeeping field of the batch DECISION record that makes partial
+ * execution explicit and recovery deterministic (journal-first).
+ */
+export const ENGAGEMENT_BATCH_STATUSES = [
+  "RUNNING",
+  "COMPLETED",
+  "ABORTED",
+] as const;
+
+export type EngagementBatchStatus =
+  (typeof ENGAGEMENT_BATCH_STATUSES)[number];
+
+/**
+ * One append-only journal row of the auto-match batch saga: the
+ * per-candidate outcome recorded in the SAME deterministic order the
+ * candidates were processed. The journal is the partial-execution
+ * truth; the batch record's `outcomes` snapshot is derived from it at
+ * finalize.
+ */
+export interface EngagementBatchOutcomeRecord {
+  /** Stable journal key: `outcome:{batchId}:{creatorProfileId}`. */
+  readonly id: string;
+  readonly batchId: string;
+  readonly organizationScopeId: string;
+  readonly outcome: EngagementBatchOutcome;
+  readonly recordedAt: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+/**
+ * The auto-match batch record — the auditable decision record of ONE
+ * `createEngagementsFromMatch` execution (work order §3.2): which
+ * eligible match-run candidates became DRAFT engagement offers and
+ * which were skipped (with the closed reason).
+ *
+ * NET-W017 remediation (journal-first recoverable saga): the record is
+ * created FIRST with status RUNNING and an EMPTY outcome snapshot;
+ * per-candidate outcomes append to the {@link EngagementBatchOutcomeRecord}
+ * journal as candidates are processed; the run finalizes to COMPLETED
+ * (snapshot derived from the journal) or ABORTED (unexpected failure —
+ * the reason is recorded, the journal accurately describes every
+ * candidate processed so far, and a retry with the same idempotency
+ * key resumes deterministically). No durable offer can exist without
+ * its batch journal accurately describing it.
+ */
+export interface EngagementBatchRecord {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly matchRunId: string;
+  readonly campaignId: string;
+  readonly campaignPolicyVersion: number | null;
+  readonly candidateCount: number;
+  /** RUNNING while executing; COMPLETED/ABORTED is terminal bookkeeping. */
+  readonly status: EngagementBatchStatus;
+  /**
+   * The finalized outcome snapshot (derived from the journal at
+   * COMPLETED). EMPTY while RUNNING/ABORTED — read the journal for
+   * live partial state.
+   */
+  readonly outcomes: readonly EngagementBatchOutcome[];
+  readonly createdBy: string;
+  readonly createdAt: string;
+  readonly completedAt: string | null;
+  readonly abortedAt: string | null;
+  /** Machine-readable abort detail ({failedCandidateProfileId, reason}). */
+  readonly abortedReason: string | null;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+export interface CreateEngagementsFromMatchInput {
+  readonly organizationScopeId: string;
+  readonly matchRunId: string;
+  /** Maximum offers to create (default: every eligible candidate). */
+  readonly limit?: number | null;
+  /** The offer template applied to every candidate. */
+  readonly offer: {
+    readonly requestedRights: {
+      readonly uses: readonly { kind: string; terms?: string | null }[];
+      readonly channels: readonly string[];
+      readonly territories: readonly string[];
+      readonly formats: readonly string[];
+      readonly startsAt: string;
+      readonly endsAt: string;
+      readonly exclusions?: readonly string[];
+    };
+    readonly compensation?: {
+      readonly format: string;
+      readonly unit: string;
+      readonly amount: number;
+      readonly currency: string;
+      readonly rewardPolicyReference?: string | null;
+    } | null;
+    readonly brief?: Readonly<Record<string, unknown>> | null;
+  };
+  readonly idempotencyKey: string;
+}
+
+export interface CreateEngagementsFromMatchResult {
+  readonly batch: EngagementBatchRecord;
+  readonly created: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// The acceptance policy (CRE-003) — versioned, append-only
+// ---------------------------------------------------------------------------
+
+/** The acceptance mode (closed vocabulary): manual or auto-accept. */
+export type CreatorAcceptanceMode = "manual" | "auto_accept";
+
+/**
+ * A creator acceptance policy VERSION — the creator's declared
+ * auto-accept rules (work order §3.2). Append-only; the latest
+ * version per (organizationScopeId, creatorPersonId) is effective.
+ * The policy is DATA — the deterministic evaluation engine in
+ * engagement-engine.ts consumes it; the policy itself authorizes
+ * nothing.
+ */
+export interface CreatorAcceptancePolicyRecord {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly creatorPersonId: string;
+  /** Monotonic per (org, creator): 1, 2, 3… */
+  readonly version: number;
+  readonly mode: CreatorAcceptanceMode;
+  /** Max concurrent NON-TERMINAL engagements (0–50). */
+  readonly maxActiveEngagements: number;
+  /**
+   * Declared compensation floor: offers below it do not qualify
+   * (format/unit/currency matched; an uncompensated offer fails any
+   * declared floor). null = no floor.
+   */
+  readonly rateFloor: {
+    readonly format: CreatorContentFormat;
+    readonly unit: CreatorRateUnit;
+    readonly amount: number;
+    readonly currency: string;
+  } | null;
+  /** Usage-rights kinds the creator is willing to AUTO-GRANT. */
+  readonly autoGrantableRights: readonly CreatorRightsKind[];
+  /** Max requested grant duration in days (null = unbounded). */
+  readonly maxGrantDurationDays: number | null;
+  readonly createdBy: string;
+  readonly createdAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+export interface SetAcceptancePolicyInput {
+  readonly organizationScopeId: string;
+  readonly creatorPersonId: string;
+  readonly mode: string;
+  readonly maxActiveEngagements?: number | null;
+  readonly rateFloor?: {
+    readonly format: string;
+    readonly unit: string;
+    readonly amount: number;
+    readonly currency: string;
+  } | null;
+  readonly autoGrantableRights?: readonly string[] | null;
+  readonly maxGrantDurationDays?: number | null;
+  readonly idempotencyKey: string;
+}
+
+export interface SetAcceptancePolicyResult {
+  readonly policy: CreatorAcceptancePolicyRecord;
+  readonly created: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Auto-accept evaluation (deterministic, closed reason vocabulary)
+// ---------------------------------------------------------------------------
+
+/** One gate outcome of the auto-accept evaluation trace. */
+export interface AutoAcceptGateOutcome {
+  readonly reason: AutoAcceptGateReason;
+  readonly passed: boolean;
+  /** Machine-readable evaluation detail (inputs + comparison). */
+  readonly detail: Readonly<Record<string, unknown>> | null;
+}
+
+/**
+ * The deterministic auto-accept evaluation result (work order
+ * §3.2). Identical inputs produce identical verdicts + traces; a
+ * non-qualifying evaluation performs NO mutation.
+ */
+export interface AutoAcceptEvaluation {
+  readonly qualifies: boolean;
+  readonly mode: CreatorAcceptanceMode;
+  readonly policyVersion: number | null;
+  readonly gates: readonly AutoAcceptGateOutcome[];
+}
+
+// ---------------------------------------------------------------------------
+// Usage rights — explicit, scoped, revocable (CRE-004)
+// ---------------------------------------------------------------------------
+
+/**
+ * A UsageRightsGrant — the explicit, durable, auditable license the
+ * creator grants for ONE engagement (work order §3.3). Created ONLY
+ * by an acceptance (manual or auto); immutable after creation;
+ * revocation is a separate append-only record; the effective status
+ * is DERIVED (never a stored/mutated field).
+ *
+ * The ownership boundary (CRE-004): `contentOwnership` is frozen to
+ * "creator_retained" — the grant input carries NO ownership field,
+ * so there is structurally no code path that transfers ownership of
+ * creator content or channels to the protocol. Producing UGC NEVER
+ * mints a grant; publication on `creator_owned_channel` requires an
+ * explicit grant containing the `channel_publication` use kind
+ * scoped to that channel.
+ */
+export interface UsageRightsGrant {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly engagementId: string;
+  /** The granting creator (the engagement's creator person). */
+  readonly grantorPersonId: string;
+  readonly uses: readonly {
+    readonly kind: CreatorRightsKind;
+    readonly terms: string | null;
+  }[];
+  readonly channels: readonly UsageRightsChannel[];
+  readonly territories: readonly string[];
+  readonly formats: readonly CreatorContentFormat[];
+  readonly exclusions: readonly string[];
+  readonly startsAt: string;
+  readonly endsAt: string;
+  readonly contentOwnership: UsageRightsOwnership;
+  readonly formatVersion: string;
+  readonly createdBy: string;
+  readonly createdAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+/** The append-only revocation record of ONE grant. */
+export interface UsageRightsRevocation {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly grantId: string;
+  readonly revokedBy: string;
+  readonly reason: string | null;
+  readonly revokedAt: string;
+  /** The instant from which the revocation takes effect. */
+  readonly effectiveAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+/**
+ * The grant read view: the immutable grant + its (at most one)
+ * revocation + the DERIVED effective status evaluated at `viewedAsOf`
+ * (REVOKED when a revocation exists and asOf ≥ effectiveAt; EXPIRED
+ * when asOf > endsAt; ACTIVE otherwise — work order §3.3).
+ */
+export interface UsageRightsView {
+  readonly grant: UsageRightsGrant;
+  readonly revocation: UsageRightsRevocation | null;
+  readonly effectiveStatus: UsageRightsEffectiveStatus;
+  readonly viewedAsOf: string;
+}
+
+export interface AcceptEngagementInput {
+  readonly organizationScopeId: string;
+  readonly engagementId: string;
+  /** The caller's view of the engagement version (optimistic concurrency). */
+  readonly expectedVersion: number;
+  /** The explicitly granted usage rights (⊆ the requested envelope). */
+  readonly grantedRights: {
+    readonly uses: readonly { kind: string; terms?: string | null }[];
+    readonly channels: readonly string[];
+    readonly territories: readonly string[];
+    readonly formats: readonly string[];
+    readonly startsAt: string;
+    readonly endsAt: string;
+    readonly exclusions?: readonly string[];
+  };
+  readonly idempotencyKey: string;
+}
+
+export interface AcceptEngagementResult {
+  readonly engagement: Engagement;
+  readonly grant: UsageRightsGrant;
+  readonly transition: TransitionResult;
+}
+
+export interface AutoAcceptEngagementInput {
+  readonly organizationScopeId: string;
+  readonly engagementId: string;
+  readonly expectedVersion: number;
+  readonly idempotencyKey: string;
+}
+
+export interface AutoAcceptEngagementResult {
+  /** false when the deterministic evaluation did not qualify. */
+  readonly accepted: boolean;
+  readonly evaluation: AutoAcceptEvaluation;
+  readonly engagement: Engagement;
+  readonly grant: UsageRightsGrant | null;
+  readonly transition: TransitionResult | null;
+}
+
+export interface RevokeUsageRightsInput {
+  readonly organizationScopeId: string;
+  readonly grantId: string;
+  /** Defaults to now when omitted. */
+  readonly effectiveAt?: string | null;
+  readonly reason?: string | null;
+  readonly idempotencyKey: string;
+}
+
+export interface RevokeUsageRightsResult {
+  readonly view: UsageRightsView;
+  readonly created: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// UGC production / deliverables / submission (AC-02/AC-05)
+// ---------------------------------------------------------------------------
+
+/**
+ * A UGC production record — first-class, tenant-scoped, append-only
+ * (work order §3.4). Opened when production starts; preserves the
+ * full lineage: creator, engagement, campaign (+ pinned policy
+ * version), match run, opportunity and the optional contribution
+ * reference.
+ */
+export interface UgcProduction {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly engagementId: string;
+  readonly creatorPersonId: string;
+  readonly creatorProfileId: string;
+  readonly campaignId: string;
+  readonly campaignPolicyVersion: number | null;
+  readonly matchRunId: string | null;
+  readonly opportunityId: string | null;
+  /** Optional contribution lineage (the /contributions subject). */
+  readonly contributionId: string | null;
+  readonly formatVersion: string;
+  readonly createdBy: string;
+  readonly openedAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+/**
+ * A provider-neutral external platform reference on a deliverable
+ * (work order §3.4/AC-06): opaque strings ONLY — no
+ * provider-client semantics in the domain, no credentials (those
+ * stay behind secrets/adapters).
+ */
+export interface UgcExternalPlatformReference {
+  readonly provider: string;
+  readonly externalId: string;
+  readonly url: string | null;
+}
+
+/**
+ * A UGC deliverable VERSION — immutable, append-only. The version
+ * number is the monotonic count per (productionId, deliverableKey)
+ * (deterministic versioning — recorded under the production
+ * advisory lock so concurrent recordings cannot fork the sequence).
+ */
+export interface UgcDeliverableVersion {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly productionId: string;
+  /** Caller-assigned semantic key (e.g. "hero-video"). */
+  readonly deliverableKey: string;
+  /** 1, 2, 3… per (productionId, deliverableKey). */
+  readonly version: number;
+  readonly format: CreatorContentFormat;
+  readonly title: string | null;
+  /** Provider-neutral content reference (e.g. object-store URI). */
+  readonly contentReference: string | null;
+  readonly externalPlatform: UgcExternalPlatformReference | null;
+  readonly notes: string | null;
+  readonly createdBy: string;
+  readonly createdAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+/**
+ * A UGC submission — the append-only record of ONE submission act:
+ * the tendered deliverable count + the canonical evidence
+ * references (every id validated to exist, be tenant-scoped and be
+ * subject-bound to THIS production through the canonical
+ * /evidence authority — work order §3.4/AC-05).
+ */
+export interface UgcSubmission {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly productionId: string;
+  readonly engagementId: string;
+  readonly deliverableCount: number;
+  readonly evidenceReferences: readonly string[];
+  readonly createdBy: string;
+  readonly submittedAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+export interface OpenProductionInput {
+  readonly organizationScopeId: string;
+  readonly engagementId: string;
+  readonly expectedVersion: number;
+  /** Optional contribution lineage to preserve on the record. */
+  readonly contributionId?: string | null;
+  readonly idempotencyKey: string;
+}
+
+export interface OpenProductionResult {
+  readonly production: UgcProduction;
+  readonly transition: TransitionResult;
+}
+
+export interface RecordDeliverableInput {
+  readonly organizationScopeId: string;
+  readonly productionId: string;
+  readonly deliverableKey: string;
+  readonly format: string;
+  readonly title?: string | null;
+  readonly contentReference?: string | null;
+  readonly externalPlatform?: {
+    readonly provider: string;
+    readonly externalId: string;
+    readonly url?: string | null;
+  } | null;
+  readonly notes?: string | null;
+  readonly idempotencyKey: string;
+}
+
+export interface RecordDeliverableResult {
+  readonly deliverable: UgcDeliverableVersion;
+  /** false when the idempotency key replayed the committed version. */
+  readonly created: boolean;
+}
+
+export interface SubmitProductionInput {
+  readonly organizationScopeId: string;
+  readonly productionId: string;
+  readonly expectedVersion: number;
+  /** Canonical evidence ids backing the submission (≥1 required). */
+  readonly evidenceReferences: readonly string[];
+  readonly idempotencyKey: string;
+}
+
+export interface SubmitProductionResult {
+  readonly submission: UgcSubmission;
+  readonly transition: TransitionResult;
+}
+
+// ---------------------------------------------------------------------------
+// Neutral cross-domain lookups + the workflow delegation callback
+// (composition-root wired; work order §2)
+// ---------------------------------------------------------------------------
+
+/**
+ * The provider-neutral campaign view the engagement boundary needs
+ * (existence + tenant scope + pinned policy version + the
+ * administrative status the tender precondition reads). /campaigns
+ * stays the campaign policy authority — this is a READ-ONLY view,
+ * never campaign semantics.
+ */
+export interface EngagementCampaignView {
+  readonly campaignId: string;
+  /** The pinned policy version (null when the campaign has none). */
+  readonly policyVersion: number | null;
+  readonly organizationScopeId: string;
+  /** The campaign's administrative status (e.g. "ACTIVE"). */
+  readonly status: string;
+}
+
+/**
+ * EngagementCampaignLookup — structural interface over the campaigns
+ * domain (a thin composition-root adapter). A cross-scope or
+ * nonexistent campaign resolves to null (no existence oracle).
+ */
+export interface EngagementCampaignLookup {
+  resolve(
+    campaignId: string,
+    policyVersion?: number,
+  ): Promise<EngagementCampaignView | null>;
+}
+
+/**
+ * EngagementOpportunityLookup — structural interface over the
+ * opportunities domain (existence + org scope), mirroring the
+ * contributions boundary's OpportunityLookup precedent.
+ */
+export interface EngagementOpportunityLookup {
+  getOrganizationScope(opportunityId: string): Promise<string | null>;
+  exists(opportunityId: string): Promise<boolean>;
+}
+
+/**
+ * ProductionEvidenceLookup — structural interface over the canonical
+ * /evidence authority: resolves an evidence record's tenant scope +
+ * subject binding. The UGC boundary NEVER fabricates evidence — it
+ * only validates references through this read-only view (AC-05).
+ */
+export interface ProductionEvidenceView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly subjectType: string;
+  readonly subjectId: string;
+}
+
+export interface ProductionEvidenceLookup {
+  resolve(evidenceId: string): Promise<ProductionEvidenceView | null>;
+}
+
+/**
+ * The sanctioned /workflows delegation callback (the
+ * Proof-of-Value/service precedent, composed to a SINGLE authoritative
+ * transaction by the NET-W017 remediation): the engagement service
+ * validates business preconditions and executes the authorized
+ * transition IN-TX — /workflows stays the SOLE lifecycle authority
+ * (AC-01) and every composite command (acceptance / production /
+ * submission) commits its material record AND the lifecycle transition
+ * as ONE all-or-nothing authoritative unit.
+ */
+export interface EngagementWorkflowPort {
+  /**
+   * The in-tx twin of the canonical requestTransition: executes the
+   * full workflow machinery (version check, authorization, state
+   * machine, save, buffered audit) inside the CALLER-OPENED
+   * transaction (`ctx.transaction` of the composite's
+   * `applyIdempotent`). See src/workflows/port.ts for the contract.
+   */
+  requestTransitionWithinTx(
+    request: TransitionRequest,
+    execution: ExecutionContext,
+    tx: AuthorityTransaction,
+    idempotencyRecordId: string,
+  ): Promise<TransitionResult>;
+}
+
+/**
+ * EngagementContributionLookup — structural interface over the
+ * contributions domain (existence + org scope) so the production
+ * record's contribution lineage is a REAL reference, not an opaque
+ * string (the opportunity-lookup precedent).
+ */
+export interface EngagementContributionLookup {
+  getOrganizationScope(contributionId: string): Promise<string | null>;
+  exists(contributionId: string): Promise<boolean>;
+}
+
+export interface CreatorEngagementLookups {
+  readonly campaign: EngagementCampaignLookup;
+  readonly opportunity: EngagementOpportunityLookup;
+  readonly contribution: EngagementContributionLookup;
+  readonly safety: CreatorMatchSafetyLookup;
+  readonly evidence: ProductionEvidenceLookup;
+}
+
+// ---------------------------------------------------------------------------
+// The engagement / rights / production repositories
+// ---------------------------------------------------------------------------
+
+/**
+ * EngagementRepository — persistence port for engagements. Exposes
+ * BOTH the domain operations AND the LifecycleRepository structural
+ * surface (getByIdWithinTx/saveWithinTx) consumed by the canonical
+ * WorkflowService (the ContributionRepository precedent).
+ */
+export interface EngagementRepository {
+  save(
+    engagement: Engagement,
+    execution: ExecutionContext,
+  ): Promise<Engagement>;
+  findById(id: string): Promise<Engagement | null>;
+  findByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<Engagement | null>;
+  createWithinTx(
+    engagement: Engagement,
+    tx: AuthorityTransaction,
+  ): Promise<Engagement>;
+  listByOrganization(
+    organizationScopeId: string,
+    filters?: {
+      campaignId?: string;
+      creatorPersonId?: string;
+      states?: readonly LifecycleState[];
+    },
+  ): Promise<readonly Engagement[]>;
+  /** The creator's NON-TERMINAL engagements in an org (auto-accept gate). */
+  listNonTerminalByCreator(
+    organizationScopeId: string,
+    creatorPersonId: string,
+  ): Promise<readonly Engagement[]>;
+  /** The non-terminal engagement for (org, campaign, creator), if any. */
+  findNonTerminalWithinTx(
+    organizationScopeId: string,
+    campaignId: string,
+    creatorPersonId: string,
+    tx: AuthorityTransaction,
+  ): Promise<Engagement | null>;
+  /** LifecycleRepository structural surface (WorkflowService). */
+  getByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<Engagement | null>;
+  saveWithinTx(
+    subject: Engagement,
+    expectedVersion: number,
+    execution: ExecutionContext,
+    tx: AuthorityTransaction,
+  ): Promise<Engagement>;
+}
+
+export interface CreatorAcceptancePolicyRepository {
+  save(
+    policy: CreatorAcceptancePolicyRecord,
+    execution: ExecutionContext,
+  ): Promise<CreatorAcceptancePolicyRecord>;
+  findLatest(
+    organizationScopeId: string,
+    creatorPersonId: string,
+  ): Promise<CreatorAcceptancePolicyRecord | null>;
+  findLatestWithinTx(
+    organizationScopeId: string,
+    creatorPersonId: string,
+    tx: AuthorityTransaction,
+  ): Promise<CreatorAcceptancePolicyRecord | null>;
+  createWithinTx(
+    policy: CreatorAcceptancePolicyRecord,
+    tx: AuthorityTransaction,
+  ): Promise<CreatorAcceptancePolicyRecord>;
+}
+
+export interface UsageRightsRepository {
+  save(
+    grant: UsageRightsGrant,
+    execution: ExecutionContext,
+  ): Promise<UsageRightsGrant>;
+  findById(grantId: string): Promise<UsageRightsGrant | null>;
+  findByEngagement(
+    organizationScopeId: string,
+    engagementId: string,
+  ): Promise<UsageRightsGrant | null>;
+  findByEngagementWithinTx(
+    organizationScopeId: string,
+    engagementId: string,
+    tx: AuthorityTransaction,
+  ): Promise<UsageRightsGrant | null>;
+  createWithinTx(
+    grant: UsageRightsGrant,
+    tx: AuthorityTransaction,
+  ): Promise<UsageRightsGrant>;
+  saveRevocation(
+    revocation: UsageRightsRevocation,
+    execution: ExecutionContext,
+  ): Promise<UsageRightsRevocation>;
+  findRevocation(
+    grantId: string,
+  ): Promise<UsageRightsRevocation | null>;
+  findRevocationWithinTx(
+    grantId: string,
+    tx: AuthorityTransaction,
+  ): Promise<UsageRightsRevocation | null>;
+  createRevocationWithinTx(
+    revocation: UsageRightsRevocation,
+    tx: AuthorityTransaction,
+  ): Promise<UsageRightsRevocation>;
+  listByOrganization(
+    organizationScopeId: string,
+    engagementId?: string,
+  ): Promise<readonly UsageRightsGrant[]>;
+}
+
+export interface UgcProductionRepository {
+  save(
+    production: UgcProduction,
+    execution: ExecutionContext,
+  ): Promise<UgcProduction>;
+  findById(id: string): Promise<UgcProduction | null>;
+  createWithinTx(
+    production: UgcProduction,
+    tx: AuthorityTransaction,
+  ): Promise<UgcProduction>;
+  findByEngagement(
+    organizationScopeId: string,
+    engagementId: string,
+  ): Promise<UgcProduction | null>;
+  /** In-tx read for composite atomicity (NET-W017 remediation). */
+  findByEngagementWithinTx(
+    organizationScopeId: string,
+    engagementId: string,
+    tx: AuthorityTransaction,
+  ): Promise<UgcProduction | null>;
+  listByOrganization(
+    organizationScopeId: string,
+    engagementId?: string,
+  ): Promise<readonly UgcProduction[]>;
+}
+
+export interface UgcDeliverableRepository {
+  save(
+    deliverable: UgcDeliverableVersion,
+    execution: ExecutionContext,
+  ): Promise<UgcDeliverableVersion>;
+  createWithinTx(
+    deliverable: UgcDeliverableVersion,
+    tx: AuthorityTransaction,
+  ): Promise<UgcDeliverableVersion>;
+  listByProduction(
+    organizationScopeId: string,
+    productionId: string,
+  ): Promise<readonly UgcDeliverableVersion[]>;
+  countByKeyWithinTx(
+    productionId: string,
+    deliverableKey: string,
+    tx: AuthorityTransaction,
+  ): Promise<number>;
+}
+
+export interface UgcSubmissionRepository {
+  save(
+    submission: UgcSubmission,
+    execution: ExecutionContext,
+  ): Promise<UgcSubmission>;
+  createWithinTx(
+    submission: UgcSubmission,
+    tx: AuthorityTransaction,
+  ): Promise<UgcSubmission>;
+  findById(id: string): Promise<UgcSubmission | null>;
+  listByProduction(
+    organizationScopeId: string,
+    productionId: string,
+  ): Promise<readonly UgcSubmission[]>;
+  /** In-tx read for composite atomicity (NET-W017 remediation). */
+  listByProductionWithinTx(
+    organizationScopeId: string,
+    productionId: string,
+    tx: AuthorityTransaction,
+  ): Promise<readonly UgcSubmission[]>;
+}
+
+export interface EngagementBatchRepository {
+  save(
+    batch: EngagementBatchRecord,
+    execution: ExecutionContext,
+  ): Promise<EngagementBatchRecord>;
+  createWithinTx(
+    batch: EngagementBatchRecord,
+    tx: AuthorityTransaction,
+  ): Promise<EngagementBatchRecord>;
+  /**
+   * Finalize the batch journal (NET-W017 remediation): transition the
+   * RUNNING record to COMPLETED with the outcome snapshot derived from
+   * the journal. An ABORTED record may complete on the RECOVERY
+   * resume (the journal guarantees only unprocessed candidates
+   * execute). Idempotent within the caller's apply: an
+   * already-COMPLETED record is returned unchanged.
+   */
+  completeWithinTx(
+    batchId: string,
+    outcomes: readonly EngagementBatchOutcome[],
+    completedAt: string,
+    tx: AuthorityTransaction,
+  ): Promise<EngagementBatchRecord>;
+  /**
+   * Abort the batch journal: transition the RUNNING record to ABORTED
+   * with the machine-readable reason. An already-ABORTED record is
+   * returned unchanged; a COMPLETED record is a conflict (a completed
+   * saga cannot be aborted).
+   */
+  abortWithinTx(
+    batchId: string,
+    abortedReason: string,
+    abortedAt: string,
+    tx: AuthorityTransaction,
+  ): Promise<EngagementBatchRecord>;
+  /** Append one per-candidate outcome journal row (create-once per key). */
+  appendOutcomeWithinTx(
+    outcome: EngagementBatchOutcomeRecord,
+    tx: AuthorityTransaction,
+  ): Promise<EngagementBatchOutcomeRecord>;
+  /** The journal row for (batchId, creatorProfileId), if any (recovery). */
+  findOutcome(
+    batchId: string,
+    creatorProfileId: string,
+  ): Promise<EngagementBatchOutcomeRecord | null>;
+  /** The full journal of one batch, in deterministic (recordedAt, id) order. */
+  listOutcomes(batchId: string): Promise<readonly EngagementBatchOutcomeRecord[]>;
+  findById(id: string): Promise<EngagementBatchRecord | null>;
+  listByOrganization(
+    organizationScopeId: string,
+    matchRunId?: string,
+  ): Promise<readonly EngagementBatchRecord[]>;
+}
+
+// ---------------------------------------------------------------------------
+// The engagement domain service
+// ---------------------------------------------------------------------------
+
+export interface CreatorEngagementService {
+  /**
+   * Record an engagement OFFER (DRAFT). Validates the campaign
+   * (existence + tenant scope through the neutral lookup), the
+   * creator profile (ACTIVE), the requested-rights envelope (frozen
+   * vocabularies) and — when a match run is referenced — that the
+   * creator was an ELIGIBLE candidate of that run. Serialized by the
+   * advisory-lock unique anchor: at most ONE non-terminal engagement
+   * per (org, campaign, creator).
+   */
+  createEngagement(
+    execution: ExecutionContext,
+    input: CreateEngagementInput,
+  ): Promise<CreateEngagementResult>;
+  /**
+   * Auto-match orchestration: turn ONE match run's eligible
+   * candidates into DRAFT offers (rank order; optional limit).
+   * Per-candidate duplicate/conflict outcomes are recorded in the
+   * batch record — never silently dropped.
+   */
+  createEngagementsFromMatch(
+    execution: ExecutionContext,
+    input: CreateEngagementsFromMatchInput,
+  ): Promise<CreateEngagementsFromMatchResult>;
+  /**
+   * Manual acceptance: validates the granted rights against the
+   * requested envelope, records the usage-rights grant, then requests
+   * the READY → ASSIGNED transition through /workflows.
+   */
+  acceptEngagement(
+    execution: ExecutionContext,
+    input: AcceptEngagementInput,
+  ): Promise<AcceptEngagementResult>;
+  /**
+   * Deterministic auto-accept (CRE-003): evaluates the creator's
+   * acceptance policy against the offer (closed gate vocabulary,
+   * full trace); a qualifying evaluation records the auto-grant and
+   * requests the transition; a non-qualifying evaluation mutates
+   * NOTHING.
+   */
+  autoAcceptEngagement(
+    execution: ExecutionContext,
+    input: AutoAcceptEngagementInput,
+  ): Promise<AutoAcceptEngagementResult>;
+  /** Revoke a usage-rights grant (grantor-only; one revocation). */
+  revokeUsageRights(
+    execution: ExecutionContext,
+    input: RevokeUsageRightsInput,
+  ): Promise<RevokeUsageRightsResult>;
+  /** Set the next acceptance-policy version (append-only). */
+  setAcceptancePolicy(
+    execution: ExecutionContext,
+    input: SetAcceptancePolicyInput,
+  ): Promise<SetAcceptancePolicyResult>;
+  /** Open UGC production (record + ASSIGNED → IN_PROGRESS). */
+  openProduction(
+    execution: ExecutionContext,
+    input: OpenProductionInput,
+  ): Promise<OpenProductionResult>;
+  /** Append an immutable deliverable version (deterministic). */
+  recordDeliverable(
+    execution: ExecutionContext,
+    input: RecordDeliverableInput,
+  ): Promise<RecordDeliverableResult>;
+  /**
+   * Submit the production (submission record + IN_PROGRESS →
+   * SUBMITTED): requires ≥1 deliverable version and ≥1 canonical
+   * evidence reference, every reference subject-bound to THIS
+   * production.
+   */
+  submitProduction(
+    execution: ExecutionContext,
+    input: SubmitProductionInput,
+  ): Promise<SubmitProductionResult>;
+  /** Tenant-scoped reads (cross-scope = NotFoundError). */
+  getEngagement(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    id: string,
+  ): Promise<Engagement>;
+  listEngagements(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    filters?: {
+      campaignId?: string;
+      creatorPersonId?: string;
+      states?: readonly LifecycleState[];
+    },
+  ): Promise<readonly Engagement[]>;
+  getAcceptancePolicy(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    creatorPersonId: string,
+  ): Promise<CreatorAcceptancePolicyRecord | null>;
+  getUsageRights(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    grantId: string,
+    asOf?: string | null,
+  ): Promise<UsageRightsView>;
+  listUsageRights(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    engagementId?: string,
+  ): Promise<readonly UsageRightsView[]>;
+  getProduction(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    id: string,
+  ): Promise<UgcProduction>;
+  listProductions(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    engagementId?: string,
+  ): Promise<readonly UgcProduction[]>;
+  listDeliverables(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    productionId: string,
+  ): Promise<readonly UgcDeliverableVersion[]>;
+  listSubmissions(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    productionId: string,
+  ): Promise<readonly UgcSubmission[]>;
+  /**
+   * Tenant-scoped batch read (NET-W017 remediation: saga
+   * inspectability — the ABORTED/RUNNING journal is the partial-
+   * execution truth). Cross-scope = NotFoundError.
+   */
+  getEngagementBatch(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    batchId: string,
+  ): Promise<EngagementBatchRecord>;
+  /** The batch's per-candidate outcome journal (deterministic order). */
+  listEngagementBatchOutcomes(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    batchId: string,
+  ): Promise<readonly EngagementBatchOutcomeRecord[]>;
+}
+
+export interface CreatorEngagementServiceDeps {
+  readonly engagementRepository: EngagementRepository;
+  readonly acceptancePolicyRepository: CreatorAcceptancePolicyRepository;
+  readonly usageRightsRepository: UsageRightsRepository;
+  readonly productionRepository: UgcProductionRepository;
+  readonly deliverableRepository: UgcDeliverableRepository;
+  readonly submissionRepository: UgcSubmissionRepository;
+  readonly batchRepository: EngagementBatchRepository;
+  readonly profileRepository: CreatorProfileRepository;
+  readonly versionRepository: CreatorProfileVersionRepository;
+  readonly runRepository: CreatorMatchRunRepository;
+  readonly lookups: CreatorEngagementLookups;
+  readonly workflow: EngagementWorkflowPort;
+  readonly idempotency: IdempotencyStore;
+  readonly auditWriter: TransactionalAuditWriter;
+  readonly logger: Logger;
+}
+
+// ---------------------------------------------------------------------------
 // The boundary port
 // ---------------------------------------------------------------------------
 
@@ -1013,6 +2150,18 @@ export interface CreatorsPort {
     readonly profileArchived: "creator_profile.archived";
     /** NET-W016: the (only) material matching mutation — the run record. */
     readonly matchRunRecorded: "creator_match.recorded";
+    /** NET-W017: material engagement-domain mutations (append-only records). */
+    readonly engagementOfferRecorded: "engagement.offer_recorded";
+    readonly engagementBatchRecorded: "engagement.batch_recorded";
+    /** NET-W017 remediation: the batch saga's terminal journal events. */
+    readonly engagementBatchCompleted: "engagement.batch_completed";
+    readonly engagementBatchAborted: "engagement.batch_aborted";
+    readonly usageRightsGranted: "usage_rights.granted";
+    readonly usageRightsRevoked: "usage_rights.revoked";
+    readonly acceptancePolicySet: "creator_acceptance_policy.set";
+    readonly ugcProductionOpened: "ugc_production.opened";
+    readonly ugcDeliverableRecorded: "ugc_production.deliverable_recorded";
+    readonly ugcProductionSubmitted: "ugc_production.submitted";
   };
 }
 
@@ -1035,4 +2184,12 @@ export type {
   CreatorMatchSignal,
   CreatorMatchGateReason,
   CreatorMatchWeightsShape,
+  UsageRightsChannel,
+  UsageRightsEffectiveStatus,
+  UsageRightsOwnership,
+  AutoAcceptGateReason,
+  LifecycleState,
+  LifecycleSubject,
+  TransitionRequest,
+  TransitionResult,
 };

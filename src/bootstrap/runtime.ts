@@ -293,6 +293,23 @@ import {
 import { createCreatorService } from "../creators/creator-service.ts";
 import { createAuthorityCreatorMatchRunRepository } from "../creators/authority-match-run-repository.ts";
 import { createCreatorMatchingService } from "../creators/matching-service.ts";
+import {
+  createAuthorityEngagementRepository,
+  createAuthorityAcceptancePolicyRepository,
+  createAuthorityUsageRightsRepository,
+  createAuthorityUgcProductionRepository,
+  createAuthorityUgcDeliverableRepository,
+  createAuthorityUgcSubmissionRepository,
+  createAuthorityEngagementBatchRepository,
+} from "../creators/authority-engagement-repositories.ts";
+import { createCreatorEngagementService } from "../creators/engagement-service.ts";
+import type {
+  CreatorEngagementService,
+  EngagementCampaignLookup,
+  EngagementOpportunityLookup,
+  EngagementContributionLookup,
+  ProductionEvidenceLookup,
+} from "../creators/port.ts";
 import type {
   ActivateRiskControlInput,
   AppealDisputeInput,
@@ -319,13 +336,21 @@ import type {
   DefineCampaignPolicyInput,
 } from "../campaigns/port.ts";
 import type {
+  CreatorAcceptancePolicyRecord,
   CreatorMatchRunRecord,
   CreatorProfileRecord,
   CreatorProfileSections,
   CreatorProfileVersion,
   CreatorService,
   CreatorMatchingService,
+  Engagement,
+  EngagementBatchOutcomeRecord,
+  EngagementBatchRecord,
   RunCreatorMatchInput,
+  UgcDeliverableVersion,
+  UgcProduction,
+  UgcSubmission,
+  UsageRightsView,
 } from "../creators/port.ts";
 import type { RiskOperationClass } from "../core/risk.ts";
 
@@ -468,6 +493,7 @@ export interface Runtime {
   readonly creatorService: CreatorService;
   // NET-W016 creator matching (deterministic eligibility + ranking).
   readonly creatorMatchingService: CreatorMatchingService;
+  readonly creatorEngagementService: CreatorEngagementService;
   // NET-W012 helpful contributions (Proof-of-Helpfulness) service.
   readonly helpfulnessService: HelpfulnessService;
   // NET-W013 quality/moderation/anti-spam services.
@@ -739,6 +765,38 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     authority: postgresAuthority,
     logger: { debug: (m, f) => logger.forModule("evidence").debug(m, f) },
   });
+  // NET-W017 engagement/UGC repositories (PostgresAuthority-backed,
+  // append-only collections). Created here — before the evidence
+  // subject lookup — so canonical evidence records can bind to
+  // "ugc_production" subjects (validated through the lookup below).
+  const engagementRepo = createAuthorityEngagementRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
+  });
+  const creatorAcceptancePolicyRepo = createAuthorityAcceptancePolicyRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
+  });
+  const usageRightsRepo = createAuthorityUsageRightsRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
+  });
+  const ugcProductionRepo = createAuthorityUgcProductionRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
+  });
+  const ugcDeliverableRepo = createAuthorityUgcDeliverableRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
+  });
+  const ugcSubmissionRepo = createAuthorityUgcSubmissionRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
+  });
+  const engagementBatchRepo = createAuthorityEngagementBatchRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
+  });
   const evidenceService = createEvidenceService({
     repository: evidenceRepo,
     authority: postgresAuthority,
@@ -798,11 +856,21 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         const c = await contributionRepo.findById(subjectId);
         return c ? c.organizationScopeId : null;
       }
+      // NET-W017: canonical evidence records may bind to UGC
+      // production subjects (the submission evidence lineage — work
+      // order §3.4/AC-05).
+      if (subjectType === "ugc_production") {
+        const production = await ugcProductionRepo.findById(subjectId);
+        return production ? production.organizationScopeId : null;
+      }
       return null;
     },
     async exists(subjectType, subjectId) {
       if (subjectType === "opportunity") return opportunityRepo.exists(subjectId);
       if (subjectType === "contribution") return contributionRepo.exists(subjectId);
+      if (subjectType === "ugc_production") {
+        return (await ugcProductionRepo.findById(subjectId)) !== null;
+      }
       return false;
     },
   };
@@ -843,6 +911,7 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     contributionRepository: createLifecycleRepository(contributionRepo),
     proofOfValueRepository: createLifecycleRepository(proofOfValueRepo),
     outcomeMeasurementRepository: createLifecycleRepository(measuredOutcomeRepo),
+    engagementRepository: createLifecycleRepository(engagementRepo),
     authorizer: transitionAuthorizer,
     auditWriter,
     idempotency,
@@ -1896,6 +1965,124 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   });
 
   // ------------------------------------------------------------------
+  // NET-W017 — UGC workflow and rights (creator engagements).
+  //
+  // The engagement is a NEW canonical lifecycle subject kind: every
+  // state change routes through the SAME WorkflowService (the SOLE
+  // lifecycle authority — the Proof-of-Value/measured-outcome
+  // precedent; there is NO second lifecycle engine). The cross-domain
+  // reads (campaign status/policy, opportunity/contribution lineage,
+  // safety, evidence subject binding) are thin read-only adapters
+  // over the OWNING domains' wired repositories. Acceptance/production
+  // composes domain records + workflow transitions through the
+  // composition root. NO economic/reputation/risk/outcome mutation,
+  // NO AI path (work order §2).
+  // ------------------------------------------------------------------
+  const engagementCampaignLookup: EngagementCampaignLookup = {
+    async resolve(campaignId, policyVersion) {
+      // The campaign record (existence + tenant scope + the
+      // administrative status the tender precondition reads).
+      // /campaigns stays the campaign policy authority.
+      const campaign = await campaignRepo.findById(campaignId);
+      if (!campaign) return null;
+      let pinned: number | null = null;
+      if (policyVersion !== undefined) {
+        const policy = await campaignPolicyRepo.findVersion(
+          campaignId,
+          policyVersion,
+        );
+        if (!policy) return null;
+        pinned = policy.version;
+      } else {
+        const versions = await campaignPolicyRepo.listByCampaign(campaignId);
+        pinned =
+          versions.length > 0
+            ? versions.reduce((a, b) => (b.version > a.version ? b : a))
+                .version
+            : null;
+      }
+      return {
+        campaignId: campaign.id,
+        policyVersion: pinned,
+        organizationScopeId: campaign.organizationScopeId,
+        status: campaign.status,
+      };
+    },
+  };
+  const engagementOpportunityLookup: EngagementOpportunityLookup = {
+    async getOrganizationScope(opportunityId) {
+      const opp = await opportunityRepo.findById(opportunityId);
+      return opp ? opp.organizationScopeId : null;
+    },
+    async exists(opportunityId) {
+      return opportunityRepo.exists(opportunityId);
+    },
+  };
+  const engagementContributionLookup: EngagementContributionLookup = {
+    async getOrganizationScope(contributionId) {
+      const c = await contributionRepo.findById(contributionId);
+      return c ? c.organizationScopeId : null;
+    },
+    async exists(contributionId) {
+      return contributionRepo.exists(contributionId);
+    },
+  };
+  const engagementEvidenceLookup: ProductionEvidenceLookup = {
+    async resolve(evidenceId) {
+      // The canonical /evidence authority read: existence + tenant
+      // scope + subject binding. The UGC boundary only VALIDATES
+      // references through this view — it never fabricates evidence.
+      const evidence = await evidenceRepo.findById(evidenceId);
+      if (!evidence) return null;
+      return {
+        id: evidence.id,
+        organizationScopeId: evidence.organizationScopeId,
+        subjectType: evidence.subjectReference.subjectType,
+        subjectId: evidence.subjectReference.subjectId,
+      };
+    },
+  };
+  const creatorEngagementService = createCreatorEngagementService({
+    engagementRepository: engagementRepo,
+    acceptancePolicyRepository: creatorAcceptancePolicyRepo,
+    usageRightsRepository: usageRightsRepo,
+    productionRepository: ugcProductionRepo,
+    deliverableRepository: ugcDeliverableRepo,
+    submissionRepository: ugcSubmissionRepo,
+    batchRepository: engagementBatchRepo,
+    profileRepository: creatorProfileRepo,
+    versionRepository: creatorProfileVersionRepo,
+    runRepository: creatorMatchRunRepo,
+    lookups: {
+      campaign: engagementCampaignLookup,
+      opportunity: engagementOpportunityLookup,
+      contribution: engagementContributionLookup,
+      safety: creatorMatchSafetyLookup,
+      evidence: engagementEvidenceLookup,
+    },
+    workflow: {
+      // Delegate to the SAME workflow service instance (the
+      // /workflows boundary is the SOLE lifecycle authority for
+      // engagement transitions, exactly as for opportunities/
+      // contributions/proofs/measured outcomes). NET-W017 remediation:
+      // the composite commands execute the transition IN-TX through
+      // the sanctioned twin so the material record + the transition
+      // commit as ONE authoritative unit.
+      async requestTransitionWithinTx(request, execution, tx, idempotencyRecordId) {
+        return workflowService.requestTransitionWithinTx(
+          request,
+          execution,
+          tx,
+          idempotencyRecordId,
+        );
+      },
+    },
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("creators"),
+  });
+
+  // ------------------------------------------------------------------
   // NET-W012 helpful contributions wiring (Proof-of-Helpfulness).
   //
   // The helpfulness lookups are thin READ-ONLY adapters over the
@@ -2714,6 +2901,170 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       digest: run.digest,
       createdBy: run.createdBy,
       createdAt: run.createdAt,
+    };
+  }
+  // -- NET-W017 view builders (provenance-preserving) ------------------
+  function toEngagementView(engagement: Engagement) {
+    return {
+      id: engagement.id,
+      kind: engagement.kind,
+      state: engagement.state,
+      version: engagement.version,
+      organizationScopeId: engagement.organizationScopeId,
+      creatorPersonId: engagement.creatorPersonId,
+      creatorProfileId: engagement.creatorProfileId,
+      creatorProfileVersion: engagement.creatorProfileVersion,
+      campaignId: engagement.campaignId,
+      campaignPolicyVersion: engagement.campaignPolicyVersion,
+      matchRunId: engagement.matchRunId,
+      opportunityId: engagement.opportunityId,
+      requestedRights:
+        engagement.requestedRights as unknown as Record<string, unknown>,
+      compensation:
+        engagement.compensation as unknown as Record<string, unknown> | null,
+      brief: engagement.brief,
+      formatVersion: engagement.formatVersion,
+      executionId: engagement.executionId,
+      correlationId: engagement.correlationId,
+      causationId: engagement.causationId,
+      createdAt: engagement.createdAt,
+      updatedAt: engagement.updatedAt,
+    };
+  }
+  function toUsageRightsView(view: UsageRightsView) {
+    return {
+      grant: {
+        id: view.grant.id,
+        organizationScopeId: view.grant.organizationScopeId,
+        engagementId: view.grant.engagementId,
+        grantorPersonId: view.grant.grantorPersonId,
+        uses: view.grant.uses,
+        channels: view.grant.channels,
+        territories: view.grant.territories,
+        formats: view.grant.formats,
+        exclusions: view.grant.exclusions,
+        startsAt: view.grant.startsAt,
+        endsAt: view.grant.endsAt,
+        contentOwnership: view.grant.contentOwnership,
+        formatVersion: view.grant.formatVersion,
+        createdBy: view.grant.createdBy,
+        createdAt: view.grant.createdAt,
+        executionId: view.grant.executionId,
+        correlationId: view.grant.correlationId,
+        causationId: view.grant.causationId,
+      },
+      revocation: view.revocation
+        ? {
+            id: view.revocation.id,
+            grantId: view.revocation.grantId,
+            revokedBy: view.revocation.revokedBy,
+            reason: view.revocation.reason,
+            revokedAt: view.revocation.revokedAt,
+            effectiveAt: view.revocation.effectiveAt,
+          }
+        : null,
+      effectiveStatus: view.effectiveStatus,
+      viewedAsOf: view.viewedAsOf,
+    };
+  }
+  function toUgcProductionView(production: UgcProduction) {
+    return {
+      id: production.id,
+      organizationScopeId: production.organizationScopeId,
+      engagementId: production.engagementId,
+      creatorPersonId: production.creatorPersonId,
+      creatorProfileId: production.creatorProfileId,
+      campaignId: production.campaignId,
+      campaignPolicyVersion: production.campaignPolicyVersion,
+      matchRunId: production.matchRunId,
+      opportunityId: production.opportunityId,
+      contributionId: production.contributionId,
+      formatVersion: production.formatVersion,
+      createdBy: production.createdBy,
+      openedAt: production.openedAt,
+      executionId: production.executionId,
+      correlationId: production.correlationId,
+      causationId: production.causationId,
+    };
+  }
+  function toUgcDeliverableView(deliverable: UgcDeliverableVersion) {
+    return {
+      id: deliverable.id,
+      organizationScopeId: deliverable.organizationScopeId,
+      productionId: deliverable.productionId,
+      deliverableKey: deliverable.deliverableKey,
+      version: deliverable.version,
+      format: deliverable.format,
+      title: deliverable.title,
+      contentReference: deliverable.contentReference,
+      externalPlatform: deliverable.externalPlatform,
+      notes: deliverable.notes,
+      createdBy: deliverable.createdBy,
+      createdAt: deliverable.createdAt,
+      executionId: deliverable.executionId,
+      correlationId: deliverable.correlationId,
+      causationId: deliverable.causationId,
+    };
+  }
+  function toUgcSubmissionView(submission: UgcSubmission) {
+    return {
+      id: submission.id,
+      organizationScopeId: submission.organizationScopeId,
+      productionId: submission.productionId,
+      engagementId: submission.engagementId,
+      deliverableCount: submission.deliverableCount,
+      evidenceReferences: submission.evidenceReferences,
+      createdBy: submission.createdBy,
+      submittedAt: submission.submittedAt,
+      executionId: submission.executionId,
+      correlationId: submission.correlationId,
+      causationId: submission.causationId,
+    };
+  }
+  function toEngagementBatchView(
+    batch: EngagementBatchRecord,
+    journalOutcomes?: readonly EngagementBatchOutcomeRecord[],
+  ) {
+    return {
+      id: batch.id,
+      organizationScopeId: batch.organizationScopeId,
+      matchRunId: batch.matchRunId,
+      campaignId: batch.campaignId,
+      campaignPolicyVersion: batch.campaignPolicyVersion,
+      candidateCount: batch.candidateCount,
+      status: batch.status,
+      // COMPLETED carries the finalized snapshot; RUNNING/ABORTED
+      // expose the LIVE journal (accurate partial execution — the
+      // NET-W017 remediation requirement).
+      outcomes:
+        batch.status === "COMPLETED"
+          ? batch.outcomes
+          : (journalOutcomes ?? []).map((row) => row.outcome),
+      createdBy: batch.createdBy,
+      createdAt: batch.createdAt,
+      completedAt: batch.completedAt,
+      abortedAt: batch.abortedAt,
+      abortedReason: batch.abortedReason,
+      executionId: batch.executionId,
+      correlationId: batch.correlationId,
+      causationId: batch.causationId,
+    };
+  }
+  function toAcceptancePolicyView(
+    policy: CreatorAcceptancePolicyRecord,
+  ) {
+    return {
+      id: policy.id,
+      organizationScopeId: policy.organizationScopeId,
+      creatorPersonId: policy.creatorPersonId,
+      version: policy.version,
+      mode: policy.mode,
+      maxActiveEngagements: policy.maxActiveEngagements,
+      rateFloor: policy.rateFloor,
+      autoGrantableRights: policy.autoGrantableRights,
+      maxGrantDurationDays: policy.maxGrantDurationDays,
+      createdBy: policy.createdBy,
+      createdAt: policy.createdAt,
     };
   }
   function toHelpfulnessPolicyView(
@@ -5328,6 +5679,249 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return runs.map(toCreatorMatchRunView);
     },
 
+    // -- NET-W017 engagement/UGC commands --------------------------------
+    // The engagement lifecycle is the canonical /workflows authority;
+    // these commands compose domain records + workflow transitions.
+    // NO economic/reputation/risk/outcome mutation, NO AI path.
+
+    async createEngagement(execution, _actorPersonId, input) {
+      const result = await creatorEngagementService.createEngagement(
+        execution,
+        input as unknown as import("../creators/port.ts").CreateEngagementInput,
+      );
+      return {
+        engagement: toEngagementView(result.engagement),
+        created: result.created,
+      };
+    },
+
+    async createEngagementsFromMatch(execution, _actorPersonId, input) {
+      const result = await creatorEngagementService.createEngagementsFromMatch(
+        execution,
+        input as unknown as import("../creators/port.ts").CreateEngagementsFromMatchInput,
+      );
+      // RUNNING/ABORTED batches expose the LIVE journal (accurate
+      // partial execution) — read it for the view.
+      const journal =
+        result.batch.status === "COMPLETED"
+          ? []
+          : await engagementBatchRepo.listOutcomes(result.batch.id);
+      return {
+        batch: toEngagementBatchView(result.batch, journal),
+        created: result.created,
+      };
+    },
+
+    async acceptEngagement(execution, _actorPersonId, input) {
+      const result = await creatorEngagementService.acceptEngagement(
+        execution,
+        input as unknown as import("../creators/port.ts").AcceptEngagementInput,
+      );
+      return {
+        engagement: toEngagementView(result.engagement),
+        grant: toUsageRightsView({
+          grant: result.grant,
+          revocation: null,
+          effectiveStatus: "ACTIVE",
+          viewedAsOf: result.grant.createdAt,
+        }).grant,
+        transition: {
+          executed: result.transition.executed,
+          transitionId: result.transition.transitionId,
+          auditEventName: result.transition.auditEventName,
+          transactionId: result.transition.transactionId,
+          fromState: "READY",
+          toState: "ASSIGNED",
+        },
+      };
+    },
+
+    async autoAcceptEngagement(execution, _actorPersonId, input) {
+      const result = await creatorEngagementService.autoAcceptEngagement(
+        execution,
+        input as unknown as import("../creators/port.ts").AutoAcceptEngagementInput,
+      );
+      return {
+        accepted: result.accepted,
+        evaluation: result.evaluation,
+        engagement: toEngagementView(result.engagement),
+        grant: result.grant
+          ? toUsageRightsView({
+              grant: result.grant,
+              revocation: null,
+              effectiveStatus: "ACTIVE",
+              viewedAsOf: result.grant.createdAt,
+            }).grant
+          : null,
+        transition: result.transition
+          ? {
+              executed: result.transition.executed,
+              transitionId: result.transition.transitionId,
+              auditEventName: result.transition.auditEventName,
+              transactionId: result.transition.transactionId,
+              fromState: "READY",
+              toState: "ASSIGNED",
+            }
+          : null,
+      };
+    },
+
+    async revokeUsageRights(execution, _actorPersonId, input) {
+      const result = await creatorEngagementService.revokeUsageRights(
+        execution,
+        input as unknown as import("../creators/port.ts").RevokeUsageRightsInput,
+      );
+      return {
+        ...toUsageRightsView(result.view),
+        created: result.created,
+      };
+    },
+
+    async setCreatorAcceptancePolicy(execution, _actorPersonId, input) {
+      const result = await creatorEngagementService.setAcceptancePolicy(
+        execution,
+        input as unknown as import("../creators/port.ts").SetAcceptancePolicyInput,
+      );
+      return {
+        policy: toAcceptancePolicyView(result.policy),
+        created: result.created,
+      };
+    },
+
+    async openUgcProduction(execution, _actorPersonId, input) {
+      const result = await creatorEngagementService.openProduction(
+        execution,
+        input as unknown as import("../creators/port.ts").OpenProductionInput,
+      );
+      return {
+        production: toUgcProductionView(result.production),
+        transition: {
+          executed: result.transition.executed,
+          transitionId: result.transition.transitionId,
+          auditEventName: result.transition.auditEventName,
+          transactionId: result.transition.transactionId,
+          fromState: "ASSIGNED",
+          toState: "IN_PROGRESS",
+        },
+      };
+    },
+
+    async recordUgcDeliverable(execution, _actorPersonId, input) {
+      const result = await creatorEngagementService.recordDeliverable(
+        execution,
+        input as unknown as import("../creators/port.ts").RecordDeliverableInput,
+      );
+      return {
+        deliverable: toUgcDeliverableView(result.deliverable),
+        created: result.created,
+      };
+    },
+
+    async submitUgcProduction(execution, _actorPersonId, input) {
+      const result = await creatorEngagementService.submitProduction(
+        execution,
+        input as unknown as import("../creators/port.ts").SubmitProductionInput,
+      );
+      return {
+        submission: toUgcSubmissionView(result.submission),
+        transition: {
+          executed: result.transition.executed,
+          transitionId: result.transition.transitionId,
+          auditEventName: result.transition.auditEventName,
+          transactionId: result.transition.transactionId,
+          fromState: "IN_PROGRESS",
+          toState: "SUBMITTED",
+        },
+      };
+    },
+
+    async getEngagement(execution, organizationScopeId, id) {
+      const engagement = await creatorEngagementService.getEngagement(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        id,
+      );
+      return toEngagementView(engagement);
+    },
+
+    async listEngagements(execution, organizationScopeId, campaignId, creatorPersonId) {
+      const engagements = await creatorEngagementService.listEngagements(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        campaignId !== undefined || creatorPersonId !== undefined
+          ? {
+              ...(campaignId !== undefined ? { campaignId } : {}),
+              ...(creatorPersonId !== undefined ? { creatorPersonId } : {}),
+            }
+          : undefined,
+      );
+      return engagements.map(toEngagementView);
+    },
+
+    async getCreatorAcceptancePolicy(execution, organizationScopeId, creatorPersonId) {
+      const policy = await creatorEngagementService.getAcceptancePolicy(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        creatorPersonId,
+      );
+      return policy ? toAcceptancePolicyView(policy) : null;
+    },
+
+    async getUsageRights(execution, organizationScopeId, grantId, asOf) {
+      const view = await creatorEngagementService.getUsageRights(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        grantId,
+        asOf ?? null,
+      );
+      return toUsageRightsView(view);
+    },
+
+    async listUsageRights(execution, organizationScopeId, engagementId) {
+      const views = await creatorEngagementService.listUsageRights(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        engagementId,
+      );
+      return views.map(toUsageRightsView);
+    },
+
+    async getUgcProduction(execution, organizationScopeId, id) {
+      const production = await creatorEngagementService.getProduction(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        id,
+      );
+      return toUgcProductionView(production);
+    },
+
+    async listUgcProductions(execution, organizationScopeId, engagementId) {
+      const productions = await creatorEngagementService.listProductions(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        engagementId,
+      );
+      return productions.map(toUgcProductionView);
+    },
+
+    async listUgcDeliverables(execution, organizationScopeId, productionId) {
+      const deliverables = await creatorEngagementService.listDeliverables(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        productionId,
+      );
+      return deliverables.map(toUgcDeliverableView);
+    },
+
+    async listUgcSubmissions(execution, organizationScopeId, productionId) {
+      const submissions = await creatorEngagementService.listSubmissions(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        productionId,
+      );
+      return submissions.map(toUgcSubmissionView);
+    },
+
     // -- NET-W012 helpful-contribution commands -------------------------
     async defineHelpfulnessPolicy(execution, _actorPersonId, input) {
       const result = await helpfulnessService.defineHelpfulnessPolicy(
@@ -6488,6 +7082,8 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     creatorService,
     // NET-W016 creator matching (deterministic eligibility + ranking).
     creatorMatchingService,
+    // NET-W017 UGC workflow and rights (creator engagements).
+    creatorEngagementService,
     helpfulnessService,
     // NET-W013 quality/moderation/anti-spam services + LLM providers.
     qualityService,

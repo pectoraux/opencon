@@ -5,3 +5,6 @@ export * from "./matching-service.ts";
 export * from "./authority-creator-repository.ts";
 export * from "./authority-match-run-repository.ts";
 export * from "./module.ts";
+export * from "./engagement-engine.ts";
+export * from "./engagement-service.ts";
+export * from "./authority-engagement-repositories.ts";
