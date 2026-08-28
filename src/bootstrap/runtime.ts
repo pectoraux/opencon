@@ -319,6 +319,19 @@ import type {
   CampaignDisclosurePolicyLookup,
   SponsorshipWorkflowPort,
 } from "../creators/port.ts";
+// NET-W019 inventory (supply registration + placement context).
+import {
+  createAuthorityInventoryItemRepository,
+  createAuthorityPlacementRepository,
+} from "../inventory/authority-inventory-repositories.ts";
+import { createInventoryService } from "../inventory/inventory-service.ts";
+import type {
+  InventoryCampaignLookup,
+  InventoryEvidenceLookup,
+  InventoryItem,
+  InventoryService,
+  PlacementRecord,
+} from "../inventory/port.ts";
 import type {
   ActivateRiskControlInput,
   AppealDisputeInput,
@@ -508,6 +521,8 @@ export interface Runtime {
   readonly creatorMatchingService: CreatorMatchingService;
   readonly creatorEngagementService: CreatorEngagementService;
   readonly creatorSponsorshipService: CreatorSponsorshipService;
+  // NET-W019 inventory (supply registration + placement context) service.
+  readonly inventoryService: InventoryService;
   // NET-W012 helpful contributions (Proof-of-Helpfulness) service.
   readonly helpfulnessService: HelpfulnessService;
   // NET-W013 quality/moderation/anti-spam services.
@@ -829,6 +844,19 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     authority: postgresAuthority,
     logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
   });
+  // NET-W019 inventory repositories (PostgresAuthority-backed,
+  // append-only collections). Created here — before the evidence
+  // subject lookup — so canonical evidence records can bind to
+  // "inventory_item" subjects (the INV-003 supply-verification
+  // signal, validated through the lookup below).
+  const inventoryItemRepo = createAuthorityInventoryItemRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("inventory").debug(m, f) },
+  });
+  const inventoryPlacementRepo = createAuthorityPlacementRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("inventory").debug(m, f) },
+  });
   const evidenceService = createEvidenceService({
     repository: evidenceRepo,
     authority: postgresAuthority,
@@ -902,6 +930,13 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         const publication = await publicationRepo.findById(subjectId);
         return publication ? publication.organizationScopeId : null;
       }
+      // NET-W019: canonical evidence records may bind to INVENTORY
+      // ITEM subjects (the INV-003 supply-verification signal — work
+      // order §3.2).
+      if (subjectType === "inventory_item") {
+        const item = await inventoryItemRepo.findById(subjectId);
+        return item ? item.organizationScopeId : null;
+      }
       return null;
     },
     async exists(subjectType, subjectId) {
@@ -912,6 +947,9 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       }
       if (subjectType === "publication") {
         return (await publicationRepo.findById(subjectId)) !== null;
+      }
+      if (subjectType === "inventory_item") {
+        return (await inventoryItemRepo.findById(subjectId)) !== null;
       }
       return false;
     },
@@ -2229,6 +2267,84 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   });
 
   // ------------------------------------------------------------------
+  // NET-W019 — Inventory and placements (supply registration,
+  // placement context, supply authorization, source provenance).
+  //
+  // The inventory boundary (one of the SIXTEEN frozen core domains —
+  // NO 17th domain) owns supply registration + placement context.
+  // The campaign policy scope (status + pinned-or-latest version +
+  // the version's ELIGIBILITY RULES) arrives through a thin READ-ONLY
+  // adapter over the campaigns boundary's repositories (the same
+  // dependency-inversion pattern); the supply-verification evidence
+  // reference validates through the same neutral evidence lookup
+  // pattern. Items and placements carry NO lifecycle subject kind —
+  // /workflows stays untouched (withdrawal/retirement are one-way
+  // field mutations, the W018 termination precedent). NO economic/
+  // reputation/risk/outcome mutation, NO AI path (work order §2).
+  // ------------------------------------------------------------------
+  const inventoryCampaignLookup: InventoryCampaignLookup = {
+    async resolvePolicy(campaignId, policyVersion) {
+      // /campaigns stays the campaign policy authority: resolve the
+      // campaign (existence + tenant scope + administrative status),
+      // then the pinned-or-latest policy version's ELIGIBILITY
+      // section. A campaign with no policy versions resolves to null
+      // (nothing to scope a placement to).
+      const campaign = await campaignRepo.findById(campaignId);
+      if (!campaign) return null;
+      let policy: import("../campaigns/port.ts").CampaignPolicy | null = null;
+      if (policyVersion !== undefined) {
+        policy = await campaignPolicyRepo.findVersion(campaignId, policyVersion);
+        if (!policy) return null;
+      } else {
+        const versions = await campaignPolicyRepo.listByCampaign(campaignId);
+        policy =
+          versions.length > 0
+            ? versions.reduce((a, b) => (b.version > a.version ? b : a))
+            : null;
+        if (!policy) return null;
+      }
+      return {
+        campaignId: campaign.id,
+        organizationScopeId: campaign.organizationScopeId,
+        campaignStatus: campaign.status,
+        policyVersion: policy.version,
+        eligibilityRules: policy.eligibility.rules.map((rule) => ({
+          attribute: rule.attribute,
+          operator: rule.operator,
+          values: [...rule.values],
+        })),
+      };
+    },
+  };
+  const inventoryEvidenceLookup: InventoryEvidenceLookup = {
+    async resolve(evidenceId) {
+      // The canonical /evidence authority read: existence + tenant
+      // scope + subject binding. The inventory boundary only
+      // VALIDATES references through this view — it never fabricates
+      // supply proof (the INV-003 ecosystem signal).
+      const evidence = await evidenceRepo.findById(evidenceId);
+      if (!evidence) return null;
+      return {
+        id: evidence.id,
+        organizationScopeId: evidence.organizationScopeId,
+        subjectType: evidence.subjectReference.subjectType,
+        subjectId: evidence.subjectReference.subjectId,
+      };
+    },
+  };
+  const inventoryService = createInventoryService({
+    itemRepository: inventoryItemRepo,
+    placementRepository: inventoryPlacementRepo,
+    lookups: {
+      campaign: inventoryCampaignLookup,
+      evidence: inventoryEvidenceLookup,
+    },
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("inventory"),
+  });
+
+  // ------------------------------------------------------------------
   // NET-W012 helpful contributions wiring (Proof-of-Helpfulness).
   //
   // The helpfulness lookups are thin READ-ONLY adapters over the
@@ -3288,6 +3404,85 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       })),
       satisfied: status.satisfied,
       evaluatedAt: status.evaluatedAt,
+    };
+  }
+  function toInventoryItemView(item: InventoryItem) {
+    return {
+      id: item.id,
+      organizationScopeId: item.organizationScopeId,
+      // EXPLICIT registered ownership (INV-001 — the acting person at
+      // registration; never caller-asserted).
+      ownerPersonId: item.ownerPersonId,
+      surfaceKind: item.surfaceKind,
+      format: item.format,
+      // PROVIDER-NEUTRAL external reference (AC-05 — no credentials).
+      externalReference: item.externalReference,
+      attributes: item.attributes,
+      description: item.description,
+      // The INV-003 ecosystem provenance signal (canonical evidence,
+      // subject-bound to this item; null when unavailable).
+      verificationEvidenceReference: item.verificationEvidenceReference,
+      retiredAt: item.retiredAt,
+      retirementReason: item.retirementReason,
+      formatVersion: item.formatVersion,
+      createdBy: item.createdBy,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+      executionId: item.executionId,
+      correlationId: item.correlationId,
+      causationId: item.causationId,
+    };
+  }
+  function toPlacementView(placement: PlacementRecord) {
+    return {
+      id: placement.id,
+      organizationScopeId: placement.organizationScopeId,
+      inventoryItemId: placement.inventoryItemId,
+      campaignId: placement.campaignId,
+      campaignPolicyVersion: placement.campaignPolicyVersion,
+      context: placement.context,
+      // The server-written provenance snapshot (INV-002 source
+      // identity — no caller input exists for any field).
+      sourceContext: placement.sourceContext,
+      // The DERIVED eligibility snapshot (INV-002 — deterministic;
+      // re-derived live by the settlement-readiness view).
+      eligibility: {
+        eligible: placement.eligibility.eligible,
+        ruleResults: placement.eligibility.ruleResults.map((r) => ({
+          attribute: r.attribute,
+          operator: r.operator,
+          values: r.values,
+          satisfied: r.satisfied,
+          reason: r.reason,
+        })),
+        evaluatedAt: placement.eligibility.evaluatedAt,
+      },
+      retiredAt: placement.retiredAt,
+      retirementReason: placement.retirementReason,
+      formatVersion: placement.formatVersion,
+      createdBy: placement.createdBy,
+      createdAt: placement.createdAt,
+      updatedAt: placement.updatedAt,
+      executionId: placement.executionId,
+      correlationId: placement.correlationId,
+      causationId: placement.causationId,
+    };
+  }
+  function toPlacementSettlementReadinessView(
+    readiness: import("../inventory/port.ts").PlacementSettlementReadiness,
+  ) {
+    return {
+      placementId: readiness.placementId,
+      organizationScopeId: readiness.organizationScopeId,
+      eligible: readiness.eligible,
+      checks: readiness.checks.map((check) => ({
+        check: check.check,
+        satisfied: check.satisfied,
+        detail: check.detail,
+      })),
+      sourceContext: readiness.sourceContext,
+      verificationEvidenceReference: readiness.verificationEvidenceReference,
+      evaluatedAt: readiness.evaluatedAt,
     };
   }
   function toHelpfulnessPolicyView(
@@ -6302,6 +6497,130 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return toPublicationDisclosureStatusView(status);
     },
 
+    // -- NET-W019 inventory/placement commands ---------------------------
+    // Supply registration + placement context. Items and placements
+    // carry NO lifecycle subject kind (/workflows untouched); the
+    // settlement gate is the DERIVED readiness view (no economic
+    // command exists — /settlement stays the economic authority).
+    async registerInventoryItem(execution, _actorPersonId, input) {
+      const result = await inventoryService.registerInventoryItem(
+        execution,
+        input as unknown as import("../inventory/port.ts").RegisterInventoryItemInput,
+      );
+      return {
+        item: toInventoryItemView(result.item),
+        created: result.created,
+      };
+    },
+
+    async retireInventoryItem(execution, _actorPersonId, input) {
+      const item = await inventoryService.retireInventoryItem(
+        execution,
+        input as unknown as import("../inventory/port.ts").RetireInventoryItemInput,
+      );
+      return toInventoryItemView(item);
+    },
+
+    async attachSupplyVerification(execution, _actorPersonId, input) {
+      const item = await inventoryService.attachSupplyVerification(
+        execution,
+        input as unknown as import("../inventory/port.ts").AttachSupplyVerificationInput,
+      );
+      return toInventoryItemView(item);
+    },
+
+    async createPlacement(execution, _actorPersonId, input) {
+      const result = await inventoryService.createPlacement(
+        execution,
+        input as unknown as import("../inventory/port.ts").CreatePlacementInput,
+      );
+      return {
+        placement: toPlacementView(result.placement),
+        created: result.created,
+      };
+    },
+
+    async retirePlacement(execution, _actorPersonId, input) {
+      const placement = await inventoryService.retirePlacement(
+        execution,
+        input as unknown as import("../inventory/port.ts").RetirePlacementInput,
+      );
+      return toPlacementView(placement);
+    },
+
+    async getInventoryItem(execution, organizationScopeId, itemId) {
+      const item = await inventoryService.getInventoryItem(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        itemId,
+      );
+      return toInventoryItemView(item);
+    },
+
+    async listInventoryItems(
+      execution,
+      organizationScopeId,
+      surfaceKind,
+      format,
+      ownerPersonId,
+      retired,
+    ) {
+      const items = await inventoryService.listInventoryItems(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        {
+          ...(surfaceKind !== undefined ? { surfaceKind } : {}),
+          ...(format !== undefined ? { format } : {}),
+          ...(ownerPersonId !== undefined ? { ownerPersonId } : {}),
+          ...(retired !== undefined ? { retired } : {}),
+        },
+      );
+      return items.map(toInventoryItemView);
+    },
+
+    async getPlacement(execution, organizationScopeId, placementId) {
+      const placement = await inventoryService.getPlacement(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        placementId,
+      );
+      return toPlacementView(placement);
+    },
+
+    async listPlacements(
+      execution,
+      organizationScopeId,
+      inventoryItemId,
+      campaignId,
+      ownerPersonId,
+      retired,
+    ) {
+      const placements = await inventoryService.listPlacements(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        {
+          ...(inventoryItemId !== undefined ? { inventoryItemId } : {}),
+          ...(campaignId !== undefined ? { campaignId } : {}),
+          ...(ownerPersonId !== undefined ? { ownerPersonId } : {}),
+          ...(retired !== undefined ? { retired } : {}),
+        },
+      );
+      return placements.map(toPlacementView);
+    },
+
+    async getPlacementSettlementReadiness(
+      execution,
+      organizationScopeId,
+      placementId,
+    ) {
+      const readiness = await inventoryService.getPlacementSettlementReadiness(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        placementId,
+      );
+      return toPlacementSettlementReadinessView(readiness);
+    },
+
     // -- NET-W012 helpful-contribution commands -------------------------
     async defineHelpfulnessPolicy(execution, _actorPersonId, input) {
       const result = await helpfulnessService.defineHelpfulnessPolicy(
@@ -7465,6 +7784,8 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     // NET-W017 UGC workflow and rights (creator engagements).
     creatorEngagementService,
     creatorSponsorshipService,
+    // NET-W019 inventory (supply registration + placement context).
+    inventoryService,
     helpfulnessService,
     // NET-W013 quality/moderation/anti-spam services + LLM providers.
     qualityService,

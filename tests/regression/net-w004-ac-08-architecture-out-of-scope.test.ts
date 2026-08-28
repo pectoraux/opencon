@@ -72,7 +72,7 @@ const NET_W004_DOMAINS = ["opportunities", "contributions", "workflows"];
 // behaviour — is preserved (the creator domain arrives only with the
 // NET-W015 work item + its own AC-07 regression).
 const DEFERRED_DOMAINS = [
-  "inventory", "demand", "benefits",
+  "demand", "benefits",
 ];
 
 async function listTsFiles(dir: string, out: string[] = []): Promise<string[]> {

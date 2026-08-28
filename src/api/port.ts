@@ -2667,6 +2667,124 @@ export interface ApiCommands {
   ): Promise<Record<string, unknown>>;
 
   // -----------------------------------------------------------------
+  // NET-W019 — Inventory and placements (supply registration,
+  // placement context, supply authorization, source provenance).
+  // Items and placements carry NO lifecycle subject kind (/workflows
+  // untouched); the settlement gate is the DERIVED readiness view
+  // (no economic command exists — /settlement stays the economic
+  // authority).
+  // -----------------------------------------------------------------
+
+  /**
+   * Register supply (protected; guard action
+   * `inventory.items.register`): the acting person BECOMES the
+   * registered owner (there is no ownerPersonId input — ownership
+   * cannot be fabricated by client claims).
+   */
+  registerInventoryItem(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ item: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Withdraw supply (protected; guard action
+   * `inventory.items.retire`; owner-only): one-way; a retired item's
+   * placements are never settlement-ready (derived).
+   */
+  retireInventoryItem(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * Attach the supply-verification evidence reference (protected;
+   * guard action `inventory.items.attachSupplyVerification`;
+   * owner-only, one-time): the reference must resolve to a canonical
+   * /evidence record subject-bound to THIS item.
+   */
+  attachSupplyVerification(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * Record the placement context (protected; guard action
+   * `inventory.placements.create`; the acting person must be the
+   * item's registered owner — server-enforced): policy-scoped
+   * (campaign + pinned-or-latest policy version through the neutral
+   * lookup), provenance-aware (the server-written source-context
+   * snapshot) with the DERIVED eligibility evaluation. ONE active
+   * placement per (item, campaign) — a stable conflict otherwise.
+   */
+  createPlacement(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ placement: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Retire the placement (protected; guard action
+   * `inventory.placements.retire`; owner-only): one-way.
+   */
+  retirePlacement(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /** Fetch one inventory item (public read; tenant-scoped). */
+  getInventoryItem(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    itemId: string,
+  ): Promise<Record<string, unknown>>;
+
+  /** List an org's inventory items (public read). */
+  listInventoryItems(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    surfaceKind?: string,
+    format?: string,
+    ownerPersonId?: string,
+    retired?: boolean,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /** Fetch one placement (public read; tenant-scoped). */
+  getPlacement(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    placementId: string,
+  ): Promise<Record<string, unknown>>;
+
+  /** List an org's placements (public read). */
+  listPlacements(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    inventoryItemId?: string,
+    campaignId?: string,
+    ownerPersonId?: string,
+    retired?: boolean,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /**
+   * THE SETTLEMENT GATE (public read): the DERIVED settlement
+   * readiness of a placement — the validated source context a
+   * settlement-affecting consumer must require (registered owner +
+   * available supply + resolved publishable policy scope + satisfied
+   * eligibility), re-derived from CURRENT durable records on every
+   * read. There is NO command that asserts, stores or waives
+   * readiness.
+   */
+  getPlacementSettlementReadiness(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    placementId: string,
+  ): Promise<Record<string, unknown>>;
+
+  // -----------------------------------------------------------------
   // NET-W012 — helpful contributions (Proof-of-Helpfulness).
   // -----------------------------------------------------------------
 
