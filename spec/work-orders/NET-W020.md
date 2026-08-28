@@ -199,7 +199,7 @@ trace (every applicable check, deterministic `reason` codes):
   - `getCrossPromotionClearing` / `listCrossPromotionClearings` —
     tenant-scoped reads.
 
-### §3.4 The execution composite (composition-root apiCommand)
+### §3.4 The execution composite (the atomic clearing operation — §3.4a)
 
 `executeCrossPromotionClearing` (input: `{sourceContributionId,
 targetPlacementId, valueRecordId, clearingRuleId?, creditsPerValueUnit?,
@@ -209,32 +209,106 @@ idempotencyKey}`):
 1. The VALUE RECORD anchors the tenant scope (the economic authority's own
    record); the contribution, placement and campaign must all resolve
    same-scope (cross-tenant → fail closed BEFORE any status logic).
-2. Advisory pair mutex over the whole composite (§3.3) — concurrent
+2. Advisory pair mutex over the whole operation (§3.3) — concurrent
    same-pair attempts serialize; the pre-flight pair check fails a second
    DIFFERENT-key attempt BEFORE any economic mutation, while a SAME-key
-   replay is tolerated (the existing record was committed under this
-   caller's own compound key `{key}:record`, so every chained step
-   replays identically — idempotent, no new value).
-3. Pre-flight eligibility: the derived evaluation must be `eligible` (§3.2)
-   PLUS the hard gates `refuseWhenGated`/`refuseWhenDisputed` over
+   replay returns the committed composite result verbatim
+   (`created:false`).
+3. Pre-flight (fast-fail, committed reads): hard gates with the uniform
+   `RISK_CONTROL`/`DISPUTE_CHALLENGE` codes over
    `[value.id, ...value.sources[].id, placementId]` with the value
-   beneficiary and the placement owner as person subjects (the W014 source-
-   scoped discipline + the placement source context).
-4. The draw — the EXISTING settlement primitive selected by the rule's
-   `drawKind` (reward_allocation / credit_issuance / cash_obligation), keyed
-   `{idempotencyKey}:draw`, capped by `rule.maxDrawAmount` (the W014
-   branches verbatim).
-5. `recordCrossPromotionClearing` keyed `{idempotencyKey}:record` (the
-   in-tx re-derivation is the authoritative backstop).
-6. `campaignService.recordClearingExecution` keyed
-   `{idempotencyKey}:campaign` — the REUSED W014 bookkeeping event.
+   beneficiary and the placement owner as person subjects (the W014
+   source-scoped discipline + the placement source context), then the
+   derived evaluation must be `eligible` (§3.2).
+4. THE SINGLE AUTHORITATIVE TRANSACTION (§3.4a): the campaign
+   bookkeeping lock + the economic account locks (the exact set the
+   selected draw primitive's standalone form would acquire; the reward
+   policy version is PINNED so the locked and posted accounts are always
+   the same set) are held across ONE `IdempotencyStore.applyIdempotent`
+   under the composite key
+   `cross_promotion_clearing_execute:{org}:{contribution}:{placement}:{key}`
+   whose ONE `AuthorityTransaction` executes, in order:
+   - the in-tx fresh value read (TOCTOU closure);
+   - the in-tx hard gates (the authoritative pass, uniform codes);
+   - the in-tx eligibility re-derivation (the authoritative pre-draw bar)
+     + the rule/policy drift refusal;
+   - THE DRAW — the same-domain `...WithinTx` primitive selected by the
+     rule's `drawKind` (posting + allocation/issuance/obligation record +
+     exactly-once value consumption), staged on THIS transaction;
+   - the clearing record (`recordCrossPromotionClearingWithinTx`:
+     re-derives eligibility with the post-draw CONSUMED tolerance,
+     verifies the STAGED draw result in-tx, the create-once pair
+     backstop, the audit lineage);
+   - the campaign clearing bookkeeping (`recordClearingExecutionWithinTx`
+     through the neutral port — the event append + audit lineage);
+   - COMMIT — everything durable together, or NOTHING.
+5. The composition-root apiCommand is the THIN adapter: input coercion +
+   the view mapping over the committed composite result.
 
-**Replay-safety/recovery (AC-07)**: each step is independently idempotent
-under its compound key; an authoritative commit failure at ANY step leaves
-no duplicated value on replay (the W014 chain discipline) — a consuming draw
-replays the identical allocation/issuance; the record/bookkeeping steps
-replay identically. The fault-injection test proves the converge-on-replay
-property end-to-end.
+### §3.4a THE SINGLE AUTHORITATIVE TRANSACTION (the PR #40 remediation decision of record)
+
+The architect review of PR #40 (CHANGES REQUESTED) found the original
+composite chained FOUR separately-committed transactions (the draw's own
+`applyIdempotent`, then the record's, then the campaign bookkeeping's), so
+a failure after the draw's commit could leave a committed economic
+mutation without its clearing record — precisely a PARTIAL ECONOMIC
+MUTATION, violating AC-07's "authoritative commit failure leaves no
+partial economic mutation". The remediation (this section):
+
+- **ONE transaction boundary.** The whole clearing operation — qualify →
+  risk/dispute gate → draw → clearing record → campaign bookkeeping — is
+  ONE exactly-once economic unit in ONE authoritative transaction (the
+  architect's preferred shape verbatim). The composite moved INTO the
+  settlement domain (`CrossPromotionClearingService.executeCrossPromotionClearing`),
+  making it a settlement-authority transaction API over the same-domain
+  `...WithinTx` draw primitives
+  (`allocateRewardsWithinTx`/`issueCreditsWithinTx`/`recordCashObligationWithinTx`)
+  — the composition root never calls the transaction-owning draw commands
+  from the clearing composite (structurally pinned by the AC-08
+  regression).
+- **No compensating reversals.** A committed economic mutation followed by
+  a compensating mutation is NOT the same atomic boundary; the remediation
+  contains NO compensating-reversal machinery — the transaction either
+  commits whole or rolls back whole.
+- **Campaign bookkeeping participates in the SAME transaction** (the
+  review's "former" option): the campaigns domain exposes
+  `recordClearingExecutionWithinTx` (the same bookkeeping body on the
+  caller's transaction) through the neutral `ClearingCampaignBookkeepingPort`;
+  the composite holds the campaign record's own serialization key
+  (`campaign_record:{id}`) ACROSS the transaction (the campaign save is
+  last-write-wins; the standalone bookkeeping command serializes on the
+  same key).
+- **Exactly-once.** ONE idempotency record (the composite key) covers the
+  whole unit: a same-key retry replays the committed composite result
+  verbatim; a crash (or an injected COMMIT failure) leaves NO state — the
+  retry re-executes the whole unit. The pre-remediation compound
+  step keys (`{key}:draw`/`{key}:record`/`{key}:campaign`) and the
+  mid-chain crash window they created are ELIMINATED (a value consumed by
+  a DIRECT primitive draw now fails the composite closed — the primitive
+  is the exactly-once consumption authority; the composite never adopts a
+  foreign draw).
+- **Required regression (the review's exact scenario).** AC-07's
+  composite-level fault injection runs the ACTUAL end-to-end operation
+  against a COMMIT-FAILING authority (the economic draw fully staged
+  inside the transaction) and asserts — simultaneously — no clearing
+  record, no reward allocation, no economic ledger entries, no campaign
+  clearing bookkeeping event, no clearing audit event, no idempotency
+  record, the value in its pre-clearing state, and the same-key retry
+  succeeding exactly once; plus the successful-path SAME-LINEAGE assertion
+  (the clearing record, the economic draw, the campaign bookkeeping and
+  every audit event reference ONE transaction id and ONE idempotency
+  record).
+- **Lock ordering** (deadlock freedom): pair mutex → campaign bookkeeping
+  lock → economic account locks (ascending account id) → the composite
+  per-key mutex. The standalone primitives take economic locks → their own
+  key mutex (never the pair/campaign locks); the standalone bookkeeping
+  takes the campaign lock → its own key mutex (never the account locks) —
+  no cycle exists.
+
+**Replay-safety/recovery (AC-07)**: the whole unit commits atomically —
+there is NO mid-chain state to converge from; a same-key retry after a
+failed commit re-executes the unit exactly once (the injected-COMMIT-failure
+regression proves it end-to-end).
 
 ### §3.5 API surface
 
@@ -255,16 +329,21 @@ property end-to-end.
 3. `/settlement` stays the sole economic authority — the clearing record
    posts nothing; the draw flows through the untouched primitives; the
    pinned economic vocabularies are byte-identical (AC-08).
-4. Risk/dispute gates are consulted before settlement mutation — §3.4 step
-   3 + §3.3(b); PENDING_STAKE disputes never gate (griefing resistance).
-5. Clearing is deterministic, idempotent and replay-safe — compound
-   idempotency keys + the pair mutex + the create-once pair record;
-   concurrent same-pair attempts cannot duplicate value (AC-04).
+4. Risk/dispute gates are consulted before settlement mutation — §3.4
+   step 3 (pre-flight) + step 4's in-tx pass; PENDING_STAKE disputes
+   never gate (griefing resistance).
+5. Clearing is deterministic, idempotent and replay-safe — ONE
+   composite idempotency key over the WHOLE atomic unit (§3.4a) + the
+   pair mutex + the create-once pair record; concurrent same-pair
+   attempts cannot duplicate value (AC-04).
 6. Tenant scoping is fail-closed — the value-record scope anchor + every
    lookup's same-scope resolution + the in-tx re-derivation (AC-05).
 7. Audit lineage binds campaign, contribution, placement, clearing record,
    idempotency record and authoritative transaction — the
-   `cross_promotion_clearing.recorded` event metadata (AC-07).
+   `cross_promotion_clearing.recorded` event metadata; THE WHOLE
+   OPERATION commits in ONE authoritative transaction whose id (and ONE
+   idempotency record) appears on the draw's, the record's AND the
+   campaign bookkeeping's audit events (AC-07, §3.4a).
 8. No AI path — no LLM import in any clearing artifact; the deterministic
    quality band is the only W013 signal and can only BLOCK (AC-08).
 9. Frozen architecture/architecture-lock unchanged (AC-08).
@@ -292,7 +371,7 @@ primitive, any workflow/lifecycle surface, any AI authority.
 | NET-W020-AC-04 | concurrent same-clearing attempts cannot duplicate value; same-key replay is deterministic | `tests/settlement-clearing/net-w020-ac-04-concurrency-replay.test.ts` |
 | NET-W020-AC-05 | cross-tenant and stale/withdrawn/retired/ineligible inventory contexts fail closed | `tests/settlement-clearing/net-w020-ac-05-fail-closed.test.ts` |
 | NET-W020-AC-06 | risk/dispute gates are consulted on source contexts before settlement mutation; unbonded disputes do not grief | `tests/settlement-clearing/net-w020-ac-06-risk-dispute-gates.test.ts` |
-| NET-W020-AC-07 | audit + transaction lineage complete; authoritative commit failure leaves no partial economic mutation | `tests/settlement-clearing/net-w020-ac-07-atomicity-lineage.test.ts` |
+| NET-W020-AC-07 | audit + transaction lineage complete; authoritative commit failure leaves no partial economic mutation — THE COMPOSITE-LEVEL FAULT INJECTION (the PR #40 remediation regression: the actual end-to-end operation against a commit-failing authority, the draw staged in-tx) + the SAME-LINEAGE successful path | `tests/settlement-clearing/net-w020-ac-07-atomicity-lineage.test.ts` |
 | NET-W020-AC-08 | architecture/out-of-scope regression with frozen Architecture v1.0 unchanged | `tests/regression/net-w020-ac-08-architecture-out-of-scope.test.ts` |
 
 ## §7 Verification

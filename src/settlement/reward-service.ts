@@ -275,7 +275,7 @@ export interface RewardServiceDeps extends EconomicServiceDeps {
 }
 
 /** The account set an allocation posts to (lock set). */
-function allocationAccountIds(
+export function allocationAccountIds(
   organizationScopeId: string,
   sourceHolderPersonId: string,
   beneficiaries: readonly string[],
@@ -360,152 +360,16 @@ export function createRewardService(deps: RewardServiceDeps): RewardService {
           pinned.allocations.map((a) => a.beneficiaryPersonId),
         ),
         () =>
-          idempotency.applyIdempotent(key, async (ctx) => {
-            const tx = ctx.transaction;
-            // Load the EXACT pinned policy version (immutable — cannot
-            // drift between the pin and this read).
-            const policy = await policyRepository.findVersionWithinTx(
-              pinned.policyId,
-              pinned.version,
-              tx,
-            );
-            if (!policy) {
-              throw new NotFoundError(
-                `reward policy version not found: ${pinned.policyId} v${String(pinned.version)}`,
-                { policyId: pinned.policyId, version: pinned.version },
-              );
-            }
-            const record = await valueRepository.findByIdWithinTx(
-              input.sourceValueRecordId,
-              tx,
-            );
-            if (!record) {
-              throw new NotFoundError(
-                `source economic value record not found: ${input.sourceValueRecordId}`,
-                { sourceValueRecordId: input.sourceValueRecordId },
-              );
-            }
-            if (record.organizationScopeId !== input.organizationScopeId) {
-              throw validationError(
-                `source value record ${record.id} belongs to organization scope ${record.organizationScopeId}, not ${input.organizationScopeId}`,
-                {
-                  sourceValueRecordId: record.id,
-                  recordScope: record.organizationScopeId,
-                  inputScope: input.organizationScopeId,
-                },
-              );
-            }
-            if (record.state !== "MATURE") {
-              throw validationError(
-                `source value record ${record.id} is ${record.state}, not MATURE — ${record.state === "PENDING" ? "pending value cannot be consumed as mature value (architecture-lock invariant 19)" : "only mature value can fund reward allocations"}`,
-                { sourceValueRecordId: record.id, state: record.state },
-              );
-            }
-            // The deterministic split (pure; Σ shares === source exactly).
-            const shares = computeRewardSplit(record.amount, policy.allocations);
-            const allocationId = randomUUID();
-            // THE ALLOCATION POSTINGS (balanced in the value unit):
-            //   debit  mature_value(source holder)  sourceAmount
-            //   credit rewards(beneficiary_i)       share_i   (per share)
-            const transaction = await postLedgerTransactionWithinTx(
-              tx,
-              execution,
-              {
-                organizationScopeId: record.organizationScopeId,
-                kind: "reward_allocation",
-                subject: { kind: "reward_allocation", id: allocationId },
-                entries: [
-                  {
-                    accountId: economicAccountId(
-                      record.organizationScopeId,
-                      record.beneficiaryPersonId,
-                      "mature_value",
-                      "value",
-                    ),
-                    accountKind: "mature_value",
-                    ownerPersonId: record.beneficiaryPersonId,
-                    direction: "debit",
-                    amount: record.amount,
-                    unit: "value",
-                  },
-                  ...shares.map((share) => ({
-                    accountId: economicAccountId(
-                      record.organizationScopeId,
-                      share.beneficiaryPersonId,
-                      "rewards",
-                      "value",
-                    ),
-                    accountKind: "rewards" as const,
-                    ownerPersonId: share.beneficiaryPersonId,
-                    direction: "credit" as const,
-                    amount: share.amount,
-                    unit: "value" as const,
-                  })),
-                ],
-                idempotencyKey: input.idempotencyKey,
-              },
-              ledgerRepository,
-            );
-            const allocation: RewardAllocation = Object.freeze({
-              id: allocationId,
-              organizationScopeId: record.organizationScopeId,
-              sourceValueRecordId: record.id,
-              sourceValueAmount: record.amount,
-              sourceBeneficiaryPersonId: record.beneficiaryPersonId,
-              policyId: policy.policyId,
-              policyVersion: policy.version,
-              totalAllocated: record.amount,
-              shares: shares.map((share, index) => ({
-                beneficiaryPersonId: share.beneficiaryPersonId,
-                amount: share.amount,
-                weight: policy.allocations[index]!.weight,
-              })),
-              status: "allocated",
-              reversal: null,
-              transactionId: transaction.id,
-              allocatedAt: new Date().toISOString(),
-              idempotencyKey: input.idempotencyKey,
-              executionId: execution.executionId,
-              correlationId: execution.correlationId,
-              causationId: execution.causationId,
-            });
-            await allocationRepository.createWithinTx(allocation, tx);
-            // Consume the source record (exactly-once).
-            const consumed = Object.freeze({
-              ...record,
-              state: "CONSUMED" as const,
-              version: record.version + 1,
-              consumedBy: { kind: "reward_allocation" as const, id: allocationId },
-              executionId: execution.executionId,
-              correlationId: execution.correlationId,
-              causationId: execution.causationId,
-            });
-            await valueRepository.saveWithinTx(consumed, record.version, tx);
-            const buffer = auditWriter.forTransaction(tx);
-            await buffer.append({
-              eventType: ALLOCATION_RECORDED,
-              context: execution,
-              actor: execution.actor?.id ?? null,
-              subject: allocation.id,
-              resourceType: "reward_allocation",
-              resourceId: allocation.id,
-              metadata: {
-                organizationScopeId: allocation.organizationScopeId,
-                sourceValueRecordId: allocation.sourceValueRecordId,
-                sourceValueAmount: allocation.sourceValueAmount,
-                policyId: allocation.policyId,
-                policyVersion: allocation.policyVersion,
-                shares: allocation.shares.map(
-                  (s) => `${s.beneficiaryPersonId}:${String(s.amount)}`,
-                ),
-                idempotencyKey: allocation.idempotencyKey,
-                idempotencyRecordId: ctx.recordId,
-                transactionId: tx.transactionId,
-                ledgerTransactionId: transaction.id,
-              },
-            });
-            return allocation;
-          }, execution),
+          idempotency.applyIdempotent(
+            key,
+            (ctx) =>
+              service.allocateRewardsWithinTx(
+                execution,
+                { ...input, version: pinned.version },
+                ctx,
+              ),
+            execution,
+          ),
         valueRecordLockKey(input.sourceValueRecordId),
       );
       logger.info("reward_allocation.recorded", {
@@ -515,6 +379,183 @@ export function createRewardService(deps: RewardServiceDeps): RewardService {
         created: applied.executed,
       });
       return { allocation: applied.result, created: applied.executed };
+    },
+
+    async allocateRewardsWithinTx(execution, input, ctx) {
+      // NET-W020 remediation (PR #40 review): the SAME allocation body
+      // as the standalone command, on the CALLER'S authoritative
+      // transaction (ctx.transaction). No lock acquisition, no own
+      // idempotency apply — the caller's transaction IS the atomicity
+      // boundary; the exactly-once value consumption (MATURE →
+      // CONSUMED below) makes a re-run inside a surviving transaction
+      // impossible.
+      const tx = ctx.transaction;
+      // Resolve + pin the policy version (committed read; policy
+      // versions are immutable and append-only, so the pin cannot
+      // drift). The in-tx load reads the EXACT pinned version.
+      const pinned =
+        input.version !== undefined
+          ? await policyRepository.findVersion(input.policyId, input.version)
+          : await policyRepository.findLatestVersion(input.policyId, undefined);
+      if (!pinned) {
+        throw new NotFoundError(
+          `reward policy not found: ${input.policyId}${input.version !== undefined ? ` v${String(input.version)}` : ""}`,
+          { policyId: input.policyId, version: input.version },
+        );
+      }
+      if (pinned.organizationScopeId !== input.organizationScopeId) {
+        throw validationError(
+          `reward policy ${pinned.policyId} belongs to organization scope ${pinned.organizationScopeId}, not ${input.organizationScopeId}`,
+          {
+            policyId: pinned.policyId,
+            policyScope: pinned.organizationScopeId,
+            inputScope: input.organizationScopeId,
+          },
+        );
+      }
+      // Load the EXACT pinned policy version (immutable — cannot
+      // drift between the pin and this read).
+      const policy = await policyRepository.findVersionWithinTx(
+        pinned.policyId,
+        pinned.version,
+        tx,
+      );
+      if (!policy) {
+        throw new NotFoundError(
+          `reward policy version not found: ${pinned.policyId} v${String(pinned.version)}`,
+          { policyId: pinned.policyId, version: pinned.version },
+        );
+      }
+      const record = await valueRepository.findByIdWithinTx(
+        input.sourceValueRecordId,
+        tx,
+      );
+      if (!record) {
+        throw new NotFoundError(
+          `source economic value record not found: ${input.sourceValueRecordId}`,
+          { sourceValueRecordId: input.sourceValueRecordId },
+        );
+      }
+      if (record.organizationScopeId !== input.organizationScopeId) {
+        throw validationError(
+          `source value record ${record.id} belongs to organization scope ${record.organizationScopeId}, not ${input.organizationScopeId}`,
+          {
+            sourceValueRecordId: record.id,
+            recordScope: record.organizationScopeId,
+            inputScope: input.organizationScopeId,
+          },
+        );
+      }
+      if (record.state !== "MATURE") {
+        throw validationError(
+          `source value record ${record.id} is ${record.state}, not MATURE — ${record.state === "PENDING" ? "pending value cannot be consumed as mature value (architecture-lock invariant 19)" : "only mature value can fund reward allocations"}`,
+          { sourceValueRecordId: record.id, state: record.state },
+        );
+      }
+      // The deterministic split (pure; Σ shares === source exactly).
+      const shares = computeRewardSplit(record.amount, policy.allocations);
+      const allocationId = randomUUID();
+      // THE ALLOCATION POSTINGS (balanced in the value unit):
+      //   debit  mature_value(source holder)  sourceAmount
+      //   credit rewards(beneficiary_i)       share_i   (per share)
+      const transaction = await postLedgerTransactionWithinTx(
+        tx,
+        execution,
+        {
+          organizationScopeId: record.organizationScopeId,
+          kind: "reward_allocation",
+          subject: { kind: "reward_allocation", id: allocationId },
+          entries: [
+            {
+              accountId: economicAccountId(
+                record.organizationScopeId,
+                record.beneficiaryPersonId,
+                "mature_value",
+                "value",
+              ),
+              accountKind: "mature_value",
+              ownerPersonId: record.beneficiaryPersonId,
+              direction: "debit",
+              amount: record.amount,
+              unit: "value",
+            },
+            ...shares.map((share) => ({
+              accountId: economicAccountId(
+                record.organizationScopeId,
+                share.beneficiaryPersonId,
+                "rewards",
+                "value",
+              ),
+              accountKind: "rewards" as const,
+              ownerPersonId: share.beneficiaryPersonId,
+              direction: "credit" as const,
+              amount: share.amount,
+              unit: "value" as const,
+            })),
+          ],
+          idempotencyKey: input.idempotencyKey,
+        },
+        ledgerRepository,
+      );
+      const allocation: RewardAllocation = Object.freeze({
+        id: allocationId,
+        organizationScopeId: record.organizationScopeId,
+        sourceValueRecordId: record.id,
+        sourceValueAmount: record.amount,
+        sourceBeneficiaryPersonId: record.beneficiaryPersonId,
+        policyId: policy.policyId,
+        policyVersion: policy.version,
+        totalAllocated: record.amount,
+        shares: shares.map((share, index) => ({
+          beneficiaryPersonId: share.beneficiaryPersonId,
+          amount: share.amount,
+          weight: policy.allocations[index]!.weight,
+        })),
+        status: "allocated",
+        reversal: null,
+        transactionId: transaction.id,
+        allocatedAt: new Date().toISOString(),
+        idempotencyKey: input.idempotencyKey,
+        executionId: execution.executionId,
+        correlationId: execution.correlationId,
+        causationId: execution.causationId,
+      });
+      await allocationRepository.createWithinTx(allocation, tx);
+      // Consume the source record (exactly-once).
+      const consumed = Object.freeze({
+        ...record,
+        state: "CONSUMED" as const,
+        version: record.version + 1,
+        consumedBy: { kind: "reward_allocation" as const, id: allocationId },
+        executionId: execution.executionId,
+        correlationId: execution.correlationId,
+        causationId: execution.causationId,
+      });
+      await valueRepository.saveWithinTx(consumed, record.version, tx);
+      const buffer = auditWriter.forTransaction(tx);
+      await buffer.append({
+        eventType: ALLOCATION_RECORDED,
+        context: execution,
+        actor: execution.actor?.id ?? null,
+        subject: allocation.id,
+        resourceType: "reward_allocation",
+        resourceId: allocation.id,
+        metadata: {
+          organizationScopeId: allocation.organizationScopeId,
+          sourceValueRecordId: allocation.sourceValueRecordId,
+          sourceValueAmount: allocation.sourceValueAmount,
+          policyId: allocation.policyId,
+          policyVersion: allocation.policyVersion,
+          shares: allocation.shares.map(
+            (s) => `${s.beneficiaryPersonId}:${String(s.amount)}`,
+          ),
+          idempotencyKey: allocation.idempotencyKey,
+          idempotencyRecordId: ctx.recordId,
+          transactionId: tx.transactionId,
+          ledgerTransactionId: transaction.id,
+        },
+      });
+      return allocation;
     },
 
     async reverseAllocation(execution, input) {

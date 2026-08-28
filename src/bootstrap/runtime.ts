@@ -293,7 +293,7 @@ import {
   createAuthorityCampaignRepository,
   createAuthorityCampaignPolicyRepository,
 } from "../campaigns/authority-campaign-repository.ts";
-import { createCampaignService } from "../campaigns/campaign-service.ts";
+import { createCampaignService, campaignLockKey } from "../campaigns/campaign-service.ts";
 import {
   createAuthorityCreatorProfileRepository,
   createAuthorityCreatorProfileVersionRepository,
@@ -2727,6 +2727,42 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     authority: postgresAuthority,
     logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
   });
+  // NET-W020 remediation (PR #40 review): the campaign clearing
+  // bookkeeping participates IN the clearing's SINGLE authoritative
+  // transaction through this neutral port — /campaigns stays the
+  // bookkeeping authority (the service's `...WithinTx` body runs on
+  // the caller's transaction), and the port exposes the campaign
+  // record's own serialization key so the composite holds it ACROSS
+  // the transaction.
+  const clearingCampaignBookkeeping = {
+    async recordClearingExecutionWithinTx(
+      execution: import("../core/execution-context.ts").ExecutionContext,
+      input: import("../settlement/port.ts").ClearingCampaignBookkeepingInput,
+      ctx: import("../core/idempotency.ts").IdempotentApplyContext,
+    ) {
+      const updated = await campaignService.recordClearingExecutionWithinTx(
+        execution,
+        {
+          campaignId: input.campaignId,
+          clearingRuleId: input.clearingRuleId,
+          drawKind: input.drawKind,
+          valueRecordId: input.valueRecordId,
+          resultId: input.resultId,
+          amount: input.amount,
+          description: input.description,
+          idempotencyKey: input.idempotencyKey,
+        },
+        ctx,
+      );
+      return {
+        campaignId: updated.id,
+        eventCount: updated.events.length,
+      };
+    },
+    bookkeepingLockKey(campaignId: string) {
+      return campaignLockKey(campaignId);
+    },
+  };
   const crossPromotionClearingService = createCrossPromotionClearingService({
     clearingRepository: clearingRepo,
     valueRepository: economicValueRepo,
@@ -2739,6 +2775,11 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       campaign: clearingCampaignLookup,
       gate: clearingGateLookup,
     },
+    rewardService,
+    creditService,
+    cashService,
+    rewardPolicyRepository: rewardPolicyRepo,
+    campaignBookkeeping: clearingCampaignBookkeeping,
     idempotency,
     auditWriter,
     logger: logger.forModule("settlement"),
@@ -7892,369 +7933,64 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
      * the value record, ALL upstream sources and the placement (with
      * the value beneficiary AND the placement owner as person
      * subjects), recorded as the durable clearing record + campaign
-     * bookkeeping (references only). The WHOLE composite is
-     * serialized under the advisory pair mutex; same-key replay is
-     * deterministic through every step's compound idempotency key.
+     * bookkeeping (references only).
+     *
+     * NET-W020 REMEDIATION (PR #40 review — the single authoritative
+     * transaction boundary): the WHOLE operation is ONE exactly-once
+     * economic unit in ONE authoritative transaction owned by the
+     * settlement domain's executeCrossPromotionClearing (the draw, the
+     * clearing record, the campaign bookkeeping and the audit lineage
+     * commit together or not at all — a failed authoritative COMMIT
+     * leaves NO partial economic mutation). This adapter is the thin
+     * composition-root bridge: input coercion + the view mapping over
+     * the committed composite result; the same-key replay returns the
+     * stored result verbatim (created:false).
      */
     async executeCrossPromotionClearing(execution, _actorPersonId, input) {
-      const sourceContributionId = input.sourceContributionId as string;
-      const targetPlacementId = input.targetPlacementId as string;
-      const valueRecordId = input.valueRecordId as string;
-      const idempotencyKey = input.idempotencyKey as string;
-      // The VALUE RECORD anchors the tenant scope (the economic
-      // authority's own record — cross-scope references fail closed).
-      const value = await economicValueService.getValue(execution, valueRecordId);
-      const organizationScopeId = value.organizationScopeId;
-      const requestedRuleId =
-        typeof input.clearingRuleId === "string" &&
-        input.clearingRuleId.trim() !== ""
-          ? input.clearingRuleId
-          : null;
-
-      return idempotency.withLock(
-        clearingPairLockKey(
-          organizationScopeId,
-          sourceContributionId,
-          targetPlacementId,
-        ),
-        async () => {
-          // Pre-flight pair check: a CLEARED pair fails closed BEFORE
-          // any economic mutation (one clearing per contribution-
-          // placement pair — the W019 active-placement pattern). The
-          // SAME-KEY replay is tolerated: the existing record was
-          // committed under this caller's own compound key
-          // (`{key}:record`), so every chained step replays
-          // identically (idempotent, no new value).
-          const existingPair = await clearingRepo.findByPair(
-            organizationScopeId,
-            sourceContributionId,
-            targetPlacementId,
-          );
-          if (
-            existingPair &&
-            existingPair.idempotencyKey !== `${idempotencyKey}:record`
-          ) {
-            throw new CrossPromotionClearingConflictError(
-              `contribution ${sourceContributionId} and placement ${targetPlacementId} were already cleared (clearing ${existingPair.id}) — one clearing per contribution-placement pair`,
-              {
-                organizationScopeId,
-                sourceContributionId,
-                targetPlacementId,
-                existingClearingId: existingPair.id,
-              },
-            );
-          }
-
-          // Hard gates FIRST (the W014 discipline — the uniform
-          // hard-refusal error codes): risk controls + ACTIVE
-          // disputes over the value record, EVERY upstream source id
-          // (including the contribution) and the placement id, with
-          // the value beneficiary AND the placement owner as person
-          // subjects — BEFORE any settlement mutation (AC-06). The
-          // operation class needs the resolved rule's draw kind; on
-          // the CONSUMED replay path the draw has already committed
-          // and the gates must not block the idempotent replay.
-          const gatePlacement = await clearingPlacementLookup.readiness(
-            organizationScopeId,
-            targetPlacementId,
-          );
-          const gateCampaign =
-            gatePlacement !== null
-              ? await clearingCampaignLookup.resolve(gatePlacement.campaignId)
-              : null;
-          let gateRule: import("../settlement/port.ts").ClearingRuleView | null =
-            null;
-          if (gateCampaign && gateCampaign.administrativeStatus === "ACTIVE") {
-            const rules = gateCampaign.clearingRules;
-            gateRule =
-              requestedRuleId !== null
-                ? rules.find((r) => r.id === requestedRuleId) ?? null
-                : rules.length === 1
-                  ? rules[0]!
-                  : null;
-          }
-          const drawConsumes =
-            gateRule !== null &&
-            (gateRule.drawKind === "reward_allocation" ||
-              gateRule.drawKind === "credit_issuance");
-          const isReplayPath = drawConsumes && value.state === "CONSUMED";
-          if (!isReplayPath && gateRule !== null) {
-            const subjectIds = [
-              value.id,
-              ...value.sources.map((s) => s.id),
-              targetPlacementId,
-            ];
-            await refuseWhenDisputed(execution, organizationScopeId, subjectIds);
-            const operationClass: RiskOperationClass =
-              clearingOperationClass(gateRule.drawKind);
-            for (const subjectId of subjectIds) {
-              await refuseWhenGated(
-                execution,
-                organizationScopeId,
-                operationClass,
-                subjectId,
-                value.beneficiaryPersonId,
-              );
-            }
-            if (gatePlacement?.ownerPersonId) {
-              await refuseWhenGated(
-                execution,
-                organizationScopeId,
-                operationClass,
-                targetPlacementId,
-                gatePlacement.ownerPersonId,
-              );
-            }
-          }
-
-          // The DERIVED eligibility (re-derived from CURRENT
-          // authoritative records — the settlement domain's view). On
-          // the non-replay path the hard gates have already passed;
-          // the view's own risk_dispute_gate check re-reads the same
-          // registries (and the record command's in-tx re-derivation
-          // is the authoritative backstop).
-          const eligibility =
-            await crossPromotionClearingService.evaluateClearingEligibility(
-              execution,
-              {
-                organizationScopeId,
-                sourceContributionId,
-                targetPlacementId,
-                valueRecordId,
-                ...(requestedRuleId !== null
-                  ? { clearingRuleId: requestedRuleId }
-                  : {}),
-              },
-            );
-          if (!eligibility.eligible || !eligibility.resolvedRule) {
-            const { OpenConError: GateError } = await import("../core/errors.ts");
-            const failed = eligibility.checks
-              .filter((c) => !c.satisfied)
-              .map((c) => ({ check: c.check, reason: c.reason }));
-            throw new GateError({
-              code: "CROSS_PROMOTION_CLEARING_VALIDATION",
-              classification: "precondition",
-              message: `cross-promotion clearing for contribution ${sourceContributionId} and placement ${targetPlacementId} is not eligible (${failed.map((f) => `${f.check}:${f.reason}`).join("; ")})`,
-              context: {
-                sourceContributionId,
-                targetPlacementId,
-                valueRecordId,
-                failedChecks: failed,
-              },
-            });
-          }
-          const rule = eligibility.resolvedRule;
-
-          // The draw — the EXISTING settlement primitive the rule
-          // selects (the W014 branches verbatim; `{key}:draw`).
-          const drawKind = rule.drawKind;
-          if (drawKind === "reward_allocation") {
-            if (!rule.rewardPolicyId) {
-              const { OpenConError: GateError } = await import("../core/errors.ts");
-              throw new GateError({
-                code: "ECONOMIC_VALIDATION",
-                classification: "precondition",
-                message: `clearing rule ${rule.id} draw kind reward_allocation requires a reward policy reference`,
-                context: { clearingRuleId: rule.id },
-              });
-            }
-            const result = await rewardService.allocateRewards(execution, {
-              organizationScopeId,
-              sourceValueRecordId: value.id,
-              policyId: rule.rewardPolicyId,
-              idempotencyKey: `${idempotencyKey}:draw`,
-            });
-            const recorded =
-              await crossPromotionClearingService.recordCrossPromotionClearing(
-                execution,
-                {
-                  organizationScopeId,
-                  sourceContributionId,
-                  targetPlacementId,
-                  valueRecordId: value.id,
-                  clearingRuleId: rule.id,
-                  drawKind,
-                  drawResultId: result.allocation.id,
-                  idempotencyKey: `${idempotencyKey}:record`,
-                },
-              );
-            const campaignAfter = await campaignService.recordClearingExecution(
-              execution,
-              {
-                campaignId: recorded.clearing.campaignId,
-                clearingRuleId: rule.id,
-                drawKind,
-                valueRecordId: value.id,
-                resultId: result.allocation.id,
-                amount: result.allocation.totalAllocated,
-                description: `cross-promotion clearing draw (reward allocation ${result.allocation.id}, clearing ${recorded.clearing.id})`,
-                idempotencyKey: `${idempotencyKey}:campaign`,
-              },
-            );
-            return {
-              drawKind,
-              clearing: toCrossPromotionClearingView(recorded.clearing),
-              allocation: toRewardAllocationView(result.allocation),
-              created: recorded.created,
-              value: toEconomicValueView(
-                await economicValueService.getValue(execution, value.id),
-              ),
-              campaignEventCount: campaignAfter.events.length,
-            };
-          }
-          if (drawKind === "credit_issuance") {
-            const creditsPerValueUnit = input.creditsPerValueUnit as
-              | number
-              | undefined;
-            if (
-              creditsPerValueUnit === undefined ||
-              !Number.isFinite(creditsPerValueUnit) ||
-              creditsPerValueUnit <= 0
-            ) {
-              const { OpenConError: GateError } = await import("../core/errors.ts");
-              throw new GateError({
-                code: "ECONOMIC_VALIDATION",
-                classification: "validation",
-                message: "credit draw requires creditsPerValueUnit > 0",
-                context: { creditsPerValueUnit: creditsPerValueUnit ?? null },
-              });
-            }
-            const result = await creditService.issueCredits(execution, {
-              organizationScopeId,
-              beneficiaryPersonId: value.beneficiaryPersonId,
-              sourceValueRecordId: value.id,
-              creditsPerValueUnit,
-              description: `cross-promotion clearing draw (credits) — rule ${rule.id}`,
-              idempotencyKey: `${idempotencyKey}:draw`,
-            });
-            const recorded =
-              await crossPromotionClearingService.recordCrossPromotionClearing(
-                execution,
-                {
-                  organizationScopeId,
-                  sourceContributionId,
-                  targetPlacementId,
-                  valueRecordId: value.id,
-                  clearingRuleId: rule.id,
-                  drawKind,
-                  drawResultId: result.issuance.id,
-                  idempotencyKey: `${idempotencyKey}:record`,
-                },
-              );
-            const campaignAfter = await campaignService.recordClearingExecution(
-              execution,
-              {
-                campaignId: recorded.clearing.campaignId,
-                clearingRuleId: rule.id,
-                drawKind,
-                valueRecordId: value.id,
-                resultId: result.issuance.id,
-                amount: result.issuance.creditAmount,
-                description: `cross-promotion clearing draw (credit issuance ${result.issuance.id}, clearing ${recorded.clearing.id})`,
-                idempotencyKey: `${idempotencyKey}:campaign`,
-              },
-            );
-            return {
-              drawKind,
-              clearing: toCrossPromotionClearingView(recorded.clearing),
-              issuance: toCreditIssuanceView(result.issuance),
-              created: recorded.created,
-              value: toEconomicValueView(
-                await economicValueService.getValue(execution, value.id),
-              ),
-              campaignEventCount: campaignAfter.events.length,
-            };
-          }
-          // cash_obligation — internal payable/receivable state ONLY
-          // (NO external payment execution: /payments stays skeletal,
-          // NET-W030).
-          const cashKind = (input.cashKind as string | undefined) ?? "payable";
-          if (cashKind !== "payable" && cashKind !== "receivable") {
-            const { OpenConError: GateError } = await import("../core/errors.ts");
-            throw new GateError({
-              code: "ECONOMIC_VALIDATION",
-              classification: "validation",
-              message: `cashKind must be payable | receivable (got ${String(cashKind)})`,
-              context: { cashKind },
-            });
-          }
-          const counterpartyPersonId = input.counterpartyPersonId as
-            | string
-            | undefined;
-          if (!counterpartyPersonId || !String(counterpartyPersonId).trim()) {
-            const { OpenConError: GateError } = await import("../core/errors.ts");
-            throw new GateError({
-              code: "ECONOMIC_VALIDATION",
-              classification: "validation",
-              message: "cash draw requires counterpartyPersonId",
-              context: {},
-            });
-          }
-          const cashAmount = input.cashAmount as number | undefined;
-          if (
-            cashAmount === undefined ||
-            !Number.isFinite(cashAmount) ||
-            cashAmount <= 0 ||
-            cashAmount > rule.maxDrawAmount
-          ) {
-            const { OpenConError: GateError } = await import("../core/errors.ts");
-            throw new GateError({
-              code: "ECONOMIC_VALIDATION",
-              classification: "validation",
-              message: `cash draw amount must be > 0 and ≤ the rule max draw amount ${String(rule.maxDrawAmount)}`,
-              context: {
-                cashAmount: cashAmount ?? null,
-                maxDrawAmount: rule.maxDrawAmount,
-              },
-            });
-          }
-          const result = await cashService.recordCashObligation(execution, {
-            organizationScopeId,
-            kind: cashKind,
-            counterpartyPersonId,
-            amount: cashAmount,
-            description: `cross-promotion clearing draw — rule ${rule.id}, value record ${value.id}, placement ${targetPlacementId}`,
-            idempotencyKey: `${idempotencyKey}:draw`,
-          });
-          const recorded =
-            await crossPromotionClearingService.recordCrossPromotionClearing(
-              execution,
-              {
-                organizationScopeId,
-                sourceContributionId,
-                targetPlacementId,
-                valueRecordId: value.id,
-                clearingRuleId: rule.id,
-                drawKind,
-                drawResultId: result.obligation.id,
-                idempotencyKey: `${idempotencyKey}:record`,
-              },
-            );
-          const campaignAfter = await campaignService.recordClearingExecution(
-            execution,
-            {
-              campaignId: recorded.clearing.campaignId,
-              clearingRuleId: rule.id,
-              drawKind,
-              valueRecordId: value.id,
-              resultId: result.obligation.id,
-              amount: result.obligation.amount,
-              description: `cross-promotion clearing draw (cash obligation ${result.obligation.id}, clearing ${recorded.clearing.id})`,
-              idempotencyKey: `${idempotencyKey}:campaign`,
-            },
-          );
-          return {
-            drawKind,
-            clearing: toCrossPromotionClearingView(recorded.clearing),
-            obligation: toCashObligationView(result.obligation),
-            created: recorded.created,
-            value: toEconomicValueView(value),
-            campaignEventCount: campaignAfter.events.length,
-          };
+      const result = await crossPromotionClearingService.executeCrossPromotionClearing(
+        getExecutionContext() ?? execution,
+        {
+          sourceContributionId: input.sourceContributionId as string,
+          targetPlacementId: input.targetPlacementId as string,
+          valueRecordId: input.valueRecordId as string,
+          idempotencyKey: input.idempotencyKey as string,
+          ...(input.clearingRuleId !== undefined
+            ? { clearingRuleId: input.clearingRuleId as string }
+            : {}),
+          ...(input.creditsPerValueUnit !== undefined
+            ? { creditsPerValueUnit: input.creditsPerValueUnit as number }
+            : {}),
+          ...(input.cashKind !== undefined
+            ? { cashKind: input.cashKind as string }
+            : {}),
+          ...(input.counterpartyPersonId !== undefined
+            ? { counterpartyPersonId: input.counterpartyPersonId as string }
+            : {}),
+          ...(input.cashAmount !== undefined
+            ? { cashAmount: input.cashAmount as number }
+            : {}),
+          ...(input.description !== undefined
+            ? { description: input.description as string }
+            : {}),
         },
       );
+      return {
+        drawKind: result.drawKind,
+        clearing: toCrossPromotionClearingView(result.clearing),
+        ...(result.allocation !== undefined
+          ? { allocation: toRewardAllocationView(result.allocation) }
+          : {}),
+        ...(result.issuance !== undefined
+          ? { issuance: toCreditIssuanceView(result.issuance) }
+          : {}),
+        ...(result.obligation !== undefined
+          ? { obligation: toCashObligationView(result.obligation) }
+          : {}),
+        created: result.created,
+        value: toEconomicValueView(result.value),
+        campaignEventCount: result.campaignEventCount,
+      };
     },
-
     /** The DERIVED eligibility view (AC-02; public read). */
     async evaluateCrossPromotionClearing(execution, input) {
       return crossPromotionClearingService.evaluateClearingEligibility(

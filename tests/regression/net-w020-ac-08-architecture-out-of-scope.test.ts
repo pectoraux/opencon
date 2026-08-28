@@ -245,14 +245,18 @@ describe("NET-W020-AC-08 architecture / out-of-scope", () => {
       expect(content).not.toMatch(/llm\/agents\.ts/);
     }
     // The clearing composite region in runtime.ts references the LLM
-    // provider NOWHERE inside the W020 block.
+    // provider NOWHERE inside the W020 block. (PR #40 remediation:
+    // the region end is the apiCommands DEFINITION — the earlier
+    // `apiCommands: ApiCommands` match was the Runtime interface
+    // declaration, which made the region empty and the pin vacuous.)
     const runtime = await readFile(
       join(REPO, "src/bootstrap/runtime.ts"),
       "utf8",
     );
     const w020Start = runtime.indexOf("NET-W020 — Cross-promotion clearing");
-    const w020End = runtime.indexOf("apiCommands: ApiCommands");
+    const w020End = runtime.indexOf("const apiCommands: ApiCommands = {");
     const w020Region = runtime.slice(w020Start, w020End);
+    expect(w020Region.length).toBeGreaterThan(1000);
     expect(w020Region).not.toMatch(/llm|Llm|LLM/);
   });
 
@@ -315,6 +319,63 @@ describe("NET-W020-AC-08 architecture / out-of-scope", () => {
     expect(server).toMatch(
       /cross-promotion-clearings"[\s\S]{0,400}guardMutation\(\s*ctx,\s*req,\s*"reward\.clear"/,
     );
+  });
+
+  test("THE SINGLE-AUTHORITATIVE-TRANSACTION PIN (PR #40 remediation): the clearing composite runs ONLY through the ...WithinTx primitives — the transaction-owning draw commands appear NOWHERE in the composite path", async () => {
+    // The settlement composite itself: the draw + the record + the
+    // bookkeeping execute on the CALLER'S transaction through the
+    // same-domain ...WithinTx forms. The transaction-owning commands
+    // (which open their own applyIdempotent) must never be invoked
+    // from the clearing composite — that is exactly the
+    // partial-economic-mutation defect the review rejected.
+    const clearingService = await readFile(
+      join(REPO, "src/settlement/clearing-service.ts"),
+      "utf8",
+    );
+    expect(clearingService).toContain("allocateRewardsWithinTx");
+    expect(clearingService).toContain("issueCreditsWithinTx");
+    expect(clearingService).toContain("recordCashObligationWithinTx");
+    expect(clearingService).toContain("recordCrossPromotionClearingWithinTx");
+    expect(clearingService).toContain("recordClearingExecutionWithinTx");
+    // The call-shaped pins: the transaction-owning forms are NEVER
+    // called (only mentioned in documentation without a call site).
+    expect(clearingService).not.toMatch(/\ballocateRewards\s*\(/);
+    expect(clearingService).not.toMatch(/\bissueCredits\s*\(/);
+    expect(clearingService).not.toMatch(/\brecordCashObligation\s*\(/);
+    expect(clearingService).not.toMatch(/\brecordClearingExecution\s*\(/);
+    // ONE applyIdempotent owns the whole operation (the composite
+    // key); the standalone record command keeps its own boundary.
+    expect(clearingService).toContain(
+      "cross_promotion_clearing_execute:${organizationScopeId}",
+    );
+    // The composition root delegates to the settlement authority's
+    // atomic composite; the runtime's W020 region never invokes the
+    // transaction-owning draw commands either (the region ends at
+    // the apiCommands definition — the composite adapter delegates
+    // to the settlement service's atomic execute).
+    const runtime = await readFile(
+      join(REPO, "src/bootstrap/runtime.ts"),
+      "utf8",
+    );
+    const w020Start = runtime.indexOf("NET-W020 — Cross-promotion clearing");
+    const w020End = runtime.indexOf("const apiCommands: ApiCommands = {");
+    const w020Region = runtime.slice(w020Start, w020End);
+    expect(w020Region.length).toBeGreaterThan(1000);
+    expect(w020Region).toContain("recordClearingExecutionWithinTx");
+    expect(w020Region).not.toMatch(/\ballocateRewards\s*\(/);
+    expect(w020Region).not.toMatch(/\bissueCredits\s*\(/);
+    expect(w020Region).not.toMatch(/\brecordCashObligation\s*\(/);
+    // The composite-level fault injection regression exists and
+    // exercises the ACTUAL end-to-end operation (the architect's
+    // required proof).
+    const atomicityTest = await readFile(
+      join(REPO, "tests/settlement-clearing/net-w020-ac-07-atomicity-lineage.test.ts"),
+      "utf8",
+    );
+    expect(atomicityTest).toContain("COMPOSITE-LEVEL FAULT INJECTION");
+    expect(atomicityTest).toContain("injected authoritative COMMIT failure");
+    expect(atomicityTest).toContain("SAME AUTHORITATIVE TRANSACTION LINEAGE");
+    expect(atomicityTest).toContain("executeCrossPromotionClearing");
   });
 
   test("the NET-W020 file list (every artifact this work order introduced exists)", async () => {

@@ -67,7 +67,10 @@ import type {
   PostgresAuthority,
 } from "../core/postgres-authority.ts";
 import type { TransactionalAuditWriter } from "../core/audit.ts";
-import type { IdempotencyStore } from "../core/idempotency.ts";
+import type {
+  IdempotencyStore,
+  IdempotentApplyContext,
+} from "../core/idempotency.ts";
 import type {
   EconomicAccountKind,
   EconomicCashKind,
@@ -623,6 +626,23 @@ export interface CreditService {
     input: IssueCreditsInput,
   ): Promise<IssueCreditsResult>;
   /**
+   * NET-W020 remediation (PR #40 review — the single authoritative
+   * transaction boundary): the SAME issuance body as the standalone
+   * command, executed on the CALLER'S authoritative transaction (the
+   * apply context's transaction) instead of opening its own. Every
+   * mutation — the dual-side issuance postings, the issuance record,
+   * the source value consumption (MATURE → CONSUMED, exactly-once)
+   * and the buffered audit event — stages on that transaction and
+   * commits (or rolls back) WITH the caller. The standalone command
+   * above is a thin wrapper: validate → serialize → apply idempotently
+   * → THIS body. No compensating reversal exists on this path.
+   */
+  issueCreditsWithinTx(
+    execution: ExecutionContext,
+    input: IssueCreditsInput,
+    ctx: IdempotentApplyContext,
+  ): Promise<CreditIssuance>;
+  /**
    * Reverse an issuance (append-only correction). Negates the issuance
    * postings (the beneficiary's credits balance must cover the return —
    * conservation rejects overdraft), restores the source value record
@@ -843,6 +863,24 @@ export interface RewardService {
     input: AllocateRewardsInput,
   ): Promise<AllocateRewardsResult>;
   /**
+   * NET-W020 remediation (PR #40 review — the single authoritative
+   * transaction boundary): the SAME allocation body as the standalone
+   * command, executed on the CALLER'S authoritative transaction (the
+   * apply context's transaction) instead of opening its own. Every
+   * mutation — the balanced allocation postings, the allocation
+   * record, the source value consumption (MATURE → CONSUMED,
+   * exactly-once) and the buffered audit event — stages on that
+   * transaction and commits (or rolls back) WITH the caller. The
+   * standalone command above is a thin wrapper: validate → pin the
+   * policy version → serialize → apply idempotently → THIS body. No
+   * compensating reversal exists on this path.
+   */
+  allocateRewardsWithinTx(
+    execution: ExecutionContext,
+    input: AllocateRewardsInput,
+    ctx: IdempotentApplyContext,
+  ): Promise<RewardAllocation>;
+  /**
    * Reverse an allocation (append-only correction). Negates the
    * postings with per-beneficiary rewards-balance checks, restores the
    * source record to MATURE and commits the
@@ -955,6 +993,22 @@ export interface CashService {
     execution: ExecutionContext,
     input: RecordCashObligationInput,
   ): Promise<RecordCashObligationResult>;
+  /**
+   * NET-W020 remediation (PR #40 review — the single authoritative
+   * transaction boundary): the SAME obligation body as the standalone
+   * command, executed on the CALLER'S authoritative transaction (the
+   * apply context's transaction) instead of opening its own. Every
+   * mutation — the balanced cash postings, the obligation record and
+   * the buffered audit event — stages on that transaction and commits
+   * (or rolls back) WITH the caller. The standalone command above is a
+   * thin wrapper: validate → serialize → apply idempotently → THIS
+   * body. No compensating reversal exists on this path.
+   */
+  recordCashObligationWithinTx(
+    execution: ExecutionContext,
+    input: RecordCashObligationInput,
+    ctx: IdempotentApplyContext,
+  ): Promise<CashObligation>;
   /**
    * Settle a recognized obligation INTERNALLY (recognized → settled)
    * with balanced postings; commits the `cash_obligation.settled`
@@ -1387,6 +1441,85 @@ export interface ClearingLookups {
   readonly gate: ClearingGateLookup;
 }
 
+/** The campaign clearing bookkeeping input (references only). */
+export interface ClearingCampaignBookkeepingInput {
+  readonly campaignId: string;
+  readonly clearingRuleId: string;
+  readonly drawKind: string;
+  readonly valueRecordId: string;
+  readonly resultId: string;
+  readonly amount: number;
+  readonly description?: string;
+  readonly idempotencyKey: string;
+}
+
+/**
+ * ClearingCampaignBookkeepingPort — NET-W020 remediation (PR #40
+ * review): the campaign clearing bookkeeping PARTICIPATES in the
+ * clearing's SINGLE authoritative transaction. /campaigns stays the
+ * bookkeeping authority — the composition root wires this adapter —
+ * but the event append runs on the caller's transaction (the apply
+ * context's transaction) so the campaign record, the economic draw,
+ * the clearing record and the audit lineage commit TOGETHER or not
+ * at all. `bookkeepingLockKey` exposes the campaign record's own
+ * serialization key so the composite holds it ACROSS the transaction
+ * (the campaign repository save is last-write-wins; the standalone
+ * bookkeeping command serializes on the same key).
+ */
+export interface ClearingCampaignBookkeepingPort {
+  recordClearingExecutionWithinTx(
+    execution: ExecutionContext,
+    input: ClearingCampaignBookkeepingInput,
+    ctx: IdempotentApplyContext,
+  ): Promise<{ readonly campaignId: string; readonly eventCount: number }>;
+  /** The campaign record's serialization lock key. */
+  bookkeepingLockKey(campaignId: string): string;
+}
+
+/**
+ * ExecuteCrossPromotionClearingInput — the WHOLE clearing operation
+ * as ONE exactly-once economic unit (the tenant scope is anchored by
+ * the value record — the economic authority's own durable record;
+ * cross-scope references fail closed).
+ */
+export interface ExecuteCrossPromotionClearingInput {
+  readonly sourceContributionId: string;
+  readonly targetPlacementId: string;
+  readonly valueRecordId: string;
+  readonly idempotencyKey: string;
+  /** Optional explicit rule id; omitted → the single declared rule. */
+  readonly clearingRuleId?: string;
+  /** credit draws: credits per value unit (> 0, ≤ 6 decimals). */
+  readonly creditsPerValueUnit?: number;
+  /** cash draws: payable | receivable (default payable). */
+  readonly cashKind?: string;
+  /** cash draws: the counterparty person. */
+  readonly counterpartyPersonId?: string;
+  /** cash draws: the obligation amount (≤ the rule's max draw). */
+  readonly cashAmount?: number;
+  readonly description?: string;
+}
+
+/**
+ * ExecuteCrossPromotionClearingResult — the committed composite
+ * outcome (replayed verbatim on a same-key retry).
+ */
+export interface ExecuteCrossPromotionClearingResult {
+  readonly drawKind: CrossPromotionClearingRecord["drawKind"];
+  readonly clearing: CrossPromotionClearingRecord;
+  /** The reward draw's allocation (reward draws only). */
+  readonly allocation?: RewardAllocation;
+  /** The credit draw's issuance (credit draws only). */
+  readonly issuance?: CreditIssuance;
+  /** The cash draw's obligation (cash draws only). */
+  readonly obligation?: CashObligation;
+  /** false when the idempotency key replayed the committed clearing. */
+  readonly created: boolean;
+  /** The value record's post-draw state (CONSUMED for consuming draws). */
+  readonly value: EconomicValueRecord;
+  readonly campaignEventCount: number;
+}
+
 /**
  * A CrossPromotionClearingRecord — the durable, tenant-scoped,
  * append-only execution record of ONE cross-promotion clearing (the
@@ -1493,6 +1626,39 @@ export interface CrossPromotionClearingRepository {
 
 export interface CrossPromotionClearingService {
   /**
+   * THE ATOMIC CLEARING OPERATION (NET-W020 remediation, PR #40
+   * review): qualify → risk/dispute gate → draw → clearing record →
+   * campaign bookkeeping as ONE exactly-once economic unit inside ONE
+   * authoritative transaction:
+   *
+   * ```text
+   * pair mutex → campaign bookkeeping lock → economic account locks
+   *   → IdempotencyStore.applyIdempotent(key)
+   *       → SINGLE AuthorityTransaction
+   *           ├── in-tx fresh value read (tenant anchor)
+   *           ├── in-tx hard gates (RISK_CONTROL / DISPUTE_CHALLENGE)
+   *           ├── in-tx eligibility re-derivation (the authoritative bar)
+   *           ├── the draw WITHIN THE SAME TX (posting + issuance/
+   *           │   obligation record + exactly-once value consumption)
+   *           ├── the clearing record (re-derives eligibility +
+   *           │   verifies the staged draw result in-tx)
+   *           ├── the campaign clearing bookkeeping (same tx)
+   *           └── the buffered audit lineage (same tx)
+   *       COMMIT — everything durable together, or NOTHING
+   * ```
+   *
+   * A failed authoritative COMMIT therefore leaves NO partial
+   * economic mutation — no ledger entries, no allocation/issuance/
+   * obligation, no value consumption, no clearing record, no campaign
+   * event, no audit event — and a retry with the same idempotency key
+   * re-executes the whole unit exactly once. No compensating
+   * reversal exists on this path.
+   */
+  executeCrossPromotionClearing(
+    execution: ExecutionContext,
+    input: ExecuteCrossPromotionClearingInput,
+  ): Promise<ExecuteCrossPromotionClearingResult>;
+  /**
    * THE DERIVED ELIGIBILITY VIEW (AC-02): re-derived from CURRENT
    * authoritative records on every read — the qualified source
    * contribution (the W014 bar), the settlement-ready target placement
@@ -1534,6 +1700,21 @@ export interface CrossPromotionClearingService {
     execution: ExecutionContext,
     input: RecordCrossPromotionClearingInput,
   ): Promise<RecordCrossPromotionClearingResult>;
+  /**
+   * The SAME record body the standalone command commits, executed on
+   * the CALLER'S authoritative transaction (NET-W020 remediation):
+   * the in-tx eligibility re-derivation, the staged draw-result
+   * verification, the create-once pair check, the record create and
+   * the audit buffer — all on the apply context's transaction. The
+   * atomic clearing operation above invokes THIS body between the
+   * draw and the campaign bookkeeping so the record commits in the
+   * SAME transaction as the economic mutation it verifies.
+   */
+  recordCrossPromotionClearingWithinTx(
+    execution: ExecutionContext,
+    input: RecordCrossPromotionClearingInput,
+    ctx: IdempotentApplyContext,
+  ): Promise<CrossPromotionClearingRecord>;
   /** Tenant-scoped reads (cross-scope = NotFoundError). */
   getCrossPromotionClearing(
     execution: ExecutionContext,
@@ -1553,6 +1734,19 @@ export interface CrossPromotionClearingServiceDeps {
   readonly issuanceRepository: CreditIssuanceRepository;
   readonly obligationRepository: CashObligationRepository;
   readonly lookups: ClearingLookups;
+  /**
+   * NET-W020 remediation (PR #40 review): the draw primitives run
+   * WITHIN the clearing's single authoritative transaction through
+   * their same-domain `...WithinTx` forms (never the transaction-
+   * owning commands).
+   */
+  readonly rewardService: RewardService;
+  readonly creditService: CreditService;
+  readonly cashService: CashService;
+  /** Pins the reward policy version for the draw's lock set (committed reads). */
+  readonly rewardPolicyRepository: RewardAllocationPolicyRepository;
+  /** The campaign clearing bookkeeping (participates in the same tx). */
+  readonly campaignBookkeeping: ClearingCampaignBookkeepingPort;
   readonly idempotency: IdempotencyStore;
   readonly auditWriter: TransactionalAuditWriter;
   readonly logger: {
@@ -1567,6 +1761,7 @@ export type {
   PostgresAuthority,
   TransactionalAuditWriter,
   IdempotencyStore,
+  IdempotentApplyContext,
   EconomicAccountKind,
   EconomicCashKind,
   EconomicConversionDirection,

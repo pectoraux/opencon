@@ -38,16 +38,18 @@ flows exclusively through the UNTOUCHED `allocateRewards` /
 
 | File | Change |
 |---|---|
-| `src/settlement/port.ts` | ADDITIVE §NET-W020: the four neutral lookups (contribution/placement/campaign/gate), `CrossPromotionClearingRecord`, the record/evaluate inputs + repository + service contracts, the `cross_promotion_clearing.recorded` audit-event type |
+| `src/settlement/port.ts` | ADDITIVE §NET-W020: the four neutral lookups (contribution/placement/campaign/gate), `CrossPromotionClearingRecord`, the record/evaluate inputs + repository + service contracts, the `cross_promotion_clearing.recorded` audit-event type. PR #40 REMEDIATION: the `...WithinTx` draw primitive declarations, `executeCrossPromotionClearing` + result, `recordCrossPromotionClearingWithinTx`, the `ClearingCampaignBookkeepingPort`, the expanded service deps |
 | `src/settlement/clearing-eligibility.ts` | NEW — the PURE evaluator (`evaluateCrossPromotionClearing`: the six-check machine-readable trace; `clearingGateSubjectIds`, `clearingOperationClass` helpers) |
-| `src/settlement/clearing-service.ts` | NEW — the service: the derived eligibility view + the AUTHORITATIVE record command (in-tx re-derivation + draw-result verification + create-once pair constraint + the lineage audit event) + tenant-scoped reads |
+| `src/settlement/clearing-service.ts` | NEW — the service: the derived eligibility view + the AUTHORITATIVE record command (in-tx re-derivation + draw-result verification + create-once pair constraint + the lineage audit event) + tenant-scoped reads. PR #40 REMEDIATION: `executeCrossPromotionClearing` — THE SINGLE AUTHORITATIVE TRANSACTION (§3.4a) — + `recordCrossPromotionClearingWithinTx` (the shared record body) |
 | `src/settlement/authority-clearing-repository.ts` | NEW — the authority-backed repository (`cross_promotion_clearings` collection) |
+| `src/settlement/reward-service.ts`, `src/settlement/credit-service.ts`, `src/settlement/cash-service.ts` | PR #40 REMEDIATION: each draw command refactored into the thin wrapper (validate → serialize → apply idempotently) + the `...WithinTx` body (the SAME body on the caller's transaction); the lock-set helpers exported |
+| `src/campaigns/campaign-service.ts`, `src/campaigns/port.ts` | PR #40 REMEDIATION: `recordClearingExecutionWithinTx` (the same bookkeeping body on the caller's transaction) + the exported `campaignLockKey` (the composite holds it across the clearing transaction) |
 | `src/settlement/module.ts`, `src/settlement/README.md` | Additive scope notes |
-| `src/bootstrap/runtime.ts` | The four lookup wirings (thin read-only adapters over the owning services/repos), the service wiring, the `executeCrossPromotionClearing` composite (pair mutex → hard gates → derived eligibility → draw → record → campaign bookkeeping) + the read commands + the Runtime exports |
+| `src/bootstrap/runtime.ts` | The four lookup wirings (thin read-only adapters over the owning services/repos), the service wiring + the bookkeeping port, the `executeCrossPromotionClearing` THIN adapter (the composite itself is the settlement domain's atomic execute) + the read commands + the Runtime exports |
 | `src/api/port.ts` | The command declarations (execute / evaluate / get / list) |
 | `src/api/server.ts` | `POST /api/settlement/cross-promotion-clearings` (guard `reward.clear`), `GET .../eligibility`, `GET ...` (list), `GET .../:id` |
 | `spec/work-orders/NET-W020.md` | NEW — the work order (the design/decision record) |
-| `tests/settlement-clearing/*` | NEW — the harness + AC-01..AC-07 suites (32 tests) |
+| `tests/settlement-clearing/*` | NEW — the harness + AC-01..AC-07 suites (31 tests) |
 | `tests/regression/net-w020-ac-08-architecture-out-of-scope.test.ts` | NEW — the AC-08 regression (13 tests) |
 | `docs/net-w020-cross-promotion-clearing.md` | This evidence document |
 
@@ -58,11 +60,11 @@ flows exclusively through the UNTOUCHED `allocateRewards` /
 | NET-W020-AC-01 | qualifying contributions + settlement-ready placements enter the deterministic clearing | `tests/settlement-clearing/net-w020-ac-01-qualifying-entry.test.ts` (5 tests) | The golden path (all six checks satisfied; reward/credit/cash draws through the canonical primitives); non-VERIFIED contributions and non-ready placements refused with machine-readable reasons |
 | NET-W020-AC-02 | eligibility re-derived from current records; never caller-asserted | `tests/settlement-clearing/net-w020-ac-02-derived-eligibility.test.ts` (5 tests) | Paused campaign blocks / resume re-opens; retired placement + withdrawn supply block; the record command's IN-TX re-derivation refuses a stale pre-flight; the structural no-assertion input pin |
 | NET-W020-AC-03 | exactly-once settlement through /settlement with conservation | `tests/settlement-clearing/net-w020-ac-03-exactly-once-settlement.test.ts` (4 tests) | ONE allocation per clearing; Σdebit === Σcredit per unit over the whole org; the participant summary moves exactly the drawn amount; the campaign bookkeeping event; a second clearing of the same pair never draws |
-| NET-W020-AC-04 | concurrency cannot duplicate; same-key replay deterministic | `tests/settlement-clearing/net-w020-ac-04-concurrency-replay.test.ts` (4 tests) | Concurrent different-key same-pair → ONE winner + the stable `CLEARING_CONFLICT`; concurrent same-key → the identical committed clearing; sequential replay → identical ids, created:false; the mid-chain crash-window replay converges with exactly one draw |
+| NET-W020-AC-04 | concurrency cannot duplicate; same-key replay deterministic | `tests/settlement-clearing/net-w020-ac-04-concurrency-replay.test.ts` (4 tests) | Concurrent different-key same-pair → ONE winner + the stable `CLEARING_CONFLICT`; concurrent same-key → the identical committed clearing; sequential replay → identical ids, created:false; a value CONSUMED by a DIRECT primitive draw fails the composite closed (the mid-chain crash window is ELIMINATED — §3.4a) |
 | NET-W020-AC-05 | cross-tenant + stale/withdrawn/retired/ineligible contexts fail closed | `tests/settlement-clearing/net-w020-ac-05-fail-closed.test.ts` (6 tests) | A second-org placement never resolves (no existence oracle); a cross-tenant value record is NotFound; the rules-less campaign binding; over-cap amount; unresolvable rule; the stale-window composite refusal with NOTHING recorded |
 | NET-W020-AC-06 | risk/dispute gates consulted before settlement mutation; unbonded disputes do not grief | `tests/settlement-clearing/net-w020-ac-06-risk-dispute-gates.test.ts` (4 tests) | A HOLD control on the contribution refuses (`RISK_CONTROL`, no draw); an ACTIVE bonded dispute refuses (`DISPUTE_CHALLENGE` + the view's gated check) until rejected; a PENDING_STAKE (unbonded) dispute NEVER gates; a person-wide HOLD on the placement owner refuses |
-| NET-W020-AC-07 | audit + transaction lineage complete; commit failure leaves no partial economic mutation | `tests/settlement-clearing/net-w020-ac-07-atomicity-lineage.test.ts` (3 tests) | CommitFailingTransaction on the record command → NOTHING persists (no record, no audit) and the healthy replay converges (exactly one allocation + one record); the audit event binds campaign + contribution + placement + clearing record + idempotency record + authoritative transaction + draw transaction + the six-check eligibility trace; the clearing record's ledger footprint is EXACTLY the draw's own transaction |
-| NET-W020-AC-08 | architecture/out-of-scope regression with frozen Architecture v1.0 unchanged | `tests/regression/net-w020-ac-08-architecture-out-of-scope.test.ts` (13 tests) | The authority guard (0 violations); the NO-17TH-DOMAIN pin; the NO-SECOND-LEDGER pin (the frozen economic vocabularies byte-identical); the CLEARING-RECORD-POSTS-NOTHING pin; /workflows untouched (subject union + tables + sanctions); NO AI PATH; no payment execution; the non-goal fences; the W019 inventory fence re-proven; the API surface pins; the file list; no secrets |
+| NET-W020-AC-07 | audit + transaction lineage complete; commit failure leaves no partial economic mutation | `tests/settlement-clearing/net-w020-ac-07-atomicity-lineage.test.ts` (3 tests) | THE COMPOSITE-LEVEL FAULT INJECTION (§3.4a): the ACTUAL end-to-end operation against a COMMIT-FAILING authority (the economic draw fully staged in-tx) → NOTHING persists — no clearing record, no allocation, no ledger entries, no campaign bookkeeping event, no clearing/draw/bookkeeping audit events, no idempotency record, the value still MATURE — and the same-key retry succeeds exactly once (created:true, one allocation/record/event; the third call replays created:false); the SAME AUTHORITATIVE TRANSACTION LINEAGE: the draw's, the record's and the campaign bookkeeping's audit events carry ONE transaction id + ONE idempotency record, and the clearing record's ledger footprint is EXACTLY the draw's own transaction |
+| NET-W020-AC-08 | architecture/out-of-scope regression with frozen Architecture v1.0 unchanged | `tests/regression/net-w020-ac-08-architecture-out-of-scope.test.ts` (14 tests) | The authority guard (0 violations); the NO-17TH-DOMAIN pin; the NO-SECOND-LEDGER pin (the frozen economic vocabularies byte-identical); the CLEARING-RECORD-POSTS-NOTHING pin; /workflows untouched (subject union + tables + sanctions); NO AI PATH (the region pin now NON-VACUOUS); no payment execution; the non-goal fences; the W019 inventory fence re-proven; the API surface pins; THE SINGLE-AUTHORITATIVE-TRANSACTION PIN (the composite runs only through the `...WithinTx` primitives); the file list; no secrets |
 
 ## 4. Invariant → enforcement map (work order §4)
 
@@ -70,11 +72,54 @@ flows exclusively through the UNTOUCHED `allocateRewards` /
 2. Currently-settlement-ready source context — the W019 readiness check at evaluation AND in-tx at record time (AC-02).
 3. `/settlement` is the sole economic authority — the record posts nothing; the pinned vocabularies are byte-identical (AC-03 + AC-08).
 4. Risk/dispute gates before mutation — the composite's hard gates (specific error codes) + the view's gate check + the in-tx re-derivation; PENDING_STAKE never gates (AC-06).
-5. Deterministic, idempotent, replay-safe — compound idempotency keys + the advisory pair mutex + the create-once pair record (AC-04).
+5. Deterministic, idempotent, replay-safe — ONE composite idempotency key over the WHOLE atomic unit (§3.4a) + the advisory pair mutex + the create-once pair record (AC-04).
 6. Tenant scoping fail-closed — the value-record scope anchor + same-scope lookups + the in-tx re-derivation (AC-05).
-7. Audit lineage binds everything — the `cross_promotion_clearing.recorded` event metadata (AC-07).
+7. Audit lineage binds everything — the `cross_promotion_clearing.recorded` event metadata; ONE transaction id + ONE idempotency record on the draw's, the record's AND the bookkeeping's audit events (AC-07).
 8. No AI path — no LLM import anywhere in the clearing surface (AC-08).
 9. Frozen architecture unchanged — the regression pins + the byte-identical specs (AC-08).
+10. ONE authoritative transaction for the WHOLE clearing operation — §3.4a: the draw + the clearing record + the campaign bookkeeping + the idempotency record + every audit event commit together or not at all; NO compensating reversal machinery exists on the clearing path (AC-07 composite-level fault injection + the AC-08 single-authoritative-transaction pin).
+
+## 4a. THE PR #40 REMEDIATION (the architect review's decision of record)
+
+The architect review of PR #40 (CHANGES REQUESTED) found a material
+atomicity defect: the original composite chained the draw, the record
+and the campaign bookkeeping as SEPARATELY-COMMITTED transactions, so a
+failure after the draw's commit could leave a committed economic
+mutation without its clearing record — a PARTIAL ECONOMIC MUTATION,
+violating AC-07. The remediation (work order §3.4a):
+
+- **ONE transaction boundary** (the architect's preferred shape verbatim):
+  `IdempotencyStore.applyIdempotent()` → a single `AuthorityTransaction`
+  that re-derives eligibility, runs the risk/dispute gates, performs the
+  draw WITHIN THE SAME TX (allocation/issuance/cash posting +
+  exactly-once consumption), creates the clearing record, appends the
+  campaign clearing bookkeeping and buffers the audit lineage → COMMIT.
+  Implemented as a settlement-authority transaction API
+  (`CrossPromotionClearingService.executeCrossPromotionClearing`) over
+  NEW `...WithinTx` settlement primitives
+  (`allocateRewardsWithinTx` / `issueCreditsWithinTx` /
+  `recordCashObligationWithinTx` / `recordCrossPromotionClearingWithinTx` /
+  `recordClearingExecutionWithinTx`) — never the transaction-owning
+  commands from the clearing composite (structurally pinned).
+- **No compensating reversals** — the transaction commits whole or rolls
+  back whole; no compensating-reversal machinery was introduced.
+- **Campaign bookkeeping participates in the SAME transaction** (the
+  review's expected option) through the neutral
+  `ClearingCampaignBookkeepingPort`; the composite holds the campaign
+  record's serialization key across the transaction.
+- **The required regression**: the composite-level fault injection
+  (the actual end-to-end operation, the draw staged in-tx, the
+  authoritative COMMIT forced to fail → NOTHING persists; the same-key
+  retry succeeds exactly once) + the same-transaction-lineage
+  successful-path assertion (AC-07).
+- **Ordering note**: the review's sketch lists re-derive-eligibility
+  before the gates; the implementation keeps the W014 discipline (hard
+  gates FIRST, uniform `RISK_CONTROL`/`DISPUTE_CHALLENGE` refusal codes)
+  with the full eligibility re-derivation immediately after — BOTH
+  inside the single transaction, BOTH before the draw; the record step
+  re-derives eligibility again post-draw (the create path's
+  authoritative bar). The approved placement/architecture is otherwise
+  untouched (no second ledger, no new primitive, /workflows untouched).
 
 ## 5. Out-of-scope confirmation
 

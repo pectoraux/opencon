@@ -65,7 +65,7 @@ export interface CashServiceDeps extends EconomicServiceDeps {
 }
 
 /** The account set a cash obligation posts to (lock set). */
-function obligationAccountIds(
+export function obligationAccountIds(
   organizationScopeId: string,
   kind: "payable" | "receivable",
   counterpartyPersonId: string,
@@ -134,124 +134,11 @@ export function createCashService(deps: CashServiceDeps): CashService {
           input.counterpartyPersonId,
         ),
         () =>
-          idempotency.applyIdempotent(key, async (ctx) => {
-            const tx = ctx.transaction;
-            const obligationId = randomUUID();
-            // payable:    debit protocol_recognition(cash)  amount
-            //             credit cash_payable(counterparty) amount
-            // receivable: debit cash_receivable(counterparty) amount
-            //             credit protocol_recognition(cash)    amount
-            const transaction = await postLedgerTransactionWithinTx(
-              tx,
-              execution,
-              {
-                organizationScopeId: input.organizationScopeId,
-                kind: "cash_accounting",
-                description: input.description,
-                subject: { kind: "cash_obligation", id: obligationId },
-                entries:
-                  kind === "payable"
-                    ? [
-                        {
-                          accountId: economicAccountId(
-                            input.organizationScopeId,
-                            null,
-                            "protocol_recognition",
-                            "cash",
-                          ),
-                          accountKind: "protocol_recognition",
-                          ownerPersonId: null,
-                          direction: "debit",
-                          amount: input.amount,
-                          unit: "cash",
-                        },
-                        {
-                          accountId: economicAccountId(
-                            input.organizationScopeId,
-                            input.counterpartyPersonId,
-                            "cash_payable",
-                            "cash",
-                          ),
-                          accountKind: "cash_payable",
-                          ownerPersonId: input.counterpartyPersonId,
-                          direction: "credit",
-                          amount: input.amount,
-                          unit: "cash",
-                        },
-                      ]
-                    : [
-                        {
-                          accountId: economicAccountId(
-                            input.organizationScopeId,
-                            input.counterpartyPersonId,
-                            "cash_receivable",
-                            "cash",
-                          ),
-                          accountKind: "cash_receivable",
-                          ownerPersonId: input.counterpartyPersonId,
-                          direction: "debit",
-                          amount: input.amount,
-                          unit: "cash",
-                        },
-                        {
-                          accountId: economicAccountId(
-                            input.organizationScopeId,
-                            null,
-                            "protocol_recognition",
-                            "cash",
-                          ),
-                          accountKind: "protocol_recognition",
-                          ownerPersonId: null,
-                          direction: "credit",
-                          amount: input.amount,
-                          unit: "cash",
-                        },
-                      ],
-                idempotencyKey: input.idempotencyKey,
-              },
-              ledgerRepository,
-            );
-            const obligation: CashObligation = Object.freeze({
-              id: obligationId,
-              organizationScopeId: input.organizationScopeId,
-              kind,
-              counterpartyPersonId,
-              amount,
-              status: "recognized",
-              settledAt: null,
-              settlementReference: null,
-              reversal: null,
-              transactionId: transaction.id,
-              description: input.description?.trim() || null,
-              recordedAt: new Date().toISOString(),
-              idempotencyKey: input.idempotencyKey,
-              executionId: execution.executionId,
-              correlationId: execution.correlationId,
-              causationId: execution.causationId,
-            });
-            await repository.createWithinTx(obligation, tx);
-            const buffer = auditWriter.forTransaction(tx);
-            await buffer.append({
-              eventType: OBLIGATION_RECORDED,
-              context: execution,
-              actor: execution.actor?.id ?? null,
-              subject: obligation.id,
-              resourceType: "cash_obligation",
-              resourceId: obligation.id,
-              metadata: {
-                organizationScopeId: obligation.organizationScopeId,
-                kind: obligation.kind,
-                counterpartyPersonId: obligation.counterpartyPersonId,
-                amount: obligation.amount,
-                unit: "cash",
-                idempotencyKey: obligation.idempotencyKey,
-                idempotencyRecordId: ctx.recordId,
-                transactionId: tx.transactionId,
-                ledgerTransactionId: transaction.id,
-              },
-            });
-            return obligation;
-          }, execution),
+          idempotency.applyIdempotent(
+            key,
+            (ctx) => service.recordCashObligationWithinTx(execution, input, ctx),
+            execution,
+          ),
       );
       logger.info("cash_obligation.recorded", {
         obligationId: applied.result.id,
@@ -260,6 +147,139 @@ export function createCashService(deps: CashServiceDeps): CashService {
         created: applied.executed,
       });
       return { obligation: applied.result, created: applied.executed };
+    },
+
+    async recordCashObligationWithinTx(execution, input, ctx) {
+      // NET-W020 remediation (PR #40 review): the SAME obligation body
+      // as the standalone command, on the CALLER'S authoritative
+      // transaction (ctx.transaction). No lock acquisition, no own
+      // idempotency apply — the caller's transaction IS the atomicity
+      // boundary.
+      const tx = ctx.transaction;
+      if (!isEconomicCashKind(input.kind)) {
+        throw validationError(
+          `cash obligation kind must be payable | receivable (got ${String(input.kind)})`,
+          { kind: input.kind },
+        );
+      }
+      // Capture the narrowed kind (type narrowing does not survive
+      // into the posting entries below).
+      const kind: CashObligation["kind"] = input.kind;
+      const obligationId = randomUUID();
+      // payable:    debit protocol_recognition(cash)  amount
+      //             credit cash_payable(counterparty) amount
+      // receivable: debit cash_receivable(counterparty) amount
+      //             credit protocol_recognition(cash)    amount
+      const transaction = await postLedgerTransactionWithinTx(
+        tx,
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId,
+          kind: "cash_accounting",
+          description: input.description,
+          subject: { kind: "cash_obligation", id: obligationId },
+          entries:
+            kind === "payable"
+              ? [
+                  {
+                    accountId: economicAccountId(
+                      input.organizationScopeId,
+                      null,
+                      "protocol_recognition",
+                      "cash",
+                    ),
+                    accountKind: "protocol_recognition",
+                    ownerPersonId: null,
+                    direction: "debit",
+                    amount: input.amount,
+                    unit: "cash",
+                  },
+                  {
+                    accountId: economicAccountId(
+                      input.organizationScopeId,
+                      input.counterpartyPersonId,
+                      "cash_payable",
+                      "cash",
+                    ),
+                    accountKind: "cash_payable",
+                    ownerPersonId: input.counterpartyPersonId,
+                    direction: "credit",
+                    amount: input.amount,
+                    unit: "cash",
+                  },
+                ]
+              : [
+                  {
+                    accountId: economicAccountId(
+                      input.organizationScopeId,
+                      input.counterpartyPersonId,
+                      "cash_receivable",
+                      "cash",
+                    ),
+                    accountKind: "cash_receivable",
+                    ownerPersonId: input.counterpartyPersonId,
+                    direction: "debit",
+                    amount: input.amount,
+                    unit: "cash",
+                  },
+                  {
+                    accountId: economicAccountId(
+                      input.organizationScopeId,
+                      null,
+                      "protocol_recognition",
+                      "cash",
+                    ),
+                    accountKind: "protocol_recognition",
+                    ownerPersonId: null,
+                    direction: "credit",
+                    amount: input.amount,
+                    unit: "cash",
+                  },
+                ],
+          idempotencyKey: input.idempotencyKey,
+        },
+        ledgerRepository,
+      );
+      const obligation: CashObligation = Object.freeze({
+        id: obligationId,
+        organizationScopeId: input.organizationScopeId,
+        kind,
+        counterpartyPersonId: input.counterpartyPersonId,
+        amount: input.amount,
+        status: "recognized",
+        settledAt: null,
+        settlementReference: null,
+        reversal: null,
+        transactionId: transaction.id,
+        description: input.description?.trim() || null,
+        recordedAt: new Date().toISOString(),
+        idempotencyKey: input.idempotencyKey,
+        executionId: execution.executionId,
+        correlationId: execution.correlationId,
+        causationId: execution.causationId,
+      });
+      await repository.createWithinTx(obligation, tx);
+      const buffer = auditWriter.forTransaction(tx);
+      await buffer.append({
+        eventType: OBLIGATION_RECORDED,
+        context: execution,
+        actor: execution.actor?.id ?? null,
+        subject: obligation.id,
+        resourceType: "cash_obligation",
+        resourceId: obligation.id,
+        metadata: {
+          organizationScopeId: obligation.organizationScopeId,
+          kind: obligation.kind,
+          counterpartyPersonId: obligation.counterpartyPersonId,
+          amount: obligation.amount,
+          unit: "cash",
+          idempotencyKey: obligation.idempotencyKey,
+          idempotencyRecordId: ctx.recordId,
+          transactionId: tx.transactionId,
+          ledgerTransactionId: transaction.id,
+        },
+      });
+      return obligation;
     },
 
     async settleCashObligation(execution, input) {
