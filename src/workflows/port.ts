@@ -149,6 +149,11 @@ export interface TransitionAuthorizer {
  * spec/work-orders/NET-W017.md §3.1) transitions through the SAME
  * machinery — acceptance/production execute through the canonical
  * workflow authority, never a second lifecycle engine.
+ * NET-W018 adds the PUBLICATION lifecycle repository: the creator
+ * publication lifecycle (DRAFT → VERIFIED + CANCELLED,
+ * spec/work-orders/NET-W018.md §3.4) transitions through the SAME
+ * machinery — the DRAFT → VERIFIED transition is the disclosure
+ * gate composite (creators domain) composed through the in-tx twin.
  */
 export interface WorkflowServiceDeps {
   /** Opportunity lifecycle repository (used for opportunity transitions). */
@@ -161,6 +166,8 @@ export interface WorkflowServiceDeps {
   readonly outcomeMeasurementRepository: LifecycleRepository;
   /** Engagement lifecycle repository (used for engagement transitions). */
   readonly engagementRepository: LifecycleRepository;
+  /** Publication lifecycle repository (used for publication transitions). */
+  readonly publicationRepository: LifecycleRepository;
   /** Server-side authorization (deny-by-default). */
   readonly authorizer: TransitionAuthorizer;
   /**
@@ -279,7 +286,7 @@ export interface WorkflowService {
  * The WorkflowsPort describes the boundary's readiness. After NET-W004
  * it is `"ready"` (the boundary now carries the authoritative workflow
  * service + transition table). NET-W017 adds the engagement audit
- * namespace (additive).
+ * namespace; NET-W018 adds the publication audit namespace (additive).
  */
 export interface WorkflowsPort {
   readonly boundary: "workflows";
@@ -290,6 +297,7 @@ export interface WorkflowsPort {
     readonly proofOfValue: "proof_of_value.transition";
     readonly outcomeMeasurement: "outcome_measurement.transition";
     readonly engagement: "engagement.transition";
+    readonly publication: "publication.transition";
   };
 }
 

@@ -208,7 +208,8 @@ export interface ApiRequestTransitionInput {
     | "contribution"
     | "proof_of_value"
     | "outcome_measurement"
-    | "engagement";
+    | "engagement"
+    | "publication";
   readonly targetState: string;
   readonly expectedVersion: number;
   readonly idempotencyKey: string;
@@ -2537,6 +2538,133 @@ export interface ApiCommands {
     organizationScopeId: string,
     productionId: string,
   ): Promise<readonly Record<string, unknown>[]>;
+
+  // -----------------------------------------------------------------
+  // NET-W018 — Sponsorship and disclosure (commercial relationships,
+  // disclosure declarations, publications). The publication is a
+  // canonical /workflows lifecycle subject: the VERIFICATION
+  // composite (the disclosure gate) is guarded here; pure lifecycle
+  // cancellation goes through the EXISTING `requestTransition`
+  // command with subjectKind "publication". Compensation on the
+  // relationship is REFERENCE DATA ONLY (no economic command).
+  // -----------------------------------------------------------------
+
+  /**
+   * Record the commercial relationship for an engagement
+   * (protected; guard action
+   * `creators.commercialRelationships.create`): the explicit,
+   * durable, tenant-scoped commercial record (DISC-001) with
+   * campaign/engagement/creator lineage, relationship-declared
+   * disclosure obligations and reference-only compensation terms.
+   */
+  createCommercialRelationship(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ relationship: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Terminate the commercial relationship (protected; guard action
+   * `creators.commercialRelationships.terminate`): one-way; the
+   * relationship KEEPS its disclosure obligations for content
+   * produced under it.
+   */
+  terminateCommercialRelationship(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * Record a publication (protected; guard action
+   * `creators.publications.create`): the DRAFT publication record
+   * for a VERIFIED engagement's production with a provider-neutral
+   * channel descriptor.
+   */
+  createPublication(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ publication: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Append a disclosure declaration (protected; guard action
+   * `creators.publications.declareDisclosure`; creator-only
+   * declarant): the auditable, evidence-bound disclosure record —
+   * every evidence reference validates against the canonical
+   * /evidence authority subject-bound to THIS publication.
+   */
+  recordDisclosureDeclaration(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ declaration: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * THE DISCLOSURE GATE (protected; guard action
+   * `creators.publications.verify`): verify the publication — the
+   * derived disclosure obligations (campaign policy ∪ relationship
+   * obligations) must ALL be satisfied by evidence-bound
+   * declarations, and ≥1 canonical publication-evidence reference
+   * must validate, before the DRAFT → VERIFIED transition executes
+   * in ONE authoritative transaction. There is NO input that can
+   * bypass the derivation.
+   */
+  verifyPublication(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /** Fetch one commercial relationship (public read; tenant-scoped). */
+  getCommercialRelationship(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    relationshipId: string,
+  ): Promise<Record<string, unknown>>;
+
+  /** List an org's commercial relationships (public read). */
+  listCommercialRelationships(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    campaignId?: string,
+    engagementId?: string,
+    creatorPersonId?: string,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /** Fetch one publication (public read; tenant-scoped). */
+  getPublication(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    publicationId: string,
+  ): Promise<Record<string, unknown>>;
+
+  /** List an org's publications (public read). */
+  listPublications(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    engagementId?: string,
+    campaignId?: string,
+    creatorPersonId?: string,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /** List a publication's disclosure declarations (public read). */
+  listDisclosureDeclarations(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    publicationId: string,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /**
+   * The DERIVED disclosure status of a publication (public read):
+   * required obligations with provenance + satisfaction state — a
+   * pure derivation over durable records.
+   */
+  getPublicationDisclosureStatus(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    publicationId: string,
+  ): Promise<Record<string, unknown>>;
 
   // -----------------------------------------------------------------
   // NET-W012 — helpful contributions (Proof-of-Helpfulness).

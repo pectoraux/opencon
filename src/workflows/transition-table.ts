@@ -537,6 +537,64 @@ export const ENGAGEMENT_TRANSITION_TABLE: readonly TransitionRule[] = [
 ];
 
 /**
+ * The exhaustive transition table for creator PUBLICATIONS
+ * (NET-W018 §3.4). The publication is the workflow-mediated record
+ * of creator content going live on a channel; its lifecycle REUSES
+ * the canonical state vocabulary (the W005/W006 precedent — the
+ * state universe stays small, the workflow machinery is untouched):
+ *
+ *   DRAFT    — publication recorded (verified engagement + production
+ *              + provider-neutral channel), disclosure obligations
+ *              pending
+ *   VERIFIED — terminal: publication VERIFIED — the applicable
+ *              disclosure obligations are satisfied and canonical,
+ *              subject-bound publication evidence is recorded
+ *   CANCELLED — terminal: withdrawn before verification
+ *
+ * THE DISCLOSURE GATE (work order §2/§4 — the decision of record):
+ * the DRAFT → VERIFIED transition is requested ONLY by the creators
+ * domain's publication-verification composite AFTER it derives the
+ * applicable disclosure obligations (campaign policy ∪ commercial-
+ * relationship obligations — DURABLE RECORDS, never caller claims)
+ * and proves every obligation satisfied by an evidence-bound
+ * declaration for THIS publication. The workflow table itself stays
+ * PURE routing (the W004 stance: `requiresEvidenceReference`
+ * DECLARES the evidence-backed nature); the gate evaluation lives in
+ * the creators domain service (src/creators/sponsorship-service.ts)
+ * and composes the transition through the in-tx twin so the material
+ * record + the gate + the transition commit as ONE authoritative
+ * transaction (the NET-W017 remediation precedent).
+ *
+ * No BLOCKED/FRAUD_REVIEW/DISPUTED states for the publication: risk
+ * escalation (e.g. a challenged disclosure) is a /disputes case
+ * referencing the publication, not a local lifecycle branch (the
+ * PoV/measured-outcome/engagement precedent).
+ */
+export const PUBLICATION_TRANSITION_TABLE: readonly TransitionRule[] = [
+  {
+    from: "DRAFT",
+    to: "VERIFIED",
+    policyAction: policyActionFor("publication", "DRAFT", "VERIFIED"),
+    auditEventName: auditEventFor("publication", "DRAFT", "VERIFIED"),
+    // Requires ≥1 subject-bound canonical publication-evidence
+    // reference AND every applicable disclosure obligation satisfied
+    // (validated by the creators domain's verification composite
+    // BEFORE the transition is requested — the disclosure gate).
+    requiresEvidenceReference: true,
+  },
+  {
+    from: "DRAFT",
+    to: "CANCELLED",
+    policyAction: policyActionFor("publication", "DRAFT", "CANCELLED"),
+    auditEventName: auditEventFor("publication", "DRAFT", "CANCELLED"),
+  },
+  // VERIFIED / CANCELLED are terminal: the table intentionally
+  // contains no rule whose source is a terminal state. Retraction
+  // AFTER verification is an explicit non-goal (a /disputes case + a
+  // later work item own post-publication semantics).
+];
+
+/**
  * Look up the transition table for a subject kind.
  */
 export function transitionTableFor(
@@ -548,6 +606,7 @@ export function transitionTableFor(
   if (subjectKind === "outcome_measurement") {
     return OUTCOME_MEASUREMENT_TRANSITION_TABLE;
   }
+  if (subjectKind === "publication") return PUBLICATION_TRANSITION_TABLE;
   return ENGAGEMENT_TRANSITION_TABLE;
 }
 

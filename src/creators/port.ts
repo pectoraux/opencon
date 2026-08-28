@@ -89,6 +89,10 @@ import type {
   TransitionResult,
 } from "../core/workflow.ts";
 import type {
+  CampaignDisclosureKind,
+} from "../core/campaigns.ts";
+import type {
+  CommercialRelationshipKind,
   CreatorContentFormat,
   CreatorEngagementBand,
   CreatorPlatformKind,
@@ -2126,6 +2130,613 @@ export interface CreatorEngagementServiceDeps {
 }
 
 // ---------------------------------------------------------------------------
+// NET-W018 — Sponsorship and disclosure: commercial relationships,
+// disclosure declarations and publications (the creator-side
+// commercial/engagement data — DISC-001/002, CRE-006).
+//
+// AUTHORITY MODEL (work order §2 — the decision of record):
+//  - the commercial relationship, the disclosure declaration and the
+//    publication record are CREATOR-SIDE commercial/engagement data
+//    and live HERE (in `/creators`);
+//  - `/campaigns` stays the campaign-policy authority: the disclosure
+//    POLICY is a section of the versioned campaign policy, consumed
+//    READ-ONLY through the neutral
+//    {@link CampaignDisclosurePolicyLookup} below;
+//  - `/workflows` stays the SOLE lifecycle authority: the publication
+//    is a NEW canonical lifecycle subject kind ("publication") whose
+//    DRAFT → VERIFIED transition is the DISCLOSURE GATE — requested
+//    only by the verification composite below, through the sanctioned
+//    in-tx twin, NEVER mutated locally;
+//  - `/evidence` stays the truth authority: publication evidence and
+//    declaration evidence are canonical, subject-bound references
+//    validated through the neutral evidence lookup — this boundary
+//    NEVER fabricates disclosure proof;
+//  - `/settlement` stays the economic authority: compensation on the
+//    relationship is REFERENCE DATA ONLY (no balances, no postings,
+//    no second ledger);
+//  - NO AI path exists anywhere in this surface (work order §2).
+// ---------------------------------------------------------------------------
+
+/**
+ * Declared commercial-relationship compensation — REFERENCE DATA
+ * ONLY (the exact EngagementCompensationTerms precedent): the shape
+ * mirrors the engagement's declared terms and optionally pins the
+ * settlement reward-policy reference. /settlement remains the
+ * economic authority; NET-W018 creates NO economic units,
+ * commitments or ledger entries (AC-05).
+ */
+export interface CommercialCompensationTerms {
+  readonly format: CreatorContentFormat;
+  readonly unit: CreatorRateUnit;
+  readonly amount: number;
+  readonly currency: string;
+  /** Optional stable reward-policy reference (data only). */
+  readonly rewardPolicyReference: string | null;
+}
+
+/**
+ * A CommercialRelationship — the explicit, durable, tenant-scoped
+ * record of the commercial arrangement behind an engagement
+ * (DISC-001; invariant 1). ONE relationship per engagement (the
+ * commercial context of that work object). The record is STATIC
+ * after creation except the one-way termination fields.
+ *
+ * Invariants:
+ *  - lineage: `campaignId` + `engagementId` + `creatorPersonId`
+ *    MUST mirror the referenced engagement (verified at creation,
+ *    in-tx);
+ *  - `kind` is the closed-vocabulary commercial arrangement kind
+ *    (declared data — never an economic instruction);
+ *  - `disclosureObligations` are relationship-declared ADDITIONAL
+ *    disclosure obligations (validated against the frozen
+ *    campaign-disclosure vocabulary; the publication gate derives
+ *    the UNION with the campaign policy — obligations can only be
+ *    ADDED by the relationship, never removed);
+ *  - `compensation` is REFERENCE DATA ONLY (AC-05);
+ *  - `terminatedAt` is one-way (a terminated relationship keeps its
+ *    disclosure obligations for content produced under it — the
+ *    conservative direction: never under-disclose).
+ */
+export interface CommercialRelationship {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly campaignId: string;
+  readonly engagementId: string;
+  readonly creatorPersonId: string;
+  /** The commercial counterparty (the sponsor-side person). */
+  readonly sponsorPersonId: string;
+  readonly kind: CommercialRelationshipKind;
+  readonly disclosureObligations: readonly CampaignDisclosureKind[];
+  readonly compensation: CommercialCompensationTerms | null;
+  readonly terminatedAt: string | null;
+  readonly terminationReason: string | null;
+  readonly formatVersion: string;
+  readonly createdBy: string;
+  readonly createdAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+/**
+ * A DisclosureDeclaration — the auditable creator declaration that a
+ * specific disclosure was made in a specific publication (CRE-006;
+ * invariant 3). IMMUTABLE, append-only, and bound to the publication
+ * context: every evidence reference must resolve to a canonical
+ * `/evidence` record subject-bound to THIS publication
+ * (`subjectType "publication"`, `subjectId == publicationId`) —
+ * disclosure proof cannot be fabricated in the creator domain
+ * (invariant 6). The declaration IS the DISC-002 mechanism: a
+ * `genuine_experience` declaration is the evidence-bound creator
+ * attestation that personal-experience claims are genuine.
+ */
+export interface DisclosureDeclaration {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly publicationId: string;
+  readonly kind: CampaignDisclosureKind;
+  readonly declaredByPersonId: string;
+  /** The disclosure statement prose (what was actually disclosed). */
+  readonly statement: string;
+  /** Canonical evidence ids proving the disclosure (≥1 required). */
+  readonly evidenceReferences: readonly string[];
+  readonly formatVersion: string;
+  readonly createdAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+/** A provider-neutral external platform reference (the deliverable precedent). */
+export interface PublicationExternalReference {
+  readonly provider: string;
+  readonly externalId: string;
+  readonly url: string | null;
+}
+
+/**
+ * The publication's channel descriptor — PROVIDER-NEUTRAL (AC-06):
+ * a closed-vocabulary channel kind (the frozen usage-rights channel
+ * vocabulary) plus an OPTIONAL neutral external-platform reference
+ * (provider id + external id + url — never platform-specific
+ * semantics, never credentials).
+ */
+export interface PublicationChannel {
+  readonly kind: UsageRightsChannel;
+  readonly externalPlatform: PublicationExternalReference | null;
+}
+
+/**
+ * A PublicationRecord — the workflow-mediated record of creator
+ * content going live on a channel (invariant 4). Satisfies the
+ * LifecycleSubject contract so the canonical WorkflowService can
+ * transition its state; the record is STATIC after creation except
+ * the lifecycle fields /workflows owns and the one-time verification
+ * bookkeeping (evidence references + verifiedAt) written by the
+ * verification composite in the SAME transaction as the
+ * DRAFT → VERIFIED transition.
+ *
+ * `state` moves ONLY through /workflows (DRAFT → VERIFIED /
+ * CANCELLED). VERIFIED means: the applicable disclosure obligations
+ * were satisfied (the gate) AND ≥1 canonical, subject-bound
+ * publication evidence reference was recorded. Producing or owning
+ * content does NOT itself imply publication authority — the
+ * publication exists only through this explicitly gated path.
+ */
+export interface PublicationRecord extends LifecycleSubject {
+  readonly engagementId: string;
+  readonly productionId: string;
+  readonly creatorPersonId: string;
+  readonly campaignId: string;
+  readonly channel: PublicationChannel;
+  /** Set once, by the verification composite (in-tx with the transition). */
+  readonly publicationEvidenceReferences: readonly string[];
+  readonly verifiedAt: string | null;
+  readonly formatVersion: string;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W018 inputs / results
+// ---------------------------------------------------------------------------
+
+export interface CreateCommercialRelationshipInput {
+  readonly organizationScopeId: string;
+  readonly engagementId: string;
+  /** Must mirror the engagement's campaign (lineage coherence). */
+  readonly campaignId: string;
+  readonly sponsorPersonId: string;
+  readonly kind: string;
+  readonly disclosureObligations?: readonly string[];
+  readonly compensation?: {
+    readonly format: string;
+    readonly unit: string;
+    readonly amount: number;
+    readonly currency: string;
+    readonly rewardPolicyReference?: string | null;
+  } | null;
+  readonly idempotencyKey: string;
+}
+
+export interface CreateCommercialRelationshipResult {
+  readonly relationship: CommercialRelationship;
+  /** false when the idempotency key replayed the committed record. */
+  readonly created: boolean;
+}
+
+export interface TerminateCommercialRelationshipInput {
+  readonly organizationScopeId: string;
+  readonly relationshipId: string;
+  readonly reason?: string;
+  readonly idempotencyKey: string;
+}
+
+export interface CreatePublicationInput {
+  readonly organizationScopeId: string;
+  readonly engagementId: string;
+  readonly productionId?: string | null;
+  readonly channel: {
+    readonly kind: string;
+    readonly externalPlatform?: {
+      readonly provider: string;
+      readonly externalId: string;
+      readonly url?: string | null;
+    } | null;
+  };
+  readonly idempotencyKey: string;
+}
+
+export interface CreatePublicationResult {
+  readonly publication: PublicationRecord;
+  /** false when the idempotency key replayed the committed record. */
+  readonly created: boolean;
+}
+
+export interface RecordDisclosureDeclarationInput {
+  readonly organizationScopeId: string;
+  readonly publicationId: string;
+  readonly kind: string;
+  readonly statement: string;
+  /** Canonical evidence ids proving the disclosure (≥1 required). */
+  readonly evidenceReferences: readonly string[];
+  readonly idempotencyKey: string;
+}
+
+export interface RecordDisclosureDeclarationResult {
+  readonly declaration: DisclosureDeclaration;
+  /** false when the idempotency key replayed the committed record. */
+  readonly created: boolean;
+}
+
+export interface VerifyPublicationInput {
+  readonly organizationScopeId: string;
+  readonly publicationId: string;
+  readonly expectedVersion: number;
+  /** Canonical publication-evidence ids (≥1 required, subject-bound). */
+  readonly evidenceReferences: readonly string[];
+  readonly idempotencyKey: string;
+}
+
+export interface VerifyPublicationResult {
+  readonly publication: PublicationRecord;
+  readonly transition: TransitionResult;
+  /** The disclosure-gate evaluation snapshot (auditable derivation). */
+  readonly disclosureStatus: PublicationDisclosureStatus;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W018 derived disclosure status (pure derivation — never stored)
+// ---------------------------------------------------------------------------
+
+/** Where one required disclosure kind came from (provenance). */
+export interface DisclosureRequirementSource {
+  readonly source: "campaign_policy" | "commercial_relationship";
+  /** The resolved policy version (campaign_policy source only). */
+  readonly policyVersion: number | null;
+  /** The relationship that declared the obligation (relationship source only). */
+  readonly relationshipId: string | null;
+}
+
+/** One derived disclosure obligation + its satisfaction state. */
+export interface DisclosureObligationStatus {
+  readonly kind: CampaignDisclosureKind;
+  readonly sources: readonly DisclosureRequirementSource[];
+  readonly satisfied: boolean;
+  /** The declarations satisfying this kind (deterministic order). */
+  readonly declarationIds: readonly string[];
+}
+
+/**
+ * The DERIVED disclosure status of one publication (AC-02): the
+ * required obligations (campaign policy ∪ relationship obligations —
+ * durable records, never caller claims), each with provenance and
+ * satisfaction state. A pure function over immutable records — never
+ * a stored/mutated field.
+ */
+export interface PublicationDisclosureStatus {
+  readonly publicationId: string;
+  readonly organizationScopeId: string;
+  readonly state: LifecycleState;
+  readonly obligations: readonly DisclosureObligationStatus[];
+  /** True iff every required obligation is satisfied. */
+  readonly satisfied: boolean;
+  readonly evaluatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W018 neutral cross-domain lookups (composition-root wired)
+// ---------------------------------------------------------------------------
+
+/**
+ * The campaign's resolved disclosure policy — READ-ONLY structural
+ * view over the campaigns boundary's versioned policy (the exact
+ * EngagementCampaignLookup dependency-inversion precedent).
+ * /campaigns stays the policy authority; this view carries the
+ * declared requiredKinds of the resolved (pinned-or-latest) version.
+ * Pre-W018 versions / absent sections resolve as EMPTY (no
+ * requirements declared).
+ */
+export interface ResolvedCampaignDisclosurePolicy {
+  readonly campaignId: string;
+  readonly organizationScopeId: string;
+  readonly policyVersion: number | null;
+  readonly requiredKinds: readonly CampaignDisclosureKind[];
+}
+
+export interface CampaignDisclosurePolicyLookup {
+  /**
+   * Resolve a campaign's disclosure policy. `policyVersion` pins the
+   * version (the engagement's pinned campaign policy version); when
+   * omitted the LATEST version applies. A nonexistent or cross-scope
+   * campaign resolves to null (no existence oracle).
+   */
+  resolve(
+    campaignId: string,
+    policyVersion?: number,
+  ): Promise<ResolvedCampaignDisclosurePolicy | null>;
+}
+
+/**
+ * The sanctioned /workflows delegation twin for the publication
+ * composites (the NET-W017 remediation pattern): the verification
+ * composite validates the disclosure gate + evidence, then executes
+ * the authorized DRAFT → VERIFIED transition IN-TX — /workflows
+ * stays the SOLE lifecycle authority and the material verification
+ * bookkeeping AND the transition commit as ONE authoritative unit.
+ */
+export interface SponsorshipWorkflowPort {
+  requestTransitionWithinTx(
+    request: TransitionRequest,
+    execution: ExecutionContext,
+    tx: AuthorityTransaction,
+    idempotencyRecordId: string,
+  ): Promise<TransitionResult>;
+}
+
+export interface CreatorSponsorshipLookups {
+  readonly campaignDisclosurePolicy: CampaignDisclosurePolicyLookup;
+  readonly evidence: ProductionEvidenceLookup;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W018 repositories
+// ---------------------------------------------------------------------------
+
+export interface CommercialRelationshipRepository {
+  save(
+    relationship: CommercialRelationship,
+    execution: ExecutionContext,
+  ): Promise<CommercialRelationship>;
+  findById(id: string): Promise<CommercialRelationship | null>;
+  findByEngagement(
+    organizationScopeId: string,
+    engagementId: string,
+  ): Promise<CommercialRelationship | null>;
+  /** In-tx read for the verification composite's gate derivation. */
+  findByEngagementWithinTx(
+    organizationScopeId: string,
+    engagementId: string,
+    tx: AuthorityTransaction,
+  ): Promise<CommercialRelationship | null>;
+  createWithinTx(
+    relationship: CommercialRelationship,
+    tx: AuthorityTransaction,
+  ): Promise<CommercialRelationship>;
+  /**
+   * One-way termination (in-tx with the termination audit event):
+   * an already-terminated record is returned unchanged.
+   */
+  terminateWithinTx(
+    relationshipId: string,
+    terminatedAt: string,
+    reason: string | null,
+    tx: AuthorityTransaction,
+  ): Promise<CommercialRelationship>;
+  listByOrganization(
+    organizationScopeId: string,
+    filters?: {
+      readonly campaignId?: string;
+      readonly engagementId?: string;
+      readonly creatorPersonId?: string;
+    },
+  ): Promise<readonly CommercialRelationship[]>;
+}
+
+export interface DisclosureDeclarationRepository {
+  save(
+    declaration: DisclosureDeclaration,
+    execution: ExecutionContext,
+  ): Promise<DisclosureDeclaration>;
+  findById(id: string): Promise<DisclosureDeclaration | null>;
+  createWithinTx(
+    declaration: DisclosureDeclaration,
+    tx: AuthorityTransaction,
+  ): Promise<DisclosureDeclaration>;
+  listByPublication(
+    organizationScopeId: string,
+    publicationId: string,
+  ): Promise<readonly DisclosureDeclaration[]>;
+  /** In-tx read for the verification composite's gate derivation. */
+  listByPublicationWithinTx(
+    organizationScopeId: string,
+    publicationId: string,
+    tx: AuthorityTransaction,
+  ): Promise<readonly DisclosureDeclaration[]>;
+  /** In-tx bound check (max declarations per publication). */
+  countByPublicationWithinTx(
+    publicationId: string,
+    tx: AuthorityTransaction,
+  ): Promise<number>;
+}
+
+export interface PublicationRepository {
+  save(
+    publication: PublicationRecord,
+    execution: ExecutionContext,
+  ): Promise<PublicationRecord>;
+  findById(id: string): Promise<PublicationRecord | null>;
+  createWithinTx(
+    publication: PublicationRecord,
+    tx: AuthorityTransaction,
+  ): Promise<PublicationRecord>;
+  /**
+   * The one-time verification bookkeeping (in-tx with the
+   * DRAFT → VERIFIED transition + the publication.verified audit
+   * event — the composite): records the publication-evidence
+   * references + verifiedAt. Idempotent within the caller's apply: an
+   * already-verified publication is returned unchanged.
+   */
+  applyVerificationWithinTx(
+    publicationId: string,
+    evidenceReferences: readonly string[],
+    verifiedAt: string,
+    tx: AuthorityTransaction,
+  ): Promise<PublicationRecord>;
+  listByOrganization(
+    organizationScopeId: string,
+    filters?: {
+      readonly engagementId?: string;
+      readonly campaignId?: string;
+      readonly creatorPersonId?: string;
+      readonly states?: readonly LifecycleState[];
+    },
+  ): Promise<readonly PublicationRecord[]>;
+  /** LifecycleRepository structural surface (WorkflowService). */
+  getByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<PublicationRecord | null>;
+  saveWithinTx(
+    subject: PublicationRecord,
+    expectedVersion: number,
+    execution: ExecutionContext,
+    tx: AuthorityTransaction,
+  ): Promise<PublicationRecord>;
+}
+
+// ---------------------------------------------------------------------------
+// The NET-W018 sponsorship domain service
+// ---------------------------------------------------------------------------
+
+export interface CreatorSponsorshipService {
+  /**
+   * Record the commercial relationship for an engagement (DISC-001):
+   * validates the engagement (existence + tenant scope + lineage
+   * coherence: campaign + creator mirror the engagement), the closed
+   * relationship kind, the disclosure obligations (frozen
+   * disclosure vocabulary) and the reference-only compensation
+   * terms. ONE relationship per engagement (create-once; a second
+   * is a stable conflict). Commits atomically with the
+   * `commercial_relationship.recorded` audit event.
+   */
+  createCommercialRelationship(
+    execution: ExecutionContext,
+    input: CreateCommercialRelationshipInput,
+  ): Promise<CreateCommercialRelationshipResult>;
+  /**
+   * Terminate the relationship (one-way; append-only audit): the
+   * relationship keeps its disclosure obligations for content
+   * produced under it (the conservative direction).
+   */
+  terminateCommercialRelationship(
+    execution: ExecutionContext,
+    input: TerminateCommercialRelationshipInput,
+  ): Promise<CommercialRelationship>;
+  /** Tenant-scoped reads (cross-scope = NotFoundError). */
+  getCommercialRelationship(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    relationshipId: string,
+  ): Promise<CommercialRelationship>;
+  listCommercialRelationships(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    filters?: {
+      readonly campaignId?: string;
+      readonly engagementId?: string;
+      readonly creatorPersonId?: string;
+    },
+  ): Promise<readonly CommercialRelationship[]>;
+
+  /**
+   * Record a publication (DRAFT): the engagement must be VERIFIED
+   * (terminal success — the content is produced and verified) and
+   * the referenced production must belong to the engagement. The
+   * channel descriptor is provider-neutral (closed channel kind +
+   * optional neutral external reference). Commits atomically with
+   * the `publication.recorded` audit event. Producing or owning
+   * content does NOT itself imply publication authority — this
+   * record is the only gated path to a VERIFIED publication.
+   */
+  createPublication(
+    execution: ExecutionContext,
+    input: CreatePublicationInput,
+  ): Promise<CreatePublicationResult>;
+  /**
+   * Append a disclosure declaration for a DRAFT publication
+   * (creator-only declarant): the kind must be in the frozen
+   * disclosure vocabulary, and EVERY evidence reference must resolve
+   * to a canonical /evidence record subject-bound to THIS
+   * publication (same tenant scope; subjectType "publication" +
+   * subjectId == publicationId) — disclosure proof cannot be
+   * fabricated here. Immutable + append-only; commits atomically
+   * with the `disclosure_declaration.recorded` audit event.
+   */
+  recordDisclosureDeclaration(
+    execution: ExecutionContext,
+    input: RecordDisclosureDeclarationInput,
+  ): Promise<RecordDisclosureDeclarationResult>;
+  /**
+   * THE DISCLOSURE GATE (AC-04): verify the publication — derive the
+   * applicable disclosure obligations (campaign policy ∪ commercial
+   * relationship obligations — DURABLE RECORDS, never caller
+   * claims), prove every obligation satisfied by an evidence-bound
+   * declaration for THIS publication, validate the canonical
+   * publication evidence references, then execute the material
+   * verification bookkeeping AND the DRAFT → VERIFIED transition in
+   * ONE authoritative transaction (the in-tx /workflows twin — the
+   * NET-W017 remediation precedent: a failure at ANY point rolls
+   * back EVERYTHING; no partially-verified publication can survive).
+   *
+   * Throws {@link DisclosureObligationsUnsatisfiedError} (stable
+   * code DISCLOSURE_OBLIGATIONS_UNSATISFIED, machine-readable
+   * required/satisfied/missing context) while any obligation is
+   * unsatisfied — there is NO caller input that overrides the
+   * derivation. A publication whose referenced engagement is no
+   * longer VERIFIED, or that is not DRAFT, fails deterministically.
+   */
+  verifyPublication(
+    execution: ExecutionContext,
+    input: VerifyPublicationInput,
+  ): Promise<VerifyPublicationResult>;
+  /** Tenant-scoped reads (cross-scope = NotFoundError). */
+  getPublication(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    publicationId: string,
+  ): Promise<PublicationRecord>;
+  listPublications(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    filters?: {
+      readonly engagementId?: string;
+      readonly campaignId?: string;
+      readonly creatorPersonId?: string;
+      readonly states?: readonly LifecycleState[];
+    },
+  ): Promise<readonly PublicationRecord[]>;
+  listDisclosureDeclarations(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    publicationId: string,
+  ): Promise<readonly DisclosureDeclaration[]>;
+  /**
+   * The DERIVED disclosure status (AC-02): required obligations with
+   * provenance + satisfaction state — a pure read-only derivation
+   * over durable records (never caller-asserted).
+   */
+  getPublicationDisclosureStatus(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    publicationId: string,
+  ): Promise<PublicationDisclosureStatus>;
+}
+
+export interface CreatorSponsorshipServiceDeps {
+  readonly relationshipRepository: CommercialRelationshipRepository;
+  readonly declarationRepository: DisclosureDeclarationRepository;
+  readonly publicationRepository: PublicationRepository;
+  readonly engagementRepository: EngagementRepository;
+  readonly productionRepository: UgcProductionRepository;
+  readonly lookups: CreatorSponsorshipLookups;
+  readonly workflow: SponsorshipWorkflowPort;
+  readonly idempotency: IdempotencyStore;
+  readonly auditWriter: TransactionalAuditWriter;
+  readonly logger: Logger;
+}
+
+// ---------------------------------------------------------------------------
 // The boundary port
 // ---------------------------------------------------------------------------
 
@@ -2162,6 +2773,12 @@ export interface CreatorsPort {
     readonly ugcProductionOpened: "ugc_production.opened";
     readonly ugcDeliverableRecorded: "ugc_production.deliverable_recorded";
     readonly ugcProductionSubmitted: "ugc_production.submitted";
+    /** NET-W018: material sponsorship/disclosure mutations (append-only). */
+    readonly commercialRelationshipRecorded: "commercial_relationship.recorded";
+    readonly commercialRelationshipTerminated: "commercial_relationship.terminated";
+    readonly disclosureDeclarationRecorded: "disclosure_declaration.recorded";
+    readonly publicationRecorded: "publication.recorded";
+    readonly publicationVerified: "publication.verified";
   };
 }
 
@@ -2172,6 +2789,8 @@ export type {
   TransactionalAuditWriter,
   IdempotencyStore,
   ReputationDimension,
+  CampaignDisclosureKind,
+  CommercialRelationshipKind,
   CreatorContentFormat,
   CreatorEngagementBand,
   CreatorPlatformKind,

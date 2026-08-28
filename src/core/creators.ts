@@ -1219,3 +1219,141 @@ export function validateUsageRightsExclusions(
   }
   return exclusions;
 }
+
+// ---------------------------------------------------------------------------
+// NET-W018 — Sponsorship and disclosure vocabulary (creator side)
+// ---------------------------------------------------------------------------
+
+/**
+ * The closed commercial-relationship kind vocabulary (NET-W018 —
+ * DISC-001: "Explicitly represent commercial relationships"). The
+ * kind records WHAT the commercial arrangement IS; it is declared
+ * data on the relationship record, never an economic instruction:
+ *
+ *  - `sponsorship`: the sponsor compensates the creator for content.
+ *  - `paid_placement`: a one-off paid placement in creator content.
+ *  - `gifted_product`: product/benefit provided without payment.
+ *  - `brand_ambassador`: an ongoing affiliation arrangement.
+ *
+ * /settlement remains the economic authority; none of these kinds
+ * carries or triggers economic mutation from `/creators`.
+ */
+export const COMMERCIAL_RELATIONSHIP_KINDS = [
+  "sponsorship",
+  "paid_placement",
+  "gifted_product",
+  "brand_ambassador",
+] as const;
+
+export type CommercialRelationshipKind =
+  (typeof COMMERCIAL_RELATIONSHIP_KINDS)[number];
+
+export function isCommercialRelationshipKind(
+  value: string,
+): value is CommercialRelationshipKind {
+  return (
+    (COMMERCIAL_RELATIONSHIP_KINDS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Validate a commercial-relationship kind (closed vocabulary).
+ */
+export function validateCommercialRelationshipKind(
+  kind: string,
+): CommercialRelationshipKind {
+  if (typeof kind !== "string" || !isCommercialRelationshipKind(kind)) {
+    throw new InvalidSponsorshipError(
+      `commercial relationship kind must be a closed-vocabulary kind (got ${String(kind)})`,
+      { kind },
+    );
+  }
+  return kind;
+}
+
+/** Max disclosure obligations a single relationship may declare. */
+export const COMMERCIAL_RELATIONSHIP_MAX_OBLIGATIONS = 5;
+
+/** Max disclosure declarations per publication (append-only bound). */
+export const DISCLOSURE_DECLARATION_MAX_PER_PUBLICATION = 16;
+
+/** Max publication-evidence references per publication verification. */
+export const PUBLICATION_MAX_EVIDENCE_REFERENCES = 8;
+
+/** Max disclosure-declaration evidence references per declaration. */
+export const DISCLOSURE_DECLARATION_MAX_EVIDENCE_REFERENCES = 8;
+
+/** Max characters of the declaration statement prose. */
+export const DISCLOSURE_DECLARATION_MAX_STATEMENT_CHARS = 2000;
+
+/** Max characters of the relationship/termination prose fields. */
+export const COMMERCIAL_RELATIONSHIP_MAX_PROSE_CHARS = 2000;
+
+/**
+ * The frozen record-format lineages for the NET-W018 creator-side
+ * records (the engagement-record precedent): pinned on every record so
+ * the contract shape stays reproducible.
+ */
+export const COMMERCIAL_RELATIONSHIP_FORMAT = "NET-W018:1" as const;
+export const DISCLOSURE_DECLARATION_FORMAT = "NET-W018:1" as const;
+export const PUBLICATION_RECORD_FORMAT = "NET-W018:1" as const;
+
+/**
+ * Validation error for sponsorship/disclosure request violations
+ * (NET-W018): malformed relationship/publication/declaration inputs.
+ */
+export class InvalidSponsorshipError extends OpenConError {
+  constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+  ) {
+    super({
+      code: "SPONSORSHIP_VALIDATION",
+      classification: "validation",
+      message,
+      context,
+    });
+  }
+}
+
+/** Stable conflict on commercial-relationship state (e.g. a second
+ * relationship for the same engagement — one commercial relationship
+ * per engagement). */
+export class CommercialRelationshipConflictError extends OpenConError {
+  constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+  ) {
+    super({
+      code: "COMMERCIAL_RELATIONSHIP_CONFLICT",
+      classification: "conflict",
+      message,
+      context,
+    });
+  }
+}
+
+/**
+ * THE disclosure-gate error (NET-W018 invariant 4 / AC-04): raised by
+ * the publication verification composite when required disclosure
+ * obligations remain unsatisfied — the DRAFT → VERIFIED transition is
+ * structurally unreachable until every required disclosure kind has a
+ * valid, evidence-bound declaration for THIS publication. The context
+ * carries the machine-readable required/satisfied/missing sets so
+ * callers can resolve deterministically. There is NO caller input
+ * that suppresses this error: it is derived from durable records
+ * (campaign policy ∪ relationship obligations), never asserted.
+ */
+export class DisclosureObligationsUnsatisfiedError extends OpenConError {
+  constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+  ) {
+    super({
+      code: "DISCLOSURE_OBLIGATIONS_UNSATISFIED",
+      classification: "validation",
+      message,
+      context,
+    });
+  }
+}

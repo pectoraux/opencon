@@ -65,6 +65,8 @@ import type { IdempotencyStore } from "../core/idempotency.ts";
 import type {
   CampaignClearingBasis,
   CampaignClearingDrawKind,
+  CampaignDisclosureKind,
+  CampaignDisclosurePolicy,
   CampaignEligibilityAttribute,
   CampaignEligibilityOperator,
   CampaignEvidenceRequirementKind,
@@ -286,6 +288,22 @@ export interface CampaignClearingRule {
 }
 
 /**
+ * The campaign's DECLARED disclosure policy (NET-W018 — CRE-006,
+ * DISC-001): which disclosure kinds every publication under the
+ * campaign must satisfy. POLICY/DECLARATION ONLY: the campaign domain
+ * never evaluates declarations and never blocks publication — the
+ * creators domain's publication gate consumes this section through
+ * the NEUTRAL composition-root lookup and enforces it there (the
+ * same dependency-inversion as every other policy section). An
+ * EMPTY requiredKinds is a legitimate declared stance; obligations
+ * may still arrive from the commercial relationship (the gate
+ * derives the union).
+ */
+export interface CampaignDisclosurePolicySection {
+  readonly requiredKinds: readonly CampaignDisclosureKind[];
+}
+
+/**
  * One contribution-opportunity specification — the provider-neutral
  * template the composition root materializes into a real Opportunity
  * (owned by /opportunities, lifecycle-owned by /workflows) when
@@ -325,6 +343,12 @@ export interface CampaignPolicy {
   readonly attributionRules: readonly CampaignAttributionRule[];
   readonly clearingRules: readonly CampaignClearingRule[];
   readonly opportunitySpecs: readonly CampaignOpportunitySpec[];
+  /**
+   * NET-W018: the declared disclosure policy (ALWAYS materialized on
+   * the stored version — an absent input section stores as EMPTY;
+   * pre-W018 versions read as empty through the same default).
+   */
+  readonly disclosurePolicy: CampaignDisclosurePolicy;
   readonly createdBy: string;
   readonly createdAt: string;
   readonly executionId: string;
@@ -423,7 +447,14 @@ export interface CreateCampaignResult {
   readonly created: boolean;
 }
 
-/** The full declared policy (all sections required — CAMP-002). */
+/**
+ * The full declared policy (all sections required — CAMP-002), with
+ * the NET-W018 ADDITION: `disclosurePolicy` is OPTIONAL in the INPUT
+ * (absent = no disclosure requirements declared) and ALWAYS
+ * materialized on the stored version (empty when absent — the
+ * explicit, reproducible stance; format-compatible with pre-W018
+ * versions).
+ */
 export interface CampaignPolicySections {
   readonly objectives: readonly CampaignObjective[];
   readonly eligibility: CampaignEligibilityPolicy;
@@ -433,6 +464,7 @@ export interface CampaignPolicySections {
   readonly attributionRules: readonly CampaignAttributionRule[];
   readonly clearingRules: readonly CampaignClearingRule[];
   readonly opportunitySpecs: readonly CampaignOpportunitySpec[];
+  readonly disclosurePolicy?: CampaignDisclosurePolicySection;
 }
 
 export interface DefineCampaignPolicyInput {
@@ -765,6 +797,8 @@ export type {
   IdempotencyStore,
   CampaignClearingBasis,
   CampaignClearingDrawKind,
+  CampaignDisclosureKind,
+  CampaignDisclosurePolicy,
   CampaignEligibilityAttribute,
   CampaignEligibilityOperator,
   CampaignEvidenceRequirementKind,

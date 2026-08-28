@@ -303,12 +303,21 @@ import {
   createAuthorityEngagementBatchRepository,
 } from "../creators/authority-engagement-repositories.ts";
 import { createCreatorEngagementService } from "../creators/engagement-service.ts";
+import {
+  createAuthorityCommercialRelationshipRepository,
+  createAuthorityDisclosureDeclarationRepository,
+  createAuthorityPublicationRepository,
+} from "../creators/authority-sponsorship-repositories.ts";
+import { createCreatorSponsorshipService } from "../creators/sponsorship-service.ts";
 import type {
   CreatorEngagementService,
+  CreatorSponsorshipService,
   EngagementCampaignLookup,
   EngagementOpportunityLookup,
   EngagementContributionLookup,
   ProductionEvidenceLookup,
+  CampaignDisclosurePolicyLookup,
+  SponsorshipWorkflowPort,
 } from "../creators/port.ts";
 import type {
   ActivateRiskControlInput,
@@ -346,6 +355,10 @@ import type {
   Engagement,
   EngagementBatchOutcomeRecord,
   EngagementBatchRecord,
+  CommercialRelationship,
+  DisclosureDeclaration,
+  PublicationRecord,
+  PublicationDisclosureStatus,
   RunCreatorMatchInput,
   UgcDeliverableVersion,
   UgcProduction,
@@ -494,6 +507,7 @@ export interface Runtime {
   // NET-W016 creator matching (deterministic eligibility + ranking).
   readonly creatorMatchingService: CreatorMatchingService;
   readonly creatorEngagementService: CreatorEngagementService;
+  readonly creatorSponsorshipService: CreatorSponsorshipService;
   // NET-W012 helpful contributions (Proof-of-Helpfulness) service.
   readonly helpfulnessService: HelpfulnessService;
   // NET-W013 quality/moderation/anti-spam services.
@@ -797,6 +811,24 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     authority: postgresAuthority,
     logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
   });
+  // NET-W018 sponsorship/disclosure repositories (PostgresAuthority-
+  // backed, append-only collections). Created here — before the
+  // evidence subject lookup — so canonical evidence records can bind
+  // to "publication" subjects (validated through the lookup below).
+  const commercialRelationshipRepo =
+    createAuthorityCommercialRelationshipRepository({
+      authority: postgresAuthority,
+      logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
+    });
+  const disclosureDeclarationRepo =
+    createAuthorityDisclosureDeclarationRepository({
+      authority: postgresAuthority,
+      logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
+    });
+  const publicationRepo = createAuthorityPublicationRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("creators").debug(m, f) },
+  });
   const evidenceService = createEvidenceService({
     repository: evidenceRepo,
     authority: postgresAuthority,
@@ -863,6 +895,13 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         const production = await ugcProductionRepo.findById(subjectId);
         return production ? production.organizationScopeId : null;
       }
+      // NET-W018: canonical evidence records may bind to PUBLICATION
+      // subjects (the publication-evidence + disclosure-declaration
+      // evidence lineage — work order §3.4).
+      if (subjectType === "publication") {
+        const publication = await publicationRepo.findById(subjectId);
+        return publication ? publication.organizationScopeId : null;
+      }
       return null;
     },
     async exists(subjectType, subjectId) {
@@ -870,6 +909,9 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       if (subjectType === "contribution") return contributionRepo.exists(subjectId);
       if (subjectType === "ugc_production") {
         return (await ugcProductionRepo.findById(subjectId)) !== null;
+      }
+      if (subjectType === "publication") {
+        return (await publicationRepo.findById(subjectId)) !== null;
       }
       return false;
     },
@@ -912,6 +954,7 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     proofOfValueRepository: createLifecycleRepository(proofOfValueRepo),
     outcomeMeasurementRepository: createLifecycleRepository(measuredOutcomeRepo),
     engagementRepository: createLifecycleRepository(engagementRepo),
+    publicationRepository: createLifecycleRepository(publicationRepo),
     authorizer: transitionAuthorizer,
     auditWriter,
     idempotency,
@@ -2083,6 +2126,99 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   });
 
   // ------------------------------------------------------------------
+  // NET-W018 — Sponsorship and disclosure (commercial relationships,
+  // disclosure declarations, publications).
+  //
+  // The publication is a NEW canonical lifecycle subject kind: every
+  // state change routes through the SAME WorkflowService (the SOLE
+  // lifecycle authority — the engagement precedent; there is NO
+  // second lifecycle engine). The disclosure POLICY arrives through
+  // a thin READ-ONLY adapter over the campaigns boundary's policy
+  // repository (the dependency-inversion pattern); disclosure/
+  // publication EVIDENCE references validate through the same
+  // neutral evidence lookup as the engagement service. The
+  // verification composite executes the DRAFT → VERIFIED transition
+  // IN-TX through the sanctioned twin (the NET-W017 remediation
+  // pattern applied from the start). NO economic/reputation/risk/
+  // outcome mutation, NO AI path (work order §2).
+  // ------------------------------------------------------------------
+  const campaignDisclosurePolicyLookup: CampaignDisclosurePolicyLookup = {
+    async resolve(campaignId, policyVersion) {
+      // /campaigns stays the campaign policy authority: resolve the
+      // campaign (existence + tenant scope), then the pinned-or-
+      // latest policy version's declared disclosure section. An
+      // absent section (pre-W018 versions) reads as EMPTY — no
+      // requirements declared.
+      const campaign = await campaignRepo.findById(campaignId);
+      if (!campaign) return null;
+      let policy: import("../campaigns/port.ts").CampaignPolicy | null = null;
+      if (policyVersion !== undefined) {
+        policy = await campaignPolicyRepo.findVersion(campaignId, policyVersion);
+        if (!policy) return null;
+      } else {
+        const versions = await campaignPolicyRepo.listByCampaign(campaignId);
+        policy =
+          versions.length > 0
+            ? versions.reduce((a, b) => (b.version > a.version ? b : a))
+            : null;
+      }
+      return {
+        campaignId: campaign.id,
+        organizationScopeId: campaign.organizationScopeId,
+        policyVersion: policy ? policy.version : null,
+        requiredKinds: policy?.disclosurePolicy?.requiredKinds ?? [],
+      };
+    },
+  };
+  const sponsorshipEvidenceLookup: ProductionEvidenceLookup = {
+    async resolve(evidenceId) {
+      // The canonical /evidence authority read: existence + tenant
+      // scope + subject binding. The sponsorship boundary only
+      // VALIDATES references through this view — it never fabricates
+      // disclosure/publication proof.
+      const evidence = await evidenceRepo.findById(evidenceId);
+      if (!evidence) return null;
+      return {
+        id: evidence.id,
+        organizationScopeId: evidence.organizationScopeId,
+        subjectType: evidence.subjectReference.subjectType,
+        subjectId: evidence.subjectReference.subjectId,
+      };
+    },
+  };
+  const sponsorshipWorkflowPort: SponsorshipWorkflowPort = {
+    // Delegate to the SAME workflow service instance (the /workflows
+    // boundary is the SOLE lifecycle authority for publication
+    // transitions, exactly as for engagements). The verification
+    // composite executes the transition IN-TX through the sanctioned
+    // twin so the material bookkeeping + the transition commit as
+    // ONE authoritative unit.
+    async requestTransitionWithinTx(request, execution, tx, idempotencyRecordId) {
+      return workflowService.requestTransitionWithinTx(
+        request,
+        execution,
+        tx,
+        idempotencyRecordId,
+      );
+    },
+  };
+  const creatorSponsorshipService = createCreatorSponsorshipService({
+    relationshipRepository: commercialRelationshipRepo,
+    declarationRepository: disclosureDeclarationRepo,
+    publicationRepository: publicationRepo,
+    engagementRepository: engagementRepo,
+    productionRepository: ugcProductionRepo,
+    lookups: {
+      campaignDisclosurePolicy: campaignDisclosurePolicyLookup,
+      evidence: sponsorshipEvidenceLookup,
+    },
+    workflow: sponsorshipWorkflowPort,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("creators"),
+  });
+
+  // ------------------------------------------------------------------
   // NET-W012 helpful contributions wiring (Proof-of-Helpfulness).
   //
   // The helpfulness lookups are thin READ-ONLY adapters over the
@@ -3065,6 +3201,83 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       maxGrantDurationDays: policy.maxGrantDurationDays,
       createdBy: policy.createdBy,
       createdAt: policy.createdAt,
+    };
+  }
+  // -- NET-W018 view builders (provenance-preserving) ------------------
+  function toCommercialRelationshipView(relationship: CommercialRelationship) {
+    return {
+      id: relationship.id,
+      organizationScopeId: relationship.organizationScopeId,
+      campaignId: relationship.campaignId,
+      engagementId: relationship.engagementId,
+      creatorPersonId: relationship.creatorPersonId,
+      sponsorPersonId: relationship.sponsorPersonId,
+      kind: relationship.kind,
+      disclosureObligations: relationship.disclosureObligations,
+      // REFERENCE DATA ONLY — no balances, no postings (AC-05).
+      compensation: relationship.compensation,
+      terminatedAt: relationship.terminatedAt,
+      terminationReason: relationship.terminationReason,
+      formatVersion: relationship.formatVersion,
+      createdBy: relationship.createdBy,
+      createdAt: relationship.createdAt,
+      executionId: relationship.executionId,
+      correlationId: relationship.correlationId,
+      causationId: relationship.causationId,
+    };
+  }
+  function toDisclosureDeclarationView(declaration: DisclosureDeclaration) {
+    return {
+      id: declaration.id,
+      organizationScopeId: declaration.organizationScopeId,
+      publicationId: declaration.publicationId,
+      kind: declaration.kind,
+      declaredByPersonId: declaration.declaredByPersonId,
+      statement: declaration.statement,
+      evidenceReferences: declaration.evidenceReferences,
+      formatVersion: declaration.formatVersion,
+      createdAt: declaration.createdAt,
+      executionId: declaration.executionId,
+      correlationId: declaration.correlationId,
+      causationId: declaration.causationId,
+    };
+  }
+  function toPublicationView(publication: PublicationRecord) {
+    return {
+      id: publication.id,
+      kind: publication.kind,
+      organizationScopeId: publication.organizationScopeId,
+      state: publication.state,
+      version: publication.version,
+      engagementId: publication.engagementId,
+      productionId: publication.productionId,
+      creatorPersonId: publication.creatorPersonId,
+      campaignId: publication.campaignId,
+      channel: publication.channel,
+      publicationEvidenceReferences: publication.publicationEvidenceReferences,
+      verifiedAt: publication.verifiedAt,
+      formatVersion: publication.formatVersion,
+      ownerId: publication.ownerId,
+      createdAt: publication.createdAt,
+      updatedAt: publication.updatedAt,
+      executionId: publication.executionId,
+      correlationId: publication.correlationId,
+      causationId: publication.causationId,
+    };
+  }
+  function toPublicationDisclosureStatusView(status: PublicationDisclosureStatus) {
+    return {
+      publicationId: status.publicationId,
+      organizationScopeId: status.organizationScopeId,
+      state: status.state,
+      obligations: status.obligations.map((o) => ({
+        kind: o.kind,
+        sources: o.sources,
+        satisfied: o.satisfied,
+        declarationIds: o.declarationIds,
+      })),
+      satisfied: status.satisfied,
+      evaluatedAt: status.evaluatedAt,
     };
   }
   function toHelpfulnessPolicyView(
@@ -5922,6 +6135,163 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return submissions.map(toUgcSubmissionView);
     },
 
+    // -- NET-W018 sponsorship/disclosure commands -----------------------
+    // The publication lifecycle is the canonical /workflows
+    // authority; the verification composite (the disclosure gate)
+    // composes the material bookkeeping + the DRAFT → VERIFIED
+    // transition as ONE authoritative unit. NO economic/reputation/
+    // risk/outcome mutation, NO AI path.
+    async createCommercialRelationship(execution, _actorPersonId, input) {
+      const result = await creatorSponsorshipService.createCommercialRelationship(
+        execution,
+        input as unknown as import("../creators/port.ts").CreateCommercialRelationshipInput,
+      );
+      return {
+        relationship: toCommercialRelationshipView(result.relationship),
+        created: result.created,
+      };
+    },
+
+    async terminateCommercialRelationship(execution, _actorPersonId, input) {
+      const relationship =
+        await creatorSponsorshipService.terminateCommercialRelationship(
+          execution,
+          input as unknown as import("../creators/port.ts").TerminateCommercialRelationshipInput,
+        );
+      return toCommercialRelationshipView(relationship);
+    },
+
+    async createPublication(execution, _actorPersonId, input) {
+      const result = await creatorSponsorshipService.createPublication(
+        execution,
+        input as unknown as import("../creators/port.ts").CreatePublicationInput,
+      );
+      return {
+        publication: toPublicationView(result.publication),
+        created: result.created,
+      };
+    },
+
+    async recordDisclosureDeclaration(execution, _actorPersonId, input) {
+      const result = await creatorSponsorshipService.recordDisclosureDeclaration(
+        execution,
+        input as unknown as import("../creators/port.ts").RecordDisclosureDeclarationInput,
+      );
+      return {
+        declaration: toDisclosureDeclarationView(result.declaration),
+        created: result.created,
+      };
+    },
+
+    async verifyPublication(execution, _actorPersonId, input) {
+      const result = await creatorSponsorshipService.verifyPublication(
+        execution,
+        input as unknown as import("../creators/port.ts").VerifyPublicationInput,
+      );
+      return {
+        publication: toPublicationView(result.publication),
+        transition: {
+          executed: result.transition.executed,
+          transitionId: result.transition.transitionId,
+          auditEventName: result.transition.auditEventName,
+          transactionId: result.transition.transactionId,
+          fromState: "DRAFT",
+          toState: "VERIFIED",
+        },
+        disclosureStatus: toPublicationDisclosureStatusView(
+          result.disclosureStatus,
+        ),
+      };
+    },
+
+    async getCommercialRelationship(
+      execution,
+      organizationScopeId,
+      relationshipId,
+    ) {
+      const relationship = await creatorSponsorshipService.getCommercialRelationship(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        relationshipId,
+      );
+      return toCommercialRelationshipView(relationship);
+    },
+
+    async listCommercialRelationships(
+      execution,
+      organizationScopeId,
+      campaignId,
+      engagementId,
+      creatorPersonId,
+    ) {
+      const relationships =
+        await creatorSponsorshipService.listCommercialRelationships(
+          getExecutionContext() ?? execution,
+          organizationScopeId,
+          {
+            ...(campaignId !== undefined ? { campaignId } : {}),
+            ...(engagementId !== undefined ? { engagementId } : {}),
+            ...(creatorPersonId !== undefined ? { creatorPersonId } : {}),
+          },
+        );
+      return relationships.map(toCommercialRelationshipView);
+    },
+
+    async getPublication(execution, organizationScopeId, publicationId) {
+      const publication = await creatorSponsorshipService.getPublication(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        publicationId,
+      );
+      return toPublicationView(publication);
+    },
+
+    async listPublications(
+      execution,
+      organizationScopeId,
+      engagementId,
+      campaignId,
+      creatorPersonId,
+    ) {
+      const publications = await creatorSponsorshipService.listPublications(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        {
+          ...(engagementId !== undefined ? { engagementId } : {}),
+          ...(campaignId !== undefined ? { campaignId } : {}),
+          ...(creatorPersonId !== undefined ? { creatorPersonId } : {}),
+        },
+      );
+      return publications.map(toPublicationView);
+    },
+
+    async listDisclosureDeclarations(
+      execution,
+      organizationScopeId,
+      publicationId,
+    ) {
+      const declarations =
+        await creatorSponsorshipService.listDisclosureDeclarations(
+          getExecutionContext() ?? execution,
+          organizationScopeId,
+          publicationId,
+        );
+      return declarations.map(toDisclosureDeclarationView);
+    },
+
+    async getPublicationDisclosureStatus(
+      execution,
+      organizationScopeId,
+      publicationId,
+    ) {
+      const status = await creatorSponsorshipService.getPublicationDisclosureStatus(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        publicationId,
+      );
+      return toPublicationDisclosureStatusView(status);
+    },
+
     // -- NET-W012 helpful-contribution commands -------------------------
     async defineHelpfulnessPolicy(execution, _actorPersonId, input) {
       const result = await helpfulnessService.defineHelpfulnessPolicy(
@@ -7084,6 +7454,7 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     creatorMatchingService,
     // NET-W017 UGC workflow and rights (creator engagements).
     creatorEngagementService,
+    creatorSponsorshipService,
     helpfulnessService,
     // NET-W013 quality/moderation/anti-spam services + LLM providers.
     qualityService,

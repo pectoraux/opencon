@@ -139,6 +139,18 @@ export function auditEventFor(
  * spec/work-orders/NET-W017.md §3.1; acceptance/production execute
  * through the SAME workflow machinery, never a second lifecycle
  * authority).
+ * NET-W018 adds the creator PUBLICATION (the workflow-mediated
+ * publication record whose lifecycle is DRAFT → VERIFIED with a
+ * CANCELLED exceptional state — see spec/work-orders/NET-W018.md §3.4).
+ * The publication REUSES the canonical state vocabulary (the W005/W006
+ * precedent: the state universe stays small, the workflow machinery is
+ * untouched): VERIFIED here means the publication record is VERIFIED —
+ * the applicable disclosure obligations are satisfied and the
+ * publication carries canonical, subject-bound evidence. The boundary
+ * itself never performs the external publication act (no silent
+ * publication authority — CRE-004/HELP-005) and the DRAFT → VERIFIED
+ * transition is the disclosure gate: it is structurally unreachable
+ * while required disclosure obligations remain unsatisfied.
  * Later work items (campaigns, disputes, etc.) may add more. The
  * transition table is parameterized by subject kind so each subject
  * can have its own legal-transition set.
@@ -148,7 +160,8 @@ export type LifecycleSubjectKind =
   | "contribution"
   | "proof_of_value"
   | "outcome_measurement"
-  | "engagement";
+  | "engagement"
+  | "publication";
 
 /**
  * The minimal shape of an authoritative lifecycle subject. Domain

@@ -8,3 +8,6 @@ export * from "./module.ts";
 export * from "./engagement-engine.ts";
 export * from "./engagement-service.ts";
 export * from "./authority-engagement-repositories.ts";
+export * from "./disclosure-engine.ts";
+export * from "./sponsorship-service.ts";
+export * from "./authority-sponsorship-repositories.ts";

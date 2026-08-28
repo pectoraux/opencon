@@ -82,6 +82,7 @@ import {
   isCampaignObjectiveKind,
   validateCampaignAmount,
   validateCampaignConfidenceThreshold,
+  validateCampaignDisclosureKinds,
   validateCampaignWindowDays,
 } from "../core/campaigns.ts";
 import type {
@@ -92,6 +93,7 @@ import type {
   CampaignPolicy,
   CampaignPolicyRepository,
   CampaignPolicySections,
+  CampaignDisclosurePolicy,
   CampaignRecord,
   CampaignRepository,
   CampaignService,
@@ -225,7 +227,10 @@ function withEvent(
 
 function validatePolicySections(
   sections: CampaignPolicySections,
-): CampaignPolicySections {
+): CampaignPolicySections & {
+  /** NET-W018: always materialized (empty when the input omitted it). */
+  disclosurePolicy: CampaignDisclosurePolicy;
+} {
   if (!sections || typeof sections !== "object") {
     throw campaignValidationError("policy sections are required", {
       field: "policy",
@@ -380,6 +385,15 @@ function validatePolicySections(
       );
     }
   }
+
+  // --- disclosure policy (NET-W018 — CRE-006): the declared
+  //     required disclosure kinds — closed vocabulary, duplicates
+  //     rejected (deterministic derivation downstream). OPTIONAL in
+  //     the input; ALWAYS materialized (empty = none declared).
+  const disclosureRequiredKinds = validateCampaignDisclosureKinds(
+    "disclosurePolicy.requiredKinds",
+    sections.disclosurePolicy?.requiredKinds ?? [],
+  );
 
   // --- budget (AC-03): declaration only; frozen economic arithmetic.
   if (
@@ -577,7 +591,12 @@ function validatePolicySections(
     }
   }
 
-  return sections;
+  return {
+    ...sections,
+    disclosurePolicy: Object.freeze({
+      requiredKinds: disclosureRequiredKinds,
+    }),
+  };
 }
 
 export function createCampaignService(deps: CampaignServiceDeps): CampaignService {
@@ -862,6 +881,14 @@ export function createCampaignService(deps: CampaignServiceDeps): CampaignServic
               attributionRules: Object.freeze([...sections.attributionRules]),
               clearingRules: Object.freeze([...sections.clearingRules]),
               opportunitySpecs: Object.freeze([...sections.opportunitySpecs]),
+              // NET-W018: the declared disclosure policy — ALWAYS
+              // materialized (empty when the input omitted the
+              // section; validatePolicySections normalizes).
+              disclosurePolicy: Object.freeze({
+                requiredKinds: Object.freeze([
+                  ...sections.disclosurePolicy.requiredKinds,
+                ]),
+              }),
               createdBy: actor,
               createdAt: new Date().toISOString(),
               executionId: execution.executionId,

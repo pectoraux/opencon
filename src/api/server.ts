@@ -3192,6 +3192,353 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // POST /api/creators/commercial-relationships — record the
+    // commercial relationship for an engagement (protected; guard
+    // action creators.commercialRelationships.create).
+    if (
+      path === "/api/creators/commercial-relationships" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "creators.commercialRelationships.create",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createCommercialRelationship(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          engagementId: strField(obj, "engagementId"),
+          campaignId: strField(obj, "campaignId"),
+          sponsorPersonId: strField(obj, "sponsorPersonId"),
+          kind: strField(obj, "kind"),
+          ...(obj.disclosureObligations !== undefined &&
+          obj.disclosureObligations !== null
+            ? { disclosureObligations: obj.disclosureObligations }
+            : {}),
+          ...(obj.compensation !== undefined && obj.compensation !== null
+            ? { compensation: obj.compensation }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/creators/commercial-relationships/:id/termination —
+    // terminate the relationship (one-way; protected; guard action
+    // creators.commercialRelationships.terminate).
+    if (
+      path.startsWith("/api/creators/commercial-relationships/") &&
+      path.endsWith("/termination") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/creators/commercial-relationships/".length,
+        -"/termination".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "creators.commercialRelationships.terminate",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.terminateCommercialRelationship(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          relationshipId: id,
+          ...(obj.reason !== undefined && obj.reason !== null
+            ? { reason: obj.reason as string }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/creators/publications — record a publication (DRAFT)
+    // for a verified engagement's production (protected; guard action
+    // creators.publications.create).
+    if (path === "/api/creators/publications" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "creators.publications.create",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createPublication(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          engagementId: strField(obj, "engagementId"),
+          ...(obj.productionId !== undefined && obj.productionId !== null
+            ? { productionId: obj.productionId as string }
+            : {}),
+          channel: obj.channel,
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/creators/publications/:id/declarations — append a
+    // disclosure declaration (protected; guard action
+    // creators.publications.declareDisclosure; creator-only declarant).
+    if (
+      path.startsWith("/api/creators/publications/") &&
+      path.endsWith("/declarations") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/creators/publications/".length,
+        -"/declarations".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "creators.publications.declareDisclosure",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const evidenceReferences = obj.evidenceReferences;
+      if (
+        !Array.isArray(evidenceReferences) ||
+        evidenceReferences.length === 0 ||
+        evidenceReferences.some((x) => typeof x !== "string" || !x.trim())
+      ) {
+        throw apiValidationError(
+          'field "evidenceReferences" must be a non-empty list of evidence ids',
+        );
+      }
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recordDisclosureDeclaration(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          publicationId: id,
+          kind: strField(obj, "kind"),
+          statement: strField(obj, "statement"),
+          evidenceReferences: evidenceReferences as string[],
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/creators/publications/:id/verification — THE
+    // DISCLOSURE GATE: verify the publication (protected; guard
+    // action creators.publications.verify; the derived obligations
+    // must ALL be satisfied — no caller input bypasses the gate).
+    if (
+      path.startsWith("/api/creators/publications/") &&
+      path.endsWith("/verification") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/creators/publications/".length,
+        -"/verification".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "creators.publications.verify",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const evidenceReferences = obj.evidenceReferences;
+      if (
+        !Array.isArray(evidenceReferences) ||
+        evidenceReferences.length === 0 ||
+        evidenceReferences.some((x) => typeof x !== "string" || !x.trim())
+      ) {
+        throw apiValidationError(
+          'field "evidenceReferences" must be a non-empty list of evidence ids',
+        );
+      }
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.verifyPublication(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          publicationId: id,
+          expectedVersion: numField(obj, "expectedVersion"),
+          evidenceReferences: evidenceReferences as string[],
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // GET /api/creators/commercial-relationships/:id — one commercial
+    // relationship (public; tenant-scoped; a cross-scope id is not found).
+    if (
+      path.startsWith("/api/creators/commercial-relationships/") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/creators/commercial-relationships/".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const view = await opts.commands.getCommercialRelationship(
+        ctx,
+        organizationScopeId,
+        id,
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/creators/commercial-relationships — an org's commercial
+    // relationships (public; tenant-scoped).
+    if (
+      path === "/api/creators/commercial-relationships" &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const views = await opts.commands.listCommercialRelationships(
+        ctx,
+        organizationScopeId,
+        url.searchParams.get("campaignId") ?? undefined,
+        url.searchParams.get("engagementId") ?? undefined,
+        url.searchParams.get("creatorPersonId") ?? undefined,
+      );
+      await send(res, 200, { organizationScopeId, relationships: views });
+      return true;
+    }
+
+    // GET /api/creators/publications/:id/disclosure-status — the
+    // DERIVED disclosure status of one publication (public;
+    // tenant-scoped).
+    if (
+      path.startsWith("/api/creators/publications/") &&
+      path.endsWith("/disclosure-status") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice(
+        "/api/creators/publications/".length,
+        -"/disclosure-status".length,
+      );
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const view = await opts.commands.getPublicationDisclosureStatus(
+        ctx,
+        organizationScopeId,
+        id,
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/creators/publications/:id/declarations — a publication's
+    // disclosure declarations (public; tenant-scoped).
+    if (
+      path.startsWith("/api/creators/publications/") &&
+      path.endsWith("/declarations") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice(
+        "/api/creators/publications/".length,
+        -"/declarations".length,
+      );
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const views = await opts.commands.listDisclosureDeclarations(
+        ctx,
+        organizationScopeId,
+        id,
+      );
+      await send(res, 200, { organizationScopeId, publicationId: id, declarations: views });
+      return true;
+    }
+
+    // GET /api/creators/publications/:id — one publication (public;
+    // tenant-scoped; a cross-scope id is not found).
+    if (
+      path.startsWith("/api/creators/publications/") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/creators/publications/".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const view = await opts.commands.getPublication(
+        ctx,
+        organizationScopeId,
+        id,
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/creators/publications — an org's publications (public;
+    // tenant-scoped).
+    if (
+      path === "/api/creators/publications" &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const views = await opts.commands.listPublications(
+        ctx,
+        organizationScopeId,
+        url.searchParams.get("engagementId") ?? undefined,
+        url.searchParams.get("campaignId") ?? undefined,
+        url.searchParams.get("creatorPersonId") ?? undefined,
+      );
+      await send(res, 200, { organizationScopeId, publications: views });
+      return true;
+    }
+
     // GET /api/creators/engagements/:id — one engagement (public;
     // tenant-scoped; a cross-scope id is not found).
     if (

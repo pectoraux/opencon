@@ -253,9 +253,112 @@ export function isCampaignClearingDrawKind(
 }
 
 /**
+ * The kinds of commercial disclosures a campaign policy may require
+ * (NET-W018 — CRE-006: "Represent required commercial disclosures";
+ * DISC-001: "Explicitly represent commercial relationships"). The
+ * vocabulary is CLOSED and provider-neutral:
+ *
+ *  - `material_connection`: the publication must disclose the material
+ *    connection between creator and sponsor (the canonical #ad-style
+ *    declaration).
+ *  - `paid_partnership`: the publication must carry the platform-native
+ *    paid-partnership label where the channel provides one.
+ *  - `gifted_product`: the publication must disclose that the product
+ *    was gifted/free.
+ *  - `genuine_experience`: the publication must declare that any
+ *    personal-experience claims are GENUINE (DISC-002: fabricated
+ *    personal-experience claims are prevented — the declaration is the
+ *    auditable creator attestation, evidence-bound and disputable).
+ *  - `brand_affiliation`: the publication must disclose an ongoing
+ *    brand affiliation (ambassador/employment).
+ *
+ * The campaign policy DECLARES which kinds are required; the creators
+ * domain's disclosure gate DERIVES the applicable obligations (campaign
+ * policy ∪ commercial-relationship obligations) and enforces them at
+ * the publication boundary. Neither the campaign nor the creator
+ * domain evaluates disclosure CONTENT — presence + evidence binding
+ * are deterministic; semantics belong to /disputes when challenged.
+ */
+export const CAMPAIGN_DISCLOSURE_KINDS = [
+  "material_connection",
+  "paid_partnership",
+  "gifted_product",
+  "genuine_experience",
+  "brand_affiliation",
+] as const;
+
+export type CampaignDisclosureKind =
+  (typeof CAMPAIGN_DISCLOSURE_KINDS)[number];
+
+export function isCampaignDisclosureKind(
+  value: string,
+): value is CampaignDisclosureKind {
+  return (CAMPAIGN_DISCLOSURE_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * Validate a list of disclosure kinds against the closed vocabulary
+ * (deterministic: duplicates are rejected so the derived obligation
+ * set is canonical). Returns a frozen copy.
+ */
+export function validateCampaignDisclosureKinds(
+  field: string,
+  kinds: readonly string[],
+): readonly CampaignDisclosureKind[] {
+  if (!Array.isArray(kinds)) {
+    throw new InvalidCampaignPolicyError(
+      `${field} must be an array of disclosure kinds`,
+      { field },
+    );
+  }
+  const seen = new Set<string>();
+  for (const kind of kinds) {
+    if (typeof kind !== "string" || !isCampaignDisclosureKind(kind)) {
+      throw new InvalidCampaignPolicyError(
+        `${field} contains an unknown disclosure kind (got ${String(kind)})`,
+        { field, kind },
+      );
+    }
+    if (seen.has(kind)) {
+      throw new InvalidCampaignPolicyError(
+        `${field} contains duplicate disclosure kind ${kind}`,
+        { field, kind },
+      );
+    }
+    seen.add(kind);
+  }
+  return Object.freeze([...kinds]) as readonly CampaignDisclosureKind[];
+}
+
+/**
+ * The campaign's DECLARED disclosure policy (NET-W018 — one section of
+ * the versioned campaign policy): which disclosure kinds every
+ * publication under the campaign must satisfy. POLICY ONLY — the
+ * campaign domain never evaluates declarations or blocks anything;
+ * the creators domain's publication gate consumes this section
+ * through the neutral composition-root lookup (the same
+ * dependency-inversion as every other campaign-policy section).
+ *
+ * An EMPTY `requiredKinds` is a legitimate declared stance (a
+ * non-commercial campaign); obligations may still arrive from the
+ * commercial relationship's own declarations (the gate derives the
+ * UNION — disclosure can only be ADDED, never removed, by the
+ * relationship).
+ */
+export interface CampaignDisclosurePolicy {
+  readonly requiredKinds: readonly CampaignDisclosureKind[];
+}
+
+/**
  * The recorded policy-format lineage. Every campaign policy version
  * carries it; determinism (CAMP-002) requires that the policy that
  * governed activation is reproducible from the stored version.
+ *
+ * NET-W018 note: the format lineage is UNCHANGED ("NET-W011:1") — the
+ * disclosure-policy section is ADDITIVE with an empty default, so
+ * pre-W018 policy versions remain format-compatible (they read as
+ * "no disclosure requirements declared"; relationship obligations and
+ * later policy versions can still declare them).
  */
 export const CAMPAIGN_POLICY_FORMAT = "NET-W011:1" as const;
 
