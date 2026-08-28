@@ -226,6 +226,53 @@ export interface WorkflowService {
     request: TransitionRequest,
     execution: ExecutionContext,
   ): Promise<TransitionResult>;
+
+  /**
+   * The in-tx composition twin of {@link requestTransition} — the
+   * NET-W017 remediation decision of record (architect CHANGES
+   * REQUESTED on PR #34: cross-authority commands must be atomic).
+   *
+   * Executes the EXACT SAME transition machinery — re-read within the
+   * transaction, `expectedVersion` optimistic-concurrency check,
+   * deny-by-default authorization, pure state-machine evaluation,
+   * `saveWithinTx` write, buffered transactional audit — but inside a
+   * CALLER-OPENED authoritative {@link AuthorityTransaction} instead of
+   * one the workflow service opens itself.
+   *
+   * Contract (the composing service MUST hold all of these):
+   *  1. The caller opened the transaction through an
+   *     `IdempotencyStore.applyIdempotent` apply context (`ctx.transaction`)
+   *     so the coupled material mutation AND this transition AND the
+   *     single idempotency record commit as ONE authoritative unit —
+   *     a failure at ANY point (including this transition) rolls back
+   *     EVERYTHING. No partial commit can survive (no orphaned rights
+   *     grant / production / submission for a lifecycle state that
+   *     never occurred).
+   *  2. The caller owns per-subject serialization for the duration of
+   *     the composite (advisory; the authoritative guarantees remain
+   *     the in-tx version check + the idempotency store's per-key
+   *     mutex — the same stance `requestTransition` takes when its
+   *     coordination lock is busy).
+   *  3. The caller passes its composite idempotency record id
+   *     (`ctx.recordId`) so the transition's audit lineage references
+   *     the composite record — the transition itself carries NO
+   *     separate idempotency record; exactly-once is the composite's.
+   *
+   * This twin performs NO lock acquisition and NO idempotency
+   * bookkeeping of its own — those belong to the composite caller.
+   * `/workflows` REMAINS the sole lifecycle authority: the transition
+   * still executes exclusively through the shared `performTransition`
+   * path below (one state machine, no divergent copy).
+   *
+   * Throws the same errors as `requestTransition` (the rollback of the
+   * caller's transaction is the caller's — via the idempotency store).
+   */
+  requestTransitionWithinTx(
+    request: TransitionRequest,
+    execution: ExecutionContext,
+    tx: AuthorityTransaction,
+    idempotencyRecordId: string,
+  ): Promise<TransitionResult>;
 }
 
 /**

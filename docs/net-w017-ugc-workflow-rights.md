@@ -95,6 +95,49 @@ dev/test PostgresAuthorityShim provides the authority boundary
 (the NET-W003 established pattern; real-PostgreSQL integration runs
 in CI).
 
+## 4a. Remediation — composite atomicity (architect CHANGES REQUESTED on PR #34)
+
+**Blocking issue (architect):** the composites committed their
+material mutation and the workflow transition as SEPARATE
+authoritative transactions; the second could fail after the first
+committed (an orphaned ACTIVE usage-rights grant / production /
+submission for a lifecycle state that never occurred).
+
+**Decision of record (the architect's PREFERRED option — single
+authoritative transaction):**
+
+- `/workflows` gained `requestTransitionWithinTx` — the in-tx
+  composition twin executing the SHARED `performTransition` machinery
+  (one state machine; `/workflows` remains the sole lifecycle
+  authority) inside a CALLER-OPENED transaction. Contract: the caller
+  opened the tx via `applyIdempotent`, owns per-subject serialization,
+  and passes its composite `ctx.recordId` for audit lineage.
+- `acceptEngagement`/`autoAcceptEngagement` (grant + READY→ASSIGNED),
+  `openProduction` (production + ASSIGNED→IN_PROGRESS) and
+  `submitProduction` (submission + IN_PROGRESS→SUBMITTED) each run in
+  ONE `applyIdempotent`: material record + audit + in-tx fresh state
+  precondition + twin transition + one idempotency record commit
+  atomically. Invariant → enforcement:
+  - "no orphaned grant/production/submission can exist" → structural:
+    there is no second transaction to fail (fault-injection proves
+    each failure point rolls back EVERYTHING);
+  - "the split composite cannot be reintroduced" → AC-07 pins the
+    bare `workflow.requestTransition(` ABSENT from the engagement
+    service + exactly three `requestTransitionWithinTx` calls.
+- `createEngagementsFromMatch` became a JOURNAL-FIRST recoverable
+  saga: the batch record is created RUNNING before any offer; every
+  processed candidate appends a create-once journal row; unexpected
+  failure marks ABORTED (machine-readable failure point) and
+  rethrows; the same-key retry resumes (journaled candidates skipped)
+  and finalizes COMPLETED with the journal-derived snapshot
+  (ABORTED→COMPLETED is the sanctioned recovery edge). The audit
+  lineage records batch.recorded → batch.aborted → batch.completed.
+- Fault-injection evidence:
+  `tests/creators/net-w017-remediation-composite-atomicity.test.ts`
+  (5 tests) — the three transition-failure points, the authoritative
+  COMMIT failure (wrapped-authority rebuild), retry convergence after
+  each, and the batch abort/recovery cycle.
+
 ## 5. Out-of-scope confirmation
 
 No sponsorship/disclosure execution (NET-W018), no ad inventory or

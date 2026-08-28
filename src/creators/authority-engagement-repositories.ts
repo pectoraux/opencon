@@ -51,6 +51,7 @@ import type {
   UsageRightsGrant,
   UsageRightsRepository,
   UsageRightsRevocation,
+  EngagementBatchOutcomeRecord,
 } from "./port.ts";
 
 export const ENGAGEMENTS_COLLECTION = "engagements";
@@ -63,6 +64,8 @@ export const UGC_PRODUCTIONS_COLLECTION = "ugc_productions";
 export const UGC_DELIVERABLES_COLLECTION = "ugc_deliverables";
 export const UGC_SUBMISSIONS_COLLECTION = "ugc_submissions";
 export const ENGAGEMENT_BATCHES_COLLECTION = "engagement_batches";
+export const ENGAGEMENT_BATCH_OUTCOMES_COLLECTION =
+  "engagement_batch_outcomes";
 
 export interface AuthorityEngagementRepositoriesOptions {
   readonly authority: PostgresAuthority;
@@ -576,6 +579,14 @@ export function createAuthorityUgcProductionRepository(
       );
     },
 
+    async findByEngagementWithinTx(organizationScopeId, engagementId, tx) {
+      return findByEngagementWithinScope(
+        organizationScopeId,
+        engagementId,
+        () => tx.scan<UgcProduction>(UGC_PRODUCTIONS_COLLECTION),
+      );
+    },
+
     async listByOrganization(organizationScopeId, engagementId) {
       const records = await authority.scan<UgcProduction>(
         UGC_PRODUCTIONS_COLLECTION,
@@ -727,6 +738,20 @@ export function createAuthorityUgcSubmissionRepository(
         )
         .sort(bySubmittedAt);
     },
+
+    async listByProductionWithinTx(organizationScopeId, productionId, tx) {
+      const records = await tx.scan<UgcSubmission>(
+        UGC_SUBMISSIONS_COLLECTION,
+      );
+      return records
+        .map((rec) => rec.value)
+        .filter(
+          (submission) =>
+            submission.organizationScopeId === organizationScopeId &&
+            submission.productionId === productionId,
+        )
+        .sort(bySubmittedAt);
+    },
   };
 }
 
@@ -771,6 +796,118 @@ export function createAuthorityEngagementBatchRepository(
       return batch;
     },
 
+    async completeWithinTx(batchId, outcomes, completedAt, tx) {
+      const rec = await tx.get<EngagementBatchRecord>(
+        ENGAGEMENT_BATCHES_COLLECTION,
+        batchId,
+      );
+      if (!rec) {
+        throw new Error(`engagement batch not found: ${batchId}`);
+      }
+      if (rec.value.status === "COMPLETED") {
+        // Idempotent finalize (a retried finalize apply replays).
+        return rec.value;
+      }
+      if (
+        rec.value.status !== "RUNNING" &&
+        rec.value.status !== "ABORTED"
+      ) {
+        throw new Error(
+          `engagement batch ${batchId} is ${rec.value.status}; only a RUNNING or ABORTED (recovery resume) batch can complete`,
+        );
+      }
+      const completed: EngagementBatchRecord = Object.freeze({
+        ...rec.value,
+        status: "COMPLETED",
+        outcomes,
+        completedAt,
+      });
+      await tx.put(ENGAGEMENT_BATCHES_COLLECTION, batchId, completed);
+      logger?.debug("engagement_batch.completed", {
+        batchId,
+        organizationScopeId: completed.organizationScopeId,
+        outcomeCount: outcomes.length,
+      });
+      return completed;
+    },
+
+    async abortWithinTx(batchId, abortedReason, abortedAt, tx) {
+      const rec = await tx.get<EngagementBatchRecord>(
+        ENGAGEMENT_BATCHES_COLLECTION,
+        batchId,
+      );
+      if (!rec) {
+        throw new Error(`engagement batch not found: ${batchId}`);
+      }
+      if (rec.value.status === "ABORTED") {
+        // Idempotent abort (a retried abort apply replays).
+        return rec.value;
+      }
+      if (rec.value.status !== "RUNNING") {
+        throw new Error(
+          `engagement batch ${batchId} is ${rec.value.status}; only a RUNNING batch can abort`,
+        );
+      }
+      const aborted: EngagementBatchRecord = Object.freeze({
+        ...rec.value,
+        status: "ABORTED",
+        abortedAt,
+        abortedReason,
+      });
+      await tx.put(ENGAGEMENT_BATCHES_COLLECTION, batchId, aborted);
+      logger?.debug("engagement_batch.aborted", {
+        batchId,
+        organizationScopeId: aborted.organizationScopeId,
+        abortedReason,
+      });
+      return aborted;
+    },
+
+    async appendOutcomeWithinTx(outcome, tx) {
+      const existing = await tx.get<EngagementBatchOutcomeRecord>(
+        ENGAGEMENT_BATCH_OUTCOMES_COLLECTION,
+        outcome.id,
+      );
+      if (existing) {
+        throw new Error(
+          `engagement batch outcome already persisted: ${outcome.id} (journal appends are create-once; recovery reads skip)`,
+        );
+      }
+      await tx.put(ENGAGEMENT_BATCH_OUTCOMES_COLLECTION, outcome.id, outcome);
+      logger?.debug("engagement_batch.outcome_appended", {
+        batchId: outcome.batchId,
+        creatorProfileId: outcome.outcome.creatorProfileId,
+      });
+      return outcome;
+    },
+
+    async findOutcome(batchId, creatorProfileId) {
+      const id = engagementBatchOutcomeId(batchId, creatorProfileId);
+      const rec = await authority.get<EngagementBatchOutcomeRecord>(
+        ENGAGEMENT_BATCH_OUTCOMES_COLLECTION,
+        id,
+      );
+      return rec ? rec.value : null;
+    },
+
+    async listOutcomes(batchId) {
+      const records = await authority.scan<EngagementBatchOutcomeRecord>(
+        ENGAGEMENT_BATCH_OUTCOMES_COLLECTION,
+      );
+      return records
+        .map((rec) => rec.value)
+        .filter((row) => row.batchId === batchId)
+        .sort((a, b) =>
+          a.recordedAt === b.recordedAt
+            ? a.id < b.id
+              ? -1
+              : 1
+            : a.recordedAt < b.recordedAt
+              ? -1
+              : 1,
+        );
+    },
+
     async findById(id) {
       const rec = await authority.get<EngagementBatchRecord>(
         ENGAGEMENT_BATCHES_COLLECTION,
@@ -793,6 +930,14 @@ export function createAuthorityEngagementBatchRepository(
         .sort(byRecordedAt);
     },
   };
+}
+
+/** The stable journal-row key for (batchId, creatorProfileId). */
+export function engagementBatchOutcomeId(
+  batchId: string,
+  creatorProfileId: string,
+): string {
+  return `outcome:${batchId}:${creatorProfileId}`;
 }
 
 /** Allocate an engagement id (exposed for tests). */

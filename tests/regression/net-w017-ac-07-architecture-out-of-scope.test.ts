@@ -26,7 +26,7 @@ import {
   CREATOR_CONTENT_FORMATS,
   CREATOR_MATCH_FORMAT,
 } from "../../src/core/creators.ts";
-import { ENGAGEMENT_BATCH_SKIP_REASONS as PORT_SKIP_REASONS } from "../../src/creators/port.ts";
+import { ENGAGEMENT_BATCH_SKIP_REASONS as PORT_SKIP_REASONS, ENGAGEMENT_BATCH_STATUSES as PORT_BATCH_STATUSES } from "../../src/creators/port.ts";
 import {
   CANONICAL_LIFECYCLE_STATES,
   EXCEPTIONAL_LIFECYCLE_STATES,
@@ -112,6 +112,13 @@ describe("NET-W017-AC-07 architecture / out-of-scope", () => {
     expect([...PORT_SKIP_REASONS]).toEqual([
       "open_engagement_exists",
       "profile_not_active",
+    ]);
+    // NET-W017 remediation: the batch saga journal bookkeeping
+    // vocabulary (NOT a lifecycle machine — decision-record status).
+    expect([...PORT_BATCH_STATUSES]).toEqual([
+      "RUNNING",
+      "COMPLETED",
+      "ABORTED",
     ]);
 
 
@@ -260,14 +267,19 @@ describe("NET-W017-AC-07 architecture / out-of-scope", () => {
       }
     }
     // The ONLY lifecycle mutation path is the injected workflow
-    // delegation callback (requestTransition), used for acceptance,
-    // production open and submission.
+    // delegation twin (requestTransitionWithinTx — the NET-W017
+    // remediation: the material record + transition commit in ONE
+    // authoritative transaction), used for acceptance, production
+    // open and submission. The BARE requestTransition is
+    // structurally ABSENT: a split-transaction composite cannot be
+    // reintroduced without tripping this pin.
     const service = await readFile(
       join(REPO, "src/creators/engagement-service.ts"),
       "utf8",
     );
-    expect(service).toContain("workflow.requestTransition(");
-    expect(service.match(/workflow\.requestTransition\(/g)).toHaveLength(3);
+    expect(service).toContain("workflow.requestTransitionWithinTx(");
+    expect(service.match(/workflow\.requestTransitionWithinTx\(/g)).toHaveLength(3);
+    expect(service).not.toMatch(/workflow\.requestTransition\(/);
   });
 
   test("STRUCTURAL: the auto-accept evaluation engine has NO AI/advisory input (no code path from model output to acceptance)", async () => {
@@ -314,9 +326,11 @@ describe("NET-W017-AC-07 architecture / out-of-scope", () => {
     expect(runtime).toContain("engagementOpportunityLookup");
     expect(runtime).toContain("engagementContributionLookup");
     expect(runtime).toContain("engagementEvidenceLookup");
-    // The workflow delegation targets the SAME service instance.
+    // The workflow delegation targets the SAME service instance
+    // (the in-tx twin — the remediation's single-transaction
+    // composition seam).
     expect(runtime).toMatch(
-      /const creatorEngagementService = createCreatorEngagementService\(\{[\s\S]{0,1800}return workflowService\.requestTransition\(request, execution\);/,
+      /const creatorEngagementService = createCreatorEngagementService\(\{[\s\S]{0,1800}return workflowService\.requestTransitionWithinTx\(/,
     );
     // The workflow service routes the engagement subject kind.
     expect(runtime).toContain("engagementRepository: createLifecycleRepository(engagementRepo)");
@@ -370,6 +384,7 @@ describe("NET-W017-AC-07 architecture / out-of-scope", () => {
       "tests/creators/net-w017-ac-05-evidence-integration.test.ts",
       "tests/creators/net-w017-ac-06-provider-neutrality.test.ts",
       "tests/creators/net-w017-ac-08-tenancy-idempotency.test.ts",
+      "tests/creators/net-w017-remediation-composite-atomicity.test.ts",
       "tests/regression/net-w017-ac-07-architecture-out-of-scope.test.ts",
       "docs/net-w017-ugc-workflow-rights.md",
     ];

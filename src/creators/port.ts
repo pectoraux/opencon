@@ -1142,11 +1142,55 @@ export interface EngagementBatchOutcome {
 }
 
 /**
+ * The batch execution status (saga journal bookkeeping — NET-W017
+ * remediation, architect CHANGES REQUESTED on PR #34). This is NOT a
+ * lifecycle subject and NOT a domain state machine: it is the
+ * bookkeeping field of the batch DECISION record that makes partial
+ * execution explicit and recovery deterministic (journal-first).
+ */
+export const ENGAGEMENT_BATCH_STATUSES = [
+  "RUNNING",
+  "COMPLETED",
+  "ABORTED",
+] as const;
+
+export type EngagementBatchStatus =
+  (typeof ENGAGEMENT_BATCH_STATUSES)[number];
+
+/**
+ * One append-only journal row of the auto-match batch saga: the
+ * per-candidate outcome recorded in the SAME deterministic order the
+ * candidates were processed. The journal is the partial-execution
+ * truth; the batch record's `outcomes` snapshot is derived from it at
+ * finalize.
+ */
+export interface EngagementBatchOutcomeRecord {
+  /** Stable journal key: `outcome:{batchId}:{creatorProfileId}`. */
+  readonly id: string;
+  readonly batchId: string;
+  readonly organizationScopeId: string;
+  readonly outcome: EngagementBatchOutcome;
+  readonly recordedAt: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+/**
  * The auto-match batch record — the auditable decision record of ONE
  * `createEngagementsFromMatch` execution (work order §3.2): which
  * eligible match-run candidates became DRAFT engagement offers and
- * which were skipped (with the closed reason). Append-only; it
- * mutates nothing else.
+ * which were skipped (with the closed reason).
+ *
+ * NET-W017 remediation (journal-first recoverable saga): the record is
+ * created FIRST with status RUNNING and an EMPTY outcome snapshot;
+ * per-candidate outcomes append to the {@link EngagementBatchOutcomeRecord}
+ * journal as candidates are processed; the run finalizes to COMPLETED
+ * (snapshot derived from the journal) or ABORTED (unexpected failure —
+ * the reason is recorded, the journal accurately describes every
+ * candidate processed so far, and a retry with the same idempotency
+ * key resumes deterministically). No durable offer can exist without
+ * its batch journal accurately describing it.
  */
 export interface EngagementBatchRecord {
   readonly id: string;
@@ -1155,9 +1199,20 @@ export interface EngagementBatchRecord {
   readonly campaignId: string;
   readonly campaignPolicyVersion: number | null;
   readonly candidateCount: number;
+  /** RUNNING while executing; COMPLETED/ABORTED is terminal bookkeeping. */
+  readonly status: EngagementBatchStatus;
+  /**
+   * The finalized outcome snapshot (derived from the journal at
+   * COMPLETED). EMPTY while RUNNING/ABORTED — read the journal for
+   * live partial state.
+   */
   readonly outcomes: readonly EngagementBatchOutcome[];
   readonly createdBy: string;
   readonly createdAt: string;
+  readonly completedAt: string | null;
+  readonly abortedAt: string | null;
+  /** Machine-readable abort detail ({failedCandidateProfileId, reason}). */
+  readonly abortedReason: string | null;
   readonly idempotencyKey: string;
   readonly executionId: string;
   readonly correlationId: string;
@@ -1623,14 +1678,27 @@ export interface ProductionEvidenceLookup {
 
 /**
  * The sanctioned /workflows delegation callback (the
- * Proof-of-Value/service precedent): the engagement service validates
- * business preconditions and REQUESTS the authorized transition —
- * /workflows stays the SOLE lifecycle authority (AC-01).
+ * Proof-of-Value/service precedent, composed to a SINGLE authoritative
+ * transaction by the NET-W017 remediation): the engagement service
+ * validates business preconditions and executes the authorized
+ * transition IN-TX — /workflows stays the SOLE lifecycle authority
+ * (AC-01) and every composite command (acceptance / production /
+ * submission) commits its material record AND the lifecycle transition
+ * as ONE all-or-nothing authoritative unit.
  */
 export interface EngagementWorkflowPort {
-  requestTransition(
+  /**
+   * The in-tx twin of the canonical requestTransition: executes the
+   * full workflow machinery (version check, authorization, state
+   * machine, save, buffered audit) inside the CALLER-OPENED
+   * transaction (`ctx.transaction` of the composite's
+   * `applyIdempotent`). See src/workflows/port.ts for the contract.
+   */
+  requestTransitionWithinTx(
     request: TransitionRequest,
     execution: ExecutionContext,
+    tx: AuthorityTransaction,
+    idempotencyRecordId: string,
   ): Promise<TransitionResult>;
 }
 
@@ -1784,6 +1852,12 @@ export interface UgcProductionRepository {
     organizationScopeId: string,
     engagementId: string,
   ): Promise<UgcProduction | null>;
+  /** In-tx read for composite atomicity (NET-W017 remediation). */
+  findByEngagementWithinTx(
+    organizationScopeId: string,
+    engagementId: string,
+    tx: AuthorityTransaction,
+  ): Promise<UgcProduction | null>;
   listByOrganization(
     organizationScopeId: string,
     engagementId?: string,
@@ -1824,6 +1898,12 @@ export interface UgcSubmissionRepository {
     organizationScopeId: string,
     productionId: string,
   ): Promise<readonly UgcSubmission[]>;
+  /** In-tx read for composite atomicity (NET-W017 remediation). */
+  listByProductionWithinTx(
+    organizationScopeId: string,
+    productionId: string,
+    tx: AuthorityTransaction,
+  ): Promise<readonly UgcSubmission[]>;
 }
 
 export interface EngagementBatchRepository {
@@ -1835,6 +1915,44 @@ export interface EngagementBatchRepository {
     batch: EngagementBatchRecord,
     tx: AuthorityTransaction,
   ): Promise<EngagementBatchRecord>;
+  /**
+   * Finalize the batch journal (NET-W017 remediation): transition the
+   * RUNNING record to COMPLETED with the outcome snapshot derived from
+   * the journal. An ABORTED record may complete on the RECOVERY
+   * resume (the journal guarantees only unprocessed candidates
+   * execute). Idempotent within the caller's apply: an
+   * already-COMPLETED record is returned unchanged.
+   */
+  completeWithinTx(
+    batchId: string,
+    outcomes: readonly EngagementBatchOutcome[],
+    completedAt: string,
+    tx: AuthorityTransaction,
+  ): Promise<EngagementBatchRecord>;
+  /**
+   * Abort the batch journal: transition the RUNNING record to ABORTED
+   * with the machine-readable reason. An already-ABORTED record is
+   * returned unchanged; a COMPLETED record is a conflict (a completed
+   * saga cannot be aborted).
+   */
+  abortWithinTx(
+    batchId: string,
+    abortedReason: string,
+    abortedAt: string,
+    tx: AuthorityTransaction,
+  ): Promise<EngagementBatchRecord>;
+  /** Append one per-candidate outcome journal row (create-once per key). */
+  appendOutcomeWithinTx(
+    outcome: EngagementBatchOutcomeRecord,
+    tx: AuthorityTransaction,
+  ): Promise<EngagementBatchOutcomeRecord>;
+  /** The journal row for (batchId, creatorProfileId), if any (recovery). */
+  findOutcome(
+    batchId: string,
+    creatorProfileId: string,
+  ): Promise<EngagementBatchOutcomeRecord | null>;
+  /** The full journal of one batch, in deterministic (recordedAt, id) order. */
+  listOutcomes(batchId: string): Promise<readonly EngagementBatchOutcomeRecord[]>;
   findById(id: string): Promise<EngagementBatchRecord | null>;
   listByOrganization(
     organizationScopeId: string,
@@ -1971,6 +2089,22 @@ export interface CreatorEngagementService {
     organizationScopeId: string,
     productionId: string,
   ): Promise<readonly UgcSubmission[]>;
+  /**
+   * Tenant-scoped batch read (NET-W017 remediation: saga
+   * inspectability — the ABORTED/RUNNING journal is the partial-
+   * execution truth). Cross-scope = NotFoundError.
+   */
+  getEngagementBatch(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    batchId: string,
+  ): Promise<EngagementBatchRecord>;
+  /** The batch's per-candidate outcome journal (deterministic order). */
+  listEngagementBatchOutcomes(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    batchId: string,
+  ): Promise<readonly EngagementBatchOutcomeRecord[]>;
 }
 
 export interface CreatorEngagementServiceDeps {
@@ -2019,6 +2153,9 @@ export interface CreatorsPort {
     /** NET-W017: material engagement-domain mutations (append-only records). */
     readonly engagementOfferRecorded: "engagement.offer_recorded";
     readonly engagementBatchRecorded: "engagement.batch_recorded";
+    /** NET-W017 remediation: the batch saga's terminal journal events. */
+    readonly engagementBatchCompleted: "engagement.batch_completed";
+    readonly engagementBatchAborted: "engagement.batch_aborted";
     readonly usageRightsGranted: "usage_rights.granted";
     readonly usageRightsRevoked: "usage_rights.revoked";
     readonly acceptancePolicySet: "creator_acceptance_policy.set";

@@ -248,6 +248,69 @@ record created ONLY by an acceptance (manual or auto):
   campaign, opportunity/contribution references, evidence ids) and
   execution/correlation/causation identifiers.
 
+### §3.6 Composite atomicity — the remediation decision of record
+
+Architect review on PR #34 returned CHANGES REQUESTED with one blocking
+issue: the composites (`acceptEngagement`, `openProduction`,
+`submitProduction`) performed their material mutation and the workflow
+transition as SEPARATE authoritative transactions — the second could
+fail after the first committed, leaving e.g. a durable ACTIVE
+usage-rights grant for an engagement still in READY (the orphaned-grant
+scenario), or an orphaned production/submission.
+
+**The implemented solution (the architect's PREFERRED option): the
+coupled material record and the lifecycle transition participate in the
+SAME authoritative transaction.**
+
+1. `/workflows` exposes `requestTransitionWithinTx` — the in-tx
+   composition twin of `requestTransition`. It executes the EXACT SAME
+   machinery (in-tx re-read, `expectedVersion` optimistic concurrency,
+   deny-by-default authorization, pure state-machine evaluation,
+   `saveWithinTx`, buffered transactional audit) inside a
+   CALLER-OPENED `AuthorityTransaction`. One state machine, no
+   divergent copy: `/workflows` REMAINS the sole lifecycle authority.
+   The twin performs no lock acquisition and no idempotency
+   bookkeeping of its own — the composite caller owns both (the port
+   contract documents the three caller obligations).
+2. Each composite runs inside ONE `applyIdempotent` keyed per command
+   (`engagement_accept:` / `ugc_production:` / `ugc_submission:`):
+   the material record + its audit append + the in-tx state
+   precondition (fresh re-read) + the twin transition + the single
+   composite idempotency record commit as ONE authoritative unit. A
+   failure at ANY point — grant/production/submission write, audit
+   append, transition rejection (authorization, state machine, stale
+   version), or the authoritative COMMIT itself — rolls back
+   EVERYTHING. No partial commit can survive; no compensating
+   transaction or saga is needed for these commands.
+3. The auto-match batch (`createEngagementsFromMatch`) is an explicitly
+   recoverable JOURNAL-FIRST saga (per-candidate offers remain
+   individually idempotent commits):
+   - the batch decision record is created FIRST (`status: RUNNING`,
+     empty snapshot);
+   - every processed candidate APPENDS a create-once journal row
+     (`outcome:{batchId}:{profileId}`);
+   - an unexpected failure marks the record ABORTED with the
+     machine-readable failure point and RETHROWS — the journal
+     accurately describes every candidate processed so far;
+   - a same-key retry resumes deterministically: journaled candidates
+     are skipped, unprocessed ones execute, the finalize transitions
+     the record to COMPLETED with the journal-derived snapshot
+     (ABORTED → COMPLETED is the sanctioned recovery edge; COMPLETED
+     can never be aborted).
+   No durable offer can exist without its batch journal accurately
+   describing it.
+
+Fault-injection evidence (`tests/creators/net-w017-remediation-composite-atomicity.test.ts`):
+accept / open / submit transition failures each leave NOTHING
+(no record, no audit, no idempotency record, state+version unchanged);
+the deepest point (authoritative COMMIT failure) leaves NOTHING; every
+retry converges deterministically; the batch saga abort + same-key
+recovery completes with an exact journal (recorded → aborted →
+completed, each exactly once). Regression pins (AC-07) make the
+split-transaction composite structurally impossible to reintroduce
+(the bare `workflow.requestTransition(` call is pinned ABSENT from the
+engagement service; exactly three `requestTransitionWithinTx` calls).
+
 ### §3.5 API surface
 
 - `POST /api/creators/engagements` — create an offer (guard
@@ -334,6 +397,7 @@ provider SDK semantics in the domain.
 | 06 | tests/creators/net-w017-ac-06-provider-neutrality.test.ts | external platform references are opaque provider-neutral strings (no SDK semantics in the domain); secrets never enter the creators boundary; channel/territory/format vocabularies are closed and validated |
 | 07 | tests/regression/net-w017-ac-07-architecture-out-of-scope.test.ts | arch:check + authority:check 0 violations; frozen specs unchanged; frozen W015/W016 vocabularies pinned UNCHANGED + new W017 vocabulary pinned; no workflow/settlement/reputation/risk/outcome mutation surface in the engagement boundary; no LLM import in the W017 surface; file list; secret scan |
 | 08 | tests/creators/net-w017-ac-08-tenancy-idempotency.test.ts | tenant-scoped reads (cross-scope = NotFoundError); idempotent replays of every command (created=false, byte-identical records); concurrent duplicate engagement creation rejected through the advisory-lock anchor; HTTP surface (403/400/404/201) |
+| remediation | tests/creators/net-w017-remediation-composite-atomicity.test.ts | §3.6 composite atomicity by fault injection: accept/open/submit transition failures commit NOTHING (no record, no audit, no idempotency record; state+version unchanged); the authoritative COMMIT failure commits NOTHING; every retry converges deterministically; the batch saga aborts with an exact journal and the same-key retry resumes → COMPLETED |
 
 ## §7 Verification
 

@@ -185,7 +185,7 @@ describe("NET-W017 AC-03 — usage rights semantics", () => {
     }
   }, 60_000);
 
-  test("grants are immutable: the failed-acceptance recovery reuses identical terms; different terms are a stable conflict", async () => {
+  test("the acceptance composite is ATOMIC (remediation): a denied transition leaves NO grant; grants stay immutable; retry converges", async () => {
     const harness = await createNetW017Harness();
     try {
       const { engagement } = await createEngagement(harness);
@@ -193,32 +193,36 @@ describe("NET-W017 AC-03 — usage rights semantics", () => {
       const { grantedRightsFixture } = await import(
         "./_net-w017-harness.ts"
       );
-      // ONE granted-terms fixture shared by the recovery steps (the
+      // ONE granted-terms fixture shared by the steps (the
       // identical-terms detection is exact).
       const grantedTerms = grantedRightsFixture();
-      // Step 1: an acceptance by a person UNAUTHORIZED for the
-      // transition (the second-org person has no engagement
-      // transition policy) — the grant is recorded, then the
-      // transition is DENIED (the composition's partial state).
+      // Step 1 (the architect's orphaned-grant scenario): an
+      // acceptance by a person UNAUTHORIZED for the transition. The
+      // grant is staged IN-TRANSACTION and the transition is DENIED —
+      // the SINGLE authoritative transaction rolls back EVERYTHING:
+      // no grant, no audit, no idempotency record, engagement READY.
+      // A durable ACTIVE grant for an unaccepted engagement is
+      // structurally impossible under the fused composite.
       const foreignCtx = personCtx(
         harness,
         harness.secondOrgPersonId,
         "w017-grant-conflict",
       );
+      const foreignInput = {
+        organizationScopeId: harness.organizationScopeId,
+        engagementId: engagement.id,
+        expectedVersion: 1,
+        grantedRights: grantedTerms,
+        idempotencyKey: key("w017-accept-foreign"),
+      };
       await expect(
         harness.runtime.creatorEngagementService.acceptEngagement(
           foreignCtx,
-          {
-            organizationScopeId: harness.organizationScopeId,
-            engagementId: engagement.id,
-            expectedVersion: 1,
-            grantedRights: grantedTerms,
-            idempotencyKey: key("w017-accept-foreign"),
-          },
+          foreignInput,
         ),
       ).rejects.toBeInstanceOf(AuthorizationError);
       // The engagement is still READY (the transition never
-      // happened), but the grant exists.
+      // happened) AND NO grant exists (the remediation).
       const stored = await harness.runtime.creatorEngagementService.getEngagement(
         personCtx(harness, harness.operatorPersonId, "w017-read"),
         harness.organizationScopeId,
@@ -231,29 +235,29 @@ describe("NET-W017 AC-03 — usage rights semantics", () => {
           harness.organizationScopeId,
           engagement.id,
         );
-      expect(grants.length).toBe(1);
+      expect(grants.length).toBe(0);
 
-      // Step 2: a retry with a DIFFERENT key + DIFFERENT terms is a
-      // stable conflict — grants are immutable.
+      // Step 2 (retry after the injected failure): the same key
+      // re-executes (nothing committed), fails identically, and still
+      // leaves nothing behind — deterministic convergence.
       await expect(
         harness.runtime.creatorEngagementService.acceptEngagement(
           foreignCtx,
-          {
-            organizationScopeId: harness.organizationScopeId,
-            engagementId: engagement.id,
-            expectedVersion: 1,
-            grantedRights: {
-              ...grantedRightsFixture(),
-              territories: ["GH", "NG"],
-            },
-            idempotencyKey: key("w017-accept-different"),
-          },
+          foreignInput,
         ),
-      ).rejects.toBeInstanceOf(UsageRightsConflictError);
+      ).rejects.toBeInstanceOf(AuthorizationError);
+      expect(
+        (
+          await harness.runtime.creatorEngagementService.listUsageRights(
+            personCtx(harness, harness.operatorPersonId, "w017-rights-0"),
+            harness.organizationScopeId,
+            engagement.id,
+          )
+        ).length,
+      ).toBe(0);
 
-      // Step 3: the authorized creator accepts with the IDENTICAL
-      // terms (new key) — the existing grant is REUSED and the
-      // transition completes (the recovery path).
+      // Step 3: the authorized creator accepts (fresh key) — the
+      // retry succeeds; exactly ONE grant; ASSIGNED.
       const recovered = await harness.runtime.creatorEngagementService.acceptEngagement(
         creatorCtx(harness, "w017-recover"),
         {
@@ -265,8 +269,6 @@ describe("NET-W017 AC-03 — usage rights semantics", () => {
         },
       );
       expect(recovered.engagement.state).toBe("ASSIGNED");
-      expect(recovered.grant.id).toBe(grants[0]!.grant.id);
-      // Still exactly ONE grant for the engagement.
       const after =
         await harness.runtime.creatorEngagementService.listUsageRights(
           creatorCtx(harness, "w017-rights-2"),
@@ -274,6 +276,71 @@ describe("NET-W017 AC-03 — usage rights semantics", () => {
           engagement.id,
         );
       expect(after.length).toBe(1);
+
+      // Step 4 (grants are immutable): a DIRECTLY seeded grant with
+      // different terms (test-level repository access — the only
+      // reachable path now that the composite is atomic) makes any
+      // re-acceptance with different terms a STABLE conflict before
+      // the transition can run. Seed on a FRESH READY engagement
+      // (fresh fixtures — the envelope windows are call-time
+      // relative).
+      const second = await createEngagement(harness);
+      await tenderEngagement(harness, second.engagement.id, 0);
+      const secondTerms = grantedRightsFixture();
+      const seeded = {
+        ...secondTerms,
+        territories: ["GH", "NG"],
+      };
+      await harness.runtime.postgresAuthority.run(
+        personCtx(harness, harness.operatorPersonId, "w017-seed"),
+        async (tx: import("../../src/core/postgres-authority.ts").AuthorityTransaction) => {
+          const { USAGE_RIGHTS_GRANTS_COLLECTION } = await import(
+            "../../src/creators/authority-engagement-repositories.ts"
+          );
+          await tx.put(USAGE_RIGHTS_GRANTS_COLLECTION, `seed-${second.engagement.id}`, {
+            id: `seed-${second.engagement.id}`,
+            organizationScopeId: harness.organizationScopeId,
+            engagementId: second.engagement.id,
+            grantorPersonId: second.engagement.creatorPersonId,
+            uses: seeded.uses,
+            channels: seeded.channels,
+            territories: seeded.territories,
+            formats: seeded.formats,
+            exclusions: seeded.exclusions,
+            startsAt: seeded.startsAt,
+            endsAt: seeded.endsAt,
+            contentOwnership: "creator_retained",
+            formatVersion: "NET-W017:1",
+            createdBy: harness.creatorPersonId,
+            createdAt: new Date().toISOString(),
+            idempotencyKey: "seed",
+            executionId: "seed",
+            correlationId: "seed",
+            causationId: null,
+          });
+        },
+      );
+      await expect(
+        harness.runtime.creatorEngagementService.acceptEngagement(
+          creatorCtx(harness, "w017-different"),
+          {
+            organizationScopeId: harness.organizationScopeId,
+            engagementId: second.engagement.id,
+            expectedVersion: 1,
+            grantedRights: secondTerms,
+            idempotencyKey: key("w017-accept-different"),
+          },
+        ),
+      ).rejects.toBeInstanceOf(UsageRightsConflictError);
+      // The conflicting attempt left NOTHING (still READY, still one
+      // grant — the seeded one).
+      const secondAfter =
+        await harness.runtime.creatorEngagementService.getEngagement(
+          personCtx(harness, harness.operatorPersonId, "w017-read-2"),
+          harness.organizationScopeId,
+          second.engagement.id,
+        );
+      expect(secondAfter.state).toBe("READY");
     } finally {
       await harness.teardown();
     }

@@ -344,6 +344,7 @@ import type {
   CreatorService,
   CreatorMatchingService,
   Engagement,
+  EngagementBatchOutcomeRecord,
   EngagementBatchRecord,
   RunCreatorMatchInput,
   UgcDeliverableVersion,
@@ -2063,9 +2064,17 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       // Delegate to the SAME workflow service instance (the
       // /workflows boundary is the SOLE lifecycle authority for
       // engagement transitions, exactly as for opportunities/
-      // contributions/proofs/measured outcomes).
-      async requestTransition(request, execution) {
-        return workflowService.requestTransition(request, execution);
+      // contributions/proofs/measured outcomes). NET-W017 remediation:
+      // the composite commands execute the transition IN-TX through
+      // the sanctioned twin so the material record + the transition
+      // commit as ONE authoritative unit.
+      async requestTransitionWithinTx(request, execution, tx, idempotencyRecordId) {
+        return workflowService.requestTransitionWithinTx(
+          request,
+          execution,
+          tx,
+          idempotencyRecordId,
+        );
       },
     },
     idempotency,
@@ -3012,7 +3021,10 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       causationId: submission.causationId,
     };
   }
-  function toEngagementBatchView(batch: EngagementBatchRecord) {
+  function toEngagementBatchView(
+    batch: EngagementBatchRecord,
+    journalOutcomes?: readonly EngagementBatchOutcomeRecord[],
+  ) {
     return {
       id: batch.id,
       organizationScopeId: batch.organizationScopeId,
@@ -3020,9 +3032,19 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       campaignId: batch.campaignId,
       campaignPolicyVersion: batch.campaignPolicyVersion,
       candidateCount: batch.candidateCount,
-      outcomes: batch.outcomes,
+      status: batch.status,
+      // COMPLETED carries the finalized snapshot; RUNNING/ABORTED
+      // expose the LIVE journal (accurate partial execution — the
+      // NET-W017 remediation requirement).
+      outcomes:
+        batch.status === "COMPLETED"
+          ? batch.outcomes
+          : (journalOutcomes ?? []).map((row) => row.outcome),
       createdBy: batch.createdBy,
       createdAt: batch.createdAt,
+      completedAt: batch.completedAt,
+      abortedAt: batch.abortedAt,
+      abortedReason: batch.abortedReason,
       executionId: batch.executionId,
       correlationId: batch.correlationId,
       causationId: batch.causationId,
@@ -5678,8 +5700,14 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         execution,
         input as unknown as import("../creators/port.ts").CreateEngagementsFromMatchInput,
       );
+      // RUNNING/ABORTED batches expose the LIVE journal (accurate
+      // partial execution) — read it for the view.
+      const journal =
+        result.batch.status === "COMPLETED"
+          ? []
+          : await engagementBatchRepo.listOutcomes(result.batch.id);
       return {
-        batch: toEngagementBatchView(result.batch),
+        batch: toEngagementBatchView(result.batch, journal),
         created: result.created,
       };
     },

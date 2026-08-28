@@ -85,6 +85,7 @@ import type {
   CreatorProfileVersionRepository,
   Engagement,
   EngagementBatchOutcome,
+  EngagementBatchOutcomeRecord,
   EngagementBatchRecord,
   EngagementCompensationTerms,
   EngagementRequestedRights,
@@ -100,6 +101,7 @@ import type {
   SetAcceptancePolicyResult,
   SubmitProductionInput,
   SubmitProductionResult,
+  TransitionResult,
   UgcDeliverableVersion,
   UgcProduction,
   UgcSubmission,
@@ -122,6 +124,8 @@ import {
 
 const ENGAGEMENT_OFFER_RECORDED = "engagement.offer_recorded" as const;
 const ENGAGEMENT_BATCH_RECORDED = "engagement.batch_recorded" as const;
+const ENGAGEMENT_BATCH_COMPLETED = "engagement.batch_completed" as const;
+const ENGAGEMENT_BATCH_ABORTED = "engagement.batch_aborted" as const;
 const USAGE_RIGHTS_GRANTED = "usage_rights.granted" as const;
 const USAGE_RIGHTS_REVOKED = "usage_rights.revoked" as const;
 const ACCEPTANCE_POLICY_SET = "creator_acceptance_policy.set" as const;
@@ -479,7 +483,18 @@ export function createCreatorEngagementService(
     return { engagement: applied.result, created: applied.executed };
   }
 
-  /** The grant+transition acceptance composition (shared by manual + auto). */
+  /**
+   * The acceptance composition (shared by manual + auto) — NET-W017
+   * remediation decision of record (architect CHANGES REQUESTED on PR
+   * #34): the usage-rights grant AND the READY → ASSIGNED lifecycle
+   * transition commit in ONE authoritative transaction. The composite
+   * runs inside a single `applyIdempotent`; the transition executes
+   * through the sanctioned in-tx /workflows twin against the SAME
+   * transaction — a failure at ANY point (grant write, audit append,
+   * transition rejection, commit) rolls back EVERYTHING. An orphaned
+   * ACTIVE grant for an unaccepted engagement is structurally
+   * impossible: there is no second transaction to fail.
+   */
   async function recordGrantAndAccept(
     execution: ExecutionContext,
     input: {
@@ -491,15 +506,15 @@ export function createCreatorEngagementService(
       mode: "manual" | "auto";
       extraMetadata: Record<string, unknown>;
     },
-  ): Promise<{ grant: UsageRightsGrant; transition: Awaited<ReturnType<typeof requestAcceptanceTransition>> }> {
+  ): Promise<{ grant: UsageRightsGrant; transition: TransitionResult }> {
     const actor = actingPersonId(execution);
     const engagement = input.engagement;
     // Replay tolerance (the creator-service precedent): when the
     // record ALREADY sits in the target state the call may be a
-    // same-key idempotent REPLAY — let the idempotent parts decide.
-    // A FRESH key re-running against an already-accepted engagement
-    // fails later on the stale expectedVersion (optimistic
-    // concurrency), so no duplicate acceptance can slip through.
+    // same-key idempotent REPLAY — the apply short-circuits and
+    // returns the committed composite. A FRESH key re-running against
+    // an already-accepted engagement fails IN-TX on the authoritative
+    // state check below, so no duplicate acceptance can slip through.
     if (engagement.state !== "READY" && engagement.state !== "ASSIGNED") {
       throw engagementError(
         `engagement ${engagement.id} is not READY (state: ${engagement.state}); only tendered offers can be accepted`,
@@ -511,22 +526,31 @@ export function createCreatorEngagementService(
       input.grantedRights,
     );
 
-    // Step 1 — record the usage-rights grant (append-only, idempotent,
-    // audited). An existing grant with IDENTICAL terms is reused (the
-    // failed-transition recovery path); any other existing grant is a
-    // stable conflict (grants are immutable).
-    const grantKey = `usage_rights:${input.organizationScopeId}:${input.idempotencyKey}`;
-    const grantAnchor = `usage_rights_anchor:${input.organizationScopeId}:${engagement.id}`;
-    const grantApplied = await idempotency.withLock(
-      grantAnchor,
+    // ONE composite idempotency record covers the WHOLE semantic
+    // action (grant + transition). The per-key mutex + the in-tx
+    // optimistic-concurrency check are the authoritative serializers;
+    // the workflow-subject lock below additionally serializes
+    // composites racing a direct generic transition on the same
+    // subject (advisory only — the same stance the workflow service
+    // itself takes when its coordination lock is busy).
+    const compositeKey = `engagement_accept:${input.organizationScopeId}:${input.idempotencyKey}`;
+    const subjectLock = `workflow:engagement:${engagement.id}`;
+    const applied = await idempotency.withLock(
+      subjectLock,
       () =>
-        idempotency.applyIdempotent(grantKey, async (ctx) => {
+        idempotency.applyIdempotent(compositeKey, async (ctx) => {
           const tx = ctx.transaction;
+
+          // Step 1 (in-tx) — the usage-rights grant (append-only,
+          // audited). An existing grant with IDENTICAL terms is reused
+          // (immutable grants; the safe re-entry path); any other
+          // existing grant is a stable conflict.
           const existing = await usageRightsRepository.findByEngagementWithinTx(
             input.organizationScopeId,
             engagement.id,
             tx,
           );
+          let grant: UsageRightsGrant;
           if (existing) {
             if (
               canonicalGrantTerms({
@@ -539,111 +563,121 @@ export function createCreatorEngagementService(
                 exclusions: existing.exclusions,
               }) === canonicalGrantTerms(input.grantedRights)
             ) {
-              return { grant: existing, created: false };
+              grant = existing;
+            } else {
+              throw new UsageRightsConflictError(
+                `usage rights already granted for engagement ${engagement.id} with different terms (grants are immutable)`,
+                { engagementId: engagement.id, grantId: existing.id },
+              );
             }
-            throw new UsageRightsConflictError(
-              `usage rights already granted for engagement ${engagement.id} with different terms (grants are immutable)`,
-              { engagementId: engagement.id, grantId: existing.id },
+          } else {
+            grant = Object.freeze({
+              id: randomUUID(),
+              organizationScopeId: input.organizationScopeId,
+              engagementId: engagement.id,
+              grantorPersonId: engagement.creatorPersonId,
+              uses: input.grantedRights.uses,
+              channels: input.grantedRights.channels,
+              territories: input.grantedRights.territories,
+              formats: input.grantedRights.formats,
+              exclusions: input.grantedRights.exclusions,
+              startsAt: input.grantedRights.startsAt,
+              endsAt: input.grantedRights.endsAt,
+              // The frozen ownership boundary (CRE-004): creator-retained,
+              // ALWAYS — there is no input path to any other value.
+              contentOwnership: USAGE_RIGHTS_OWNERSHIP[0],
+              formatVersion: CREATOR_ENGAGEMENT_FORMAT,
+              createdBy: actor,
+              createdAt: nowIso(),
+              idempotencyKey: input.idempotencyKey,
+              executionId: execution.executionId,
+              correlationId: execution.correlationId,
+              causationId: execution.causationId,
+            });
+            await usageRightsRepository.createWithinTx(grant, tx);
+            await appendAudit(tx, {
+              eventType: USAGE_RIGHTS_GRANTED,
+              context: execution,
+              actor,
+              subject: grant.id,
+              resourceType: "usage_rights_grant",
+              resourceId: grant.id,
+              metadata: {
+                organizationScopeId: grant.organizationScopeId,
+                engagementId: engagement.id,
+                grantorPersonId: grant.grantorPersonId,
+                uses: grant.uses.map((u) => u.kind),
+                channels: grant.channels,
+                territories: grant.territories,
+                formats: grant.formats,
+                startsAt: grant.startsAt,
+                endsAt: grant.endsAt,
+                contentOwnership: grant.contentOwnership,
+                mode: input.mode,
+                idempotencyRecordId: ctx.recordId,
+                transactionId: tx.transactionId,
+              },
+            });
+          }
+
+          // Step 2 (in-tx) — the AUTHORITATIVE precondition: re-read
+          // the engagement inside the SAME transaction (a concurrent
+          // acceptor loses on this check or on the transition's
+          // version check below — TOCTOU closure).
+          const fresh = await engagementRepository.getByIdWithinTx(
+            engagement.id,
+            tx,
+          );
+          if (!fresh) {
+            throw engagementNotFound(engagement.id, input.organizationScopeId);
+          }
+          if (fresh.state !== "READY") {
+            throw engagementError(
+              `engagement ${engagement.id} is not READY (state: ${fresh.state}); only tendered offers can be accepted`,
+              { engagementId: engagement.id, state: fresh.state },
             );
           }
-          const grant: UsageRightsGrant = Object.freeze({
-            id: randomUUID(),
-            organizationScopeId: input.organizationScopeId,
-            engagementId: engagement.id,
-            grantorPersonId: engagement.creatorPersonId,
-            uses: input.grantedRights.uses,
-            channels: input.grantedRights.channels,
-            territories: input.grantedRights.territories,
-            formats: input.grantedRights.formats,
-            exclusions: input.grantedRights.exclusions,
-            startsAt: input.grantedRights.startsAt,
-            endsAt: input.grantedRights.endsAt,
-            // The frozen ownership boundary (CRE-004): creator-retained,
-            // ALWAYS — there is no input path to any other value.
-            contentOwnership: USAGE_RIGHTS_OWNERSHIP[0],
-            formatVersion: CREATOR_ENGAGEMENT_FORMAT,
-            createdBy: actor,
-            createdAt: nowIso(),
-            idempotencyKey: input.idempotencyKey,
-            executionId: execution.executionId,
-            correlationId: execution.correlationId,
-            causationId: execution.causationId,
-          });
-          await usageRightsRepository.createWithinTx(grant, tx);
-          await appendAudit(tx, {
-            eventType: USAGE_RIGHTS_GRANTED,
-            context: execution,
-            actor,
-            subject: grant.id,
-            resourceType: "usage_rights_grant",
-            resourceId: grant.id,
-            metadata: {
-              organizationScopeId: grant.organizationScopeId,
-              engagementId: engagement.id,
-              grantorPersonId: grant.grantorPersonId,
-              uses: grant.uses.map((u) => u.kind),
-              channels: grant.channels,
-              territories: grant.territories,
-              formats: grant.formats,
-              startsAt: grant.startsAt,
-              endsAt: grant.endsAt,
-              contentOwnership: grant.contentOwnership,
-              mode: input.mode,
-              idempotencyRecordId: ctx.recordId,
-              transactionId: tx.transactionId,
+          // The envelope is re-validated against the FRESH requested
+          // terms (never the outer stale read).
+          assertGrantedWithinEnvelope(fresh.requestedRights, input.grantedRights);
+
+          // Step 3 (in-tx, SAME transaction) — the READY → ASSIGNED
+          // transition through the canonical /workflows authority:
+          // version check, authorization, state machine, save and
+          // buffered audit ALL execute inside THIS transaction. A
+          // rejection here rolls the grant back with everything else.
+          const transition = await workflow.requestTransitionWithinTx(
+            {
+              subjectId: engagement.id,
+              subjectKind: "engagement",
+              targetState: "ASSIGNED",
+              expectedVersion: input.expectedVersion,
+              idempotencyKey: input.idempotencyKey,
+              actorPersonId: actor,
+              policyAction: policyActionFor("engagement", "READY", "ASSIGNED"),
+              metadata: {
+                acceptance: {
+                  mode: input.mode,
+                  grantId: grant.id,
+                  ...input.extraMetadata,
+                },
+              },
             },
-          });
-          return { grant, created: true };
+            execution,
+            tx,
+            ctx.recordId,
+          );
+          return { grant, transition };
         }, execution),
     );
-
-    // Step 2 — request the READY → ASSIGNED transition through the
-    // canonical /workflows authority (its own idempotency +
-    // authorization + audit lineage; a retry with the same key
-    // replays both steps).
-    const transition = await requestAcceptanceTransition(execution, {
-      engagement,
-      expectedVersion: input.expectedVersion,
-      idempotencyKey: input.idempotencyKey,
-      actorPersonId: actor,
-      grantId: grantApplied.result.grant.id,
-      mode: input.mode,
-      extraMetadata: input.extraMetadata,
-    });
-    return { grant: grantApplied.result.grant, transition };
-  }
-
-  async function requestAcceptanceTransition(
-    execution: ExecutionContext,
-    input: {
-      engagement: Engagement;
-      expectedVersion: number;
-      idempotencyKey: string;
-      actorPersonId: string;
-      grantId: string;
-      mode: "manual" | "auto";
-      extraMetadata: Record<string, unknown>;
-    },
-  ) {
-    return workflow.requestTransition(
-      {
-        subjectId: input.engagement.id,
-        subjectKind: "engagement",
-        targetState: "ASSIGNED",
-        expectedVersion: input.expectedVersion,
-        idempotencyKey: input.idempotencyKey,
-        actorPersonId: input.actorPersonId,
-        policyAction: policyActionFor("engagement", "READY", "ASSIGNED"),
-        metadata: {
-          acceptance: {
-            mode: input.mode,
-            grantId: input.grantId,
-            ...input.extraMetadata,
-          },
-        },
-      },
-      execution,
-    );
+    // Replay contract (the W004 precedent): on a same-key replay the
+    // stored composite is returned verbatim; `executed` reflects
+    // whether THIS call executed the composite (the transition
+    // executed iff the composite did).
+    return {
+      grant: applied.result.grant,
+      transition: { ...applied.result.transition, executed: applied.executed },
+    };
   }
 
   /** The derived usage-rights view (grant + revocation + status). */
@@ -799,57 +833,23 @@ export function createCreatorEngagementService(
           ? input.limit
           : run.results.length;
       const candidates = run.results.slice(0, limit);
-      const outcomes: EngagementBatchOutcome[] = [];
-      for (const candidate of candidates) {
-        const profile = await profileRepository.findById(candidate.profileId);
-        if (!profile || profile.status !== "ACTIVE") {
-          outcomes.push({
-            creatorPersonId: candidate.creatorPersonId,
-            creatorProfileId: candidate.profileId,
-            engagementId: null,
-            created: false,
-            skipped: "profile_not_active",
-          });
-          continue;
-        }
-        try {
-          const created = await createOffer(execution, {
-            organizationScopeId: input.organizationScopeId,
-            creatorPersonId: candidate.creatorPersonId,
-            profile,
-            profileVersion: null,
-            campaignId: campaign.campaignId,
-            campaignPolicyVersion: campaign.policyVersion,
-            matchRunId: run.id,
-            opportunityId: null,
-            requestedRights,
-            compensation,
-            brief: input.offer.brief ?? null,
-            idempotencyKey: `${input.idempotencyKey}:${candidate.profileId}`,
-          });
-          outcomes.push({
-            creatorPersonId: candidate.creatorPersonId,
-            creatorProfileId: candidate.profileId,
-            engagementId: created.engagement.id,
-            created: created.created,
-            skipped: null,
-          });
-        } catch (error) {
-          if (error instanceof EngagementConflictError) {
-            outcomes.push({
-              creatorPersonId: candidate.creatorPersonId,
-              creatorProfileId: candidate.profileId,
-              engagementId: null,
-              created: false,
-              skipped: "open_engagement_exists",
-            });
-            continue;
-          }
-          throw error;
-        }
-      }
 
-      // The batch record (the auditable decision record).
+      // ------------------------------------------------------------------
+      // NET-W017 remediation (architect CHANGES REQUESTED on PR #34):
+      // the JOURNAL-FIRST recoverable batch saga. The batch decision
+      // record is created BEFORE any candidate offer (status RUNNING,
+      // empty snapshot); each candidate outcome APPENDS to the
+      // per-candidate journal; the run finalizes to COMPLETED (the
+      // outcome snapshot derived from the journal) or ABORTED (the
+      // unexpected failure is recorded and rethrown). Consequences:
+      //  - no durable offer can exist without its batch journal
+      //    accurately describing it (crash mid-batch leaves the
+      //    journal exact for every processed candidate);
+      //  - a retry with the same idempotency key resumes
+      //    deterministically: journal rows exist for processed
+      //    candidates (skipped), the remaining ones execute, the
+      //    finalize derives the complete snapshot.
+      // ------------------------------------------------------------------
       const batchKey = `engagement_batch:${input.organizationScopeId}:${input.idempotencyKey}`;
       const batchApplied = await idempotency.applyIdempotent(
         batchKey,
@@ -862,9 +862,13 @@ export function createCreatorEngagementService(
             campaignId: campaign.campaignId,
             campaignPolicyVersion: campaign.policyVersion,
             candidateCount: candidates.length,
-            outcomes,
+            status: "RUNNING",
+            outcomes: [],
             createdBy: actor,
             createdAt: nowIso(),
+            completedAt: null,
+            abortedAt: null,
+            abortedReason: null,
             idempotencyKey: input.idempotencyKey,
             executionId: execution.executionId,
             correlationId: execution.correlationId,
@@ -883,8 +887,7 @@ export function createCreatorEngagementService(
               matchRunId: batch.matchRunId,
               campaignId: batch.campaignId,
               candidateCount: batch.candidateCount,
-              createdCount: outcomes.filter((o) => o.created).length,
-              skippedCount: outcomes.filter((o) => o.skipped !== null).length,
+              status: batch.status,
               idempotencyRecordId: ctx.recordId,
               transactionId: tx.transactionId,
             },
@@ -893,12 +896,186 @@ export function createCreatorEngagementService(
         },
         execution,
       );
+      const batch = batchApplied.result;
+
+      /** Append ONE candidate outcome to the journal (idempotent). */
+      const appendBatchOutcome = async (
+        outcome: EngagementBatchOutcome,
+      ): Promise<void> => {
+        await idempotency.applyIdempotent(
+          `${batchKey}:outcome:${outcome.creatorProfileId}`,
+          async (ctx) => {
+            const row: EngagementBatchOutcomeRecord = Object.freeze({
+              id: `outcome:${batch.id}:${outcome.creatorProfileId}`,
+              batchId: batch.id,
+              organizationScopeId: batch.organizationScopeId,
+              outcome,
+              recordedAt: nowIso(),
+              executionId: execution.executionId,
+              correlationId: execution.correlationId,
+              causationId: execution.causationId,
+            });
+            await batchRepository.appendOutcomeWithinTx(row, ctx.transaction);
+          },
+          execution,
+        );
+      };
+
+      /** Durable ABORT (the journal stays exact for every processed candidate). */
+      const abortBatch = async (reason: Record<string, unknown>, error: unknown) => {
+        await idempotency.applyIdempotent(
+          `${batchKey}:abort`,
+          async (ctx) => {
+            const abortedReason = JSON.stringify({
+              ...reason,
+              errorName: (error as Error)?.name ?? "Error",
+              errorMessage: String((error as Error)?.message ?? "").slice(0, 300),
+            });
+            const aborted = await batchRepository.abortWithinTx(
+              batch.id,
+              abortedReason,
+              nowIso(),
+              ctx.transaction,
+            );
+            await appendAudit(ctx.transaction, {
+              eventType: ENGAGEMENT_BATCH_ABORTED,
+              context: execution,
+              actor,
+              subject: batch.id,
+              resourceType: "engagement_batch",
+              resourceId: batch.id,
+              metadata: {
+                organizationScopeId: batch.organizationScopeId,
+                matchRunId: batch.matchRunId,
+                campaignId: batch.campaignId,
+                candidateCount: batch.candidateCount,
+                abortedReason,
+                idempotencyRecordId: ctx.recordId,
+                transactionId: ctx.transaction.transactionId,
+              },
+            });
+            return aborted;
+          },
+          execution,
+        );
+      };
+
+      let currentCandidate: { profileId: string } | null = null;
+      try {
+        for (const candidate of candidates) {
+          currentCandidate = { profileId: candidate.profileId };
+          // Recovery: a journal row means a previous (aborted or
+          // interrupted) run already processed this candidate — the
+          // outcome stands; never re-decide it.
+          const journaled = await batchRepository.findOutcome(
+            batch.id,
+            candidate.profileId,
+          );
+          if (journaled) continue;
+
+          const profile = await profileRepository.findById(candidate.profileId);
+          if (!profile || profile.status !== "ACTIVE") {
+            await appendBatchOutcome({
+              creatorPersonId: candidate.creatorPersonId,
+              creatorProfileId: candidate.profileId,
+              engagementId: null,
+              created: false,
+              skipped: "profile_not_active",
+            });
+            continue;
+          }
+          try {
+            const created = await createOffer(execution, {
+              organizationScopeId: input.organizationScopeId,
+              creatorPersonId: candidate.creatorPersonId,
+              profile,
+              profileVersion: null,
+              campaignId: campaign.campaignId,
+              campaignPolicyVersion: campaign.policyVersion,
+              matchRunId: run.id,
+              opportunityId: null,
+              requestedRights,
+              compensation,
+              brief: input.offer.brief ?? null,
+              idempotencyKey: `${input.idempotencyKey}:${candidate.profileId}`,
+            });
+            await appendBatchOutcome({
+              creatorPersonId: candidate.creatorPersonId,
+              creatorProfileId: candidate.profileId,
+              engagementId: created.engagement.id,
+              created: created.created,
+              skipped: null,
+            });
+          } catch (error) {
+            if (error instanceof EngagementConflictError) {
+              await appendBatchOutcome({
+                creatorPersonId: candidate.creatorPersonId,
+                creatorProfileId: candidate.profileId,
+                engagementId: null,
+                created: false,
+                skipped: "open_engagement_exists",
+              });
+              continue;
+            }
+            throw error;
+          }
+        }
+      } catch (error) {
+        // The journal accurately describes every candidate processed
+        // so far; the abort reason names the failure point. The error
+        // propagates — the caller sees the failure, the record sees
+        // the truth.
+        await abortBatch(
+          { failedCandidateProfileId: currentCandidate?.profileId ?? null },
+          error,
+        );
+        throw error;
+      }
+
+      // Finalize: COMPLETED with the journal-derived snapshot (every
+      // candidate carries exactly one journal row at this point).
+      const journal = await batchRepository.listOutcomes(batch.id);
+      const outcomes: EngagementBatchOutcome[] = journal.map(
+        (row) => row.outcome,
+      );
+      const finalized = await idempotency.applyIdempotent(
+        `${batchKey}:finalize`,
+        async (ctx) => {
+          const completed = await batchRepository.completeWithinTx(
+            batch.id,
+            outcomes,
+            nowIso(),
+            ctx.transaction,
+          );
+          await appendAudit(ctx.transaction, {
+            eventType: ENGAGEMENT_BATCH_COMPLETED,
+            context: execution,
+            actor,
+            subject: batch.id,
+            resourceType: "engagement_batch",
+            resourceId: batch.id,
+            metadata: {
+              organizationScopeId: completed.organizationScopeId,
+              matchRunId: completed.matchRunId,
+              campaignId: completed.campaignId,
+              candidateCount: completed.candidateCount,
+              createdCount: outcomes.filter((o) => o.created).length,
+              skippedCount: outcomes.filter((o) => o.skipped !== null).length,
+              idempotencyRecordId: ctx.recordId,
+              transactionId: ctx.transaction.transactionId,
+            },
+          });
+          return completed;
+        },
+        execution,
+      );
       logger.info("engagement.batch_recorded", {
-        batchId: batchApplied.result.id,
+        batchId: finalized.result.id,
         organizationScopeId: input.organizationScopeId,
         created: batchApplied.executed,
+        status: finalized.result.status,
       });
-      return { batch: batchApplied.result, created: batchApplied.executed };
+      return { batch: finalized.result, created: batchApplied.executed };
     },
 
     async acceptEngagement(execution, input) {
@@ -1366,16 +1543,27 @@ export function createCreatorEngagementService(
       }
 
       const key = `ugc_production:${input.organizationScopeId}:${input.idempotencyKey}`;
-      const applied = await idempotency.applyIdempotent(key, async (ctx) => {
+      // NET-W017 remediation (single authoritative transaction): the
+      // production record AND the ASSIGNED → IN_PROGRESS transition
+      // commit as ONE unit — the transition executes through the
+      // in-tx /workflows twin against the SAME transaction, so a
+      // failure at ANY point rolls back BOTH (no orphaned production
+      // for an engagement that never entered production).
+      const subjectLock = `workflow:engagement:${engagement.id}`;
+      const applied = await idempotency.withLock(
+        subjectLock,
+        () =>
+          idempotency.applyIdempotent(key, async (ctx) => {
         const tx = ctx.transaction;
-        const existing = await productionRepository.findByEngagement(
+        // In-tx existence check (sees this tx's writes; a same-key
+        // replay never reaches here — the idempotency store
+        // short-circuits it with the committed composite result).
+        const existing = await productionRepository.findByEngagementWithinTx(
           input.organizationScopeId,
           engagement.id,
+          tx,
         );
         if (existing) {
-          if (existing.idempotencyKey === input.idempotencyKey) {
-            return existing;
-          }
           throw new EngagementConflictError(
             `a production record already exists for engagement ${engagement.id} (one production per engagement)`,
             { engagementId: engagement.id, productionId: existing.id },
@@ -1419,31 +1607,52 @@ export function createCreatorEngagementService(
             transactionId: tx.transactionId,
           },
         });
-        return production;
-      }, execution);
 
-      // Request the ASSIGNED → IN_PROGRESS transition through the
-      // canonical /workflows authority.
-      const transition = await workflow.requestTransition(
-        {
-          subjectId: engagement.id,
-          subjectKind: "engagement",
-          targetState: "IN_PROGRESS",
-          expectedVersion: input.expectedVersion,
-          idempotencyKey: input.idempotencyKey,
-          actorPersonId: actor,
-          policyAction: policyActionFor("engagement", "ASSIGNED", "IN_PROGRESS"),
-          metadata: {
-            production: { productionId: applied.result.id },
+        // The AUTHORITATIVE in-tx precondition: the engagement must be
+        // ASSIGNED in THIS transaction (a concurrent composite or a
+        // direct transition loses on this check or on the twin's
+        // version check; either way everything rolls back).
+        const fresh = await engagementRepository.getByIdWithinTx(
+          engagement.id,
+          tx,
+        );
+        if (!fresh) {
+          throw engagementNotFound(engagement.id, input.organizationScopeId);
+        }
+        if (fresh.state !== "ASSIGNED") {
+          throw engagementError(
+            `engagement ${engagement.id} is not ASSIGNED (state: ${fresh.state}); production requires an accepted engagement`,
+            { engagementId: engagement.id, state: fresh.state },
+          );
+        }
+
+        // The ASSIGNED → IN_PROGRESS transition through the canonical
+        // /workflows authority — INSIDE the SAME transaction.
+        const transition = await workflow.requestTransitionWithinTx(
+          {
+            subjectId: engagement.id,
+            subjectKind: "engagement",
+            targetState: "IN_PROGRESS",
+            expectedVersion: input.expectedVersion,
+            idempotencyKey: input.idempotencyKey,
+            actorPersonId: actor,
+            policyAction: policyActionFor("engagement", "ASSIGNED", "IN_PROGRESS"),
+            metadata: {
+              production: { productionId: production.id },
+            },
           },
-        },
-        execution,
+          execution,
+          tx,
+          ctx.recordId,
+        );
+        return { production, transition };
+        }, execution),
       );
-      logger.info("ugc_production.opened", {
-        productionId: applied.result.id,
-        engagementId: engagement.id,
-      });
-      return { production: applied.result, transition };
+      // Replay contract: `executed` reflects THIS call (W004 precedent).
+      return {
+        production: applied.result.production,
+        transition: { ...applied.result.transition, executed: applied.executed },
+      };
     },
 
     async recordDeliverable(execution, input) {
@@ -1674,15 +1883,24 @@ export function createCreatorEngagementService(
       }
 
       const key = `ugc_submission:${input.organizationScopeId}:${input.idempotencyKey}`;
-      const applied = await idempotency.applyIdempotent(key, async (ctx) => {
+      // NET-W017 remediation (single authoritative transaction): the
+      // submission record AND the IN_PROGRESS → SUBMITTED transition
+      // commit as ONE unit — no orphaned submission can survive a
+      // transition rejection (the twin executes in THIS transaction).
+      const subjectLock = `workflow:engagement:${engagement.id}`;
+      const applied = await idempotency.withLock(
+        subjectLock,
+        () =>
+          idempotency.applyIdempotent(key, async (ctx) => {
         const tx = ctx.transaction;
-        const existing = await submissionRepository.listByProduction(
+        // In-tx existence check (a same-key replay never reaches
+        // here — the store returns the committed composite).
+        const existing = await submissionRepository.listByProductionWithinTx(
           input.organizationScopeId,
           production.id,
+          tx,
         );
         if (existing.length > 0) {
-          const match = existing.find((s) => s.idempotencyKey === input.idempotencyKey);
-          if (match) return match;
           throw new EngagementConflictError(
             `production ${production.id} already has a recorded submission (one submission per production)`,
             { productionId: production.id },
@@ -1721,36 +1939,56 @@ export function createCreatorEngagementService(
             transactionId: tx.transactionId,
           },
         });
-        return submission;
-      }, execution);
 
-      // Request the IN_PROGRESS → SUBMITTED transition through the
-      // canonical /workflows authority.
-      const transition = await workflow.requestTransition(
-        {
-          subjectId: engagement.id,
-          subjectKind: "engagement",
-          targetState: "SUBMITTED",
-          expectedVersion: input.expectedVersion,
-          idempotencyKey: input.idempotencyKey,
-          actorPersonId: actor,
-          policyAction: policyActionFor("engagement", "IN_PROGRESS", "SUBMITTED"),
-          metadata: {
-            submission: {
-              submissionId: applied.result.id,
-              productionId: production.id,
-              evidenceReferences: applied.result.evidenceReferences,
+        // The AUTHORITATIVE in-tx precondition: the engagement must be
+        // IN_PROGRESS in THIS transaction (replay tolerance is handled
+        // by the idempotent apply short-circuit; a fresh key against an
+        // already-submitted engagement conflicts HERE, atomically).
+        const fresh = await engagementRepository.getByIdWithinTx(
+          engagement.id,
+          tx,
+        );
+        if (!fresh) {
+          throw engagementNotFound(engagement.id, input.organizationScopeId);
+        }
+        if (fresh.state !== "IN_PROGRESS") {
+          throw engagementError(
+            `engagement ${engagement.id} is not IN_PROGRESS (state: ${fresh.state}); submission requires an in-progress production`,
+            { engagementId: engagement.id, state: fresh.state },
+          );
+        }
+
+        // The IN_PROGRESS → SUBMITTED transition through the canonical
+        // /workflows authority — INSIDE the SAME transaction.
+        const transition = await workflow.requestTransitionWithinTx(
+          {
+            subjectId: engagement.id,
+            subjectKind: "engagement",
+            targetState: "SUBMITTED",
+            expectedVersion: input.expectedVersion,
+            idempotencyKey: input.idempotencyKey,
+            actorPersonId: actor,
+            policyAction: policyActionFor("engagement", "IN_PROGRESS", "SUBMITTED"),
+            metadata: {
+              submission: {
+                submissionId: submission.id,
+                productionId: production.id,
+                evidenceReferences: submission.evidenceReferences,
+              },
             },
           },
-        },
-        execution,
+          execution,
+          tx,
+          ctx.recordId,
+        );
+        return { submission, transition };
+        }, execution),
       );
-      logger.info("ugc_production.submitted", {
-        submissionId: applied.result.id,
-        productionId: production.id,
-        engagementId: engagement.id,
-      });
-      return { submission: applied.result, transition };
+      // Replay contract: `executed` reflects THIS call (W004 precedent).
+      return {
+        submission: applied.result.submission,
+        transition: { ...applied.result.transition, executed: applied.executed },
+      };
     },
 
     async getEngagement(execution, organizationScopeId, id) {
@@ -1839,6 +2077,33 @@ export function createCreatorEngagementService(
         organizationScopeId,
         productionId,
       );
+    },
+
+    async getEngagementBatch(execution, organizationScopeId, batchId) {
+      void execution;
+      assertOrganizationScopeId(organizationScopeId);
+      const batch = await batchRepository.findById(batchId);
+      if (!batch || batch.organizationScopeId !== organizationScopeId) {
+        throw new NotFoundError(`engagement batch not found: ${batchId}`, {
+          id: batchId,
+          organizationScopeId,
+        });
+      }
+      return batch;
+    },
+
+    async listEngagementBatchOutcomes(execution, organizationScopeId, batchId) {
+      void execution;
+      assertOrganizationScopeId(organizationScopeId);
+      // Tenant-scope via the batch itself (cross-scope = NotFound).
+      const batch = await batchRepository.findById(batchId);
+      if (!batch || batch.organizationScopeId !== organizationScopeId) {
+        throw new NotFoundError(`engagement batch not found: ${batchId}`, {
+          id: batchId,
+          organizationScopeId,
+        });
+      }
+      return batchRepository.listOutcomes(batchId);
     },
   };
 }
