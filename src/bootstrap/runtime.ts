@@ -243,12 +243,20 @@ import { createCashService } from "../settlement/cash-service.ts";
 import { createConversionService } from "../settlement/conversion-service.ts";
 import { createStakeService } from "../settlement/stake-service.ts";
 import { createEconomicLedgerService } from "../settlement/ledger-service.ts";
+import {
+  createCrossPromotionClearingService,
+  clearingPairLockKey,
+  CrossPromotionClearingConflictError,
+} from "../settlement/clearing-service.ts";
+import { clearingOperationClass } from "../settlement/clearing-eligibility.ts";
+import { createAuthorityCrossPromotionClearingRepository } from "../settlement/authority-clearing-repository.ts";
 import type {
   AllocateRewardsInput,
   CashService,
   ConversionService,
   CreateRewardPolicyInput,
   CreditService,
+  CrossPromotionClearingService,
   EconomicLedgerService,
   EconomicValueService,
   IssueCreditsInput,
@@ -523,6 +531,8 @@ export interface Runtime {
   readonly creatorSponsorshipService: CreatorSponsorshipService;
   // NET-W019 inventory (supply registration + placement context) service.
   readonly inventoryService: InventoryService;
+  // NET-W020 cross-promotion clearing (records + derived eligibility).
+  readonly crossPromotionClearingService: CrossPromotionClearingService;
   // NET-W012 helpful contributions (Proof-of-Helpfulness) service.
   readonly helpfulnessService: HelpfulnessService;
   // NET-W013 quality/moderation/anti-spam services.
@@ -2534,6 +2544,207 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   });
 
   // ------------------------------------------------------------------
+  // NET-W020 — Cross-promotion clearing (issue #39).
+  //
+  // Clearing is an ORCHESTRATION/INTEGRATION concern composed HERE
+  // (the W014 executeCampaignClearing precedent); /settlement stays
+  // the SOLE economic authority and owns the clearing RECORDS (pure
+  // lineage — no postings of its own; no new account/transaction/
+  // value-source kind exists). The neutral lookups below are thin
+  // READ-ONLY adapters over the OWNING authorities (contributions +
+  // W012/W013 derived states; the W019 inventory settlement
+  // readiness; the campaigns clearing rules; the disputes risk/
+  // dispute gate). /workflows is COMPLETELY untouched; /inventory,
+  // /campaigns, /contributions and /disputes are never mutated. NO
+  // AI path (the deterministic quality band is the only W013 signal
+  // consumed and it can only BLOCK).
+  // ------------------------------------------------------------------
+  /** A service execution context for the neutral lookup reads. */
+  function executionContextForLookups(correlationId: string) {
+    return createExecutionContext({
+      correlationId,
+      actor: { id: "clearing-lookup", kind: "service" },
+    });
+  }
+  const clearingContributionLookup = {
+    async resolve(contributionId: string) {
+      // The EXACT W014 recognition-bar views, read-only (lifecycle
+      // state from the /workflows authority's field on the
+      // contribution record; PoH state; derived moderation status;
+      // the latest DETERMINISTIC quality band).
+      const contribution = await contributionRepo.findById(contributionId);
+      if (!contribution) return null;
+      const poh = await proofOfHelpfulnessRepo.findByContributionId(
+        contributionId,
+      );
+      const moderation = await moderationService.getModerationSummary(
+        executionContextForLookups("w020-contribution-moderation"),
+        contributionId,
+      );
+      let qualityBand: string | null = null;
+      const evaluation = await qualityService.getLatestQualityEvaluation(
+        executionContextForLookups("w020-contribution-quality"),
+        contributionId,
+      );
+      if (evaluation) qualityBand = evaluation.band;
+      return {
+        organizationScopeId: contribution.organizationScopeId,
+        lifecycleState: contribution.state,
+        contributorPersonId: contribution.contributorId,
+        proofOfHelpfulnessState: poh ? poh.state : "NONE",
+        moderationStatus: moderation.status,
+        qualityBand,
+      };
+    },
+  };
+  const clearingPlacementLookup = {
+    async readiness(organizationScopeId: string, placementId: string) {
+      // The W019 DERIVED settlement readiness (re-derived from CURRENT
+      // durable records on every read) + the placement's campaign
+      // binding and registered owner. A placement that does not
+      // resolve in the requested scope resolves to null (fail-closed).
+      try {
+        const readiness =
+          await inventoryService.getPlacementSettlementReadiness(
+            executionContextForLookups("w020-placement-readiness"),
+            organizationScopeId,
+            placementId,
+          );
+        const placement = await inventoryPlacementRepo.findById(placementId);
+        if (!placement) return null;
+        return {
+          placementId: readiness.placementId,
+          organizationScopeId: readiness.organizationScopeId,
+          campaignId: readiness.sourceContext.campaignId,
+          campaignPolicyVersion: readiness.sourceContext.campaignPolicyVersion,
+          ownerPersonId: readiness.sourceContext.ownerPersonId,
+          settlementReady: readiness.eligible,
+        };
+      } catch {
+        // A missing or cross-scope placement is NotFoundError — the
+        // lookup resolves null (fail-closed; no existence oracle).
+        return null;
+      }
+    },
+  };
+  const clearingCampaignLookup = {
+    async resolve(campaignId: string) {
+      // /campaigns stays the campaign policy authority: existence +
+      // tenant scope + administrative status + the CURRENT policy
+      // version's declared clearing rules (read-only).
+      const campaign = await campaignRepo.findById(campaignId);
+      if (!campaign) return null;
+      const versions = await campaignPolicyRepo.listByCampaign(campaignId);
+      const latest =
+        versions.length > 0
+          ? versions.reduce((a, b) => (b.version > a.version ? b : a))
+          : null;
+      if (!latest) return null;
+      return {
+        campaignId: campaign.id,
+        organizationScopeId: campaign.organizationScopeId,
+        administrativeStatus: campaign.status,
+        currentPolicyVersion: latest.version,
+        clearingRules: latest.clearingRules.map((rule) => ({
+          id: rule.id,
+          objectiveId: rule.objectiveId,
+          basis: rule.basis,
+          drawKind: rule.drawKind,
+          rewardPolicyId: rule.rewardPolicyId,
+          maxDrawAmount: rule.maxDrawAmount,
+        })),
+      };
+    },
+  };
+  const clearingGateLookup = {
+    async assess(input: {
+      readonly organizationScopeId: string;
+      readonly operationClass: string;
+      readonly recordSubjectIds: readonly string[];
+      readonly personSubjectId: string | null;
+    }) {
+      // The W014 gate discipline as a READ: active HOLD/BLOCK controls
+      // matching the operation class + any record/person subject, then
+      // ACTIVE disputes (OPEN/UNDER_REVIEW/APPEALED — PENDING_STAKE
+      // never gates: griefing resistance). Read-only; /disputes stays
+      // the authority.
+      const execution = executionContextForLookups("w020-gate");
+      const operationClass = input.operationClass as RiskOperationClass;
+      for (const recordSubjectId of input.recordSubjectIds) {
+        const control = await riskControlService.findGatingControl(
+          execution,
+          input.organizationScopeId,
+          operationClass,
+          recordSubjectId,
+          input.personSubjectId,
+        );
+        if (control && (control.action === "HOLD" || control.action === "BLOCK")) {
+          return {
+            clear: false,
+            source: "risk_control",
+            controlId: control.id,
+            disputeId: null,
+            detail: {
+              action: control.action,
+              operationClass: input.operationClass,
+              recordSubjectId,
+              originAssessmentId: control.originAssessmentId,
+              originCaseId: control.originCaseId,
+            },
+          };
+        }
+      }
+      const active = await disputeService.listActiveBySubjectIds(
+        execution,
+        input.organizationScopeId,
+        input.recordSubjectIds,
+      );
+      if (active.length > 0) {
+        const dispute = active[0]!;
+        return {
+          clear: false,
+          source: "active_dispute",
+          controlId: null,
+          disputeId: dispute.id,
+          detail: {
+            disputeState: dispute.state,
+            disputeKind: dispute.kind,
+            subjectType: dispute.subjectRef.subjectType,
+            subjectId: dispute.subjectRef.subjectId,
+          },
+        };
+      }
+      return {
+        clear: true,
+        source: null,
+        controlId: null,
+        disputeId: null,
+        detail: {},
+      };
+    },
+  };
+  const clearingRepo = createAuthorityCrossPromotionClearingRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
+  });
+  const crossPromotionClearingService = createCrossPromotionClearingService({
+    clearingRepository: clearingRepo,
+    valueRepository: economicValueRepo,
+    allocationRepository: rewardAllocationRepo,
+    issuanceRepository: creditIssuanceRepo,
+    obligationRepository: cashObligationRepo,
+    lookups: {
+      contribution: clearingContributionLookup,
+      placement: clearingPlacementLookup,
+      campaign: clearingCampaignLookup,
+      gate: clearingGateLookup,
+    },
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("settlement"),
+  });
+
+  // ------------------------------------------------------------------
   // NET-W009 §3.7 ECONOMIC GATE (the lock-invariant-21 enforcement
   // point). The composition root — NOT the risk domain, NOT the
   // settlement domain — consults the active-control registry before
@@ -2898,6 +3109,28 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       convertedAt: conversion.convertedAt,
       description: conversion.description,
       idempotencyKey: conversion.idempotencyKey,
+    };
+  }
+  function toCrossPromotionClearingView(
+    clearing: import("../settlement/port.ts").CrossPromotionClearingRecord,
+  ) {
+    return {
+      id: clearing.id,
+      organizationScopeId: clearing.organizationScopeId,
+      campaignId: clearing.campaignId,
+      campaignPolicyVersion: clearing.campaignPolicyVersion,
+      clearingRuleId: clearing.clearingRuleId,
+      sourceContributionId: clearing.sourceContributionId,
+      targetPlacementId: clearing.targetPlacementId,
+      valueRecordId: clearing.valueRecordId,
+      drawKind: clearing.drawKind,
+      drawResultId: clearing.drawResultId,
+      drawTransactionId: clearing.drawTransactionId,
+      amount: clearing.amount,
+      eligibility: clearing.eligibility as unknown as Record<string, unknown>,
+      status: clearing.status,
+      clearedAt: clearing.clearedAt,
+      idempotencyKey: clearing.idempotencyKey,
     };
   }
   function toLedgerTransactionView(
@@ -7647,6 +7880,413 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         valueState: value.state,
       };
     },
+
+    // -- NET-W020 cross-promotion clearing commands ----------------------
+    /**
+     * Composite 1 (AC-01..07): execute ONE cross-promotion clearing —
+     * the deterministic draw of a qualifying source contribution's
+     * MATURE value through the canonical /settlement primitive the
+     * campaign's clearing rule selects, against a settlement-ready
+     * target placement (the W019 derived gate), capped by the rule's
+     * maxDrawAmount, gated by risk controls + ACTIVE disputes over
+     * the value record, ALL upstream sources and the placement (with
+     * the value beneficiary AND the placement owner as person
+     * subjects), recorded as the durable clearing record + campaign
+     * bookkeeping (references only). The WHOLE composite is
+     * serialized under the advisory pair mutex; same-key replay is
+     * deterministic through every step's compound idempotency key.
+     */
+    async executeCrossPromotionClearing(execution, _actorPersonId, input) {
+      const sourceContributionId = input.sourceContributionId as string;
+      const targetPlacementId = input.targetPlacementId as string;
+      const valueRecordId = input.valueRecordId as string;
+      const idempotencyKey = input.idempotencyKey as string;
+      // The VALUE RECORD anchors the tenant scope (the economic
+      // authority's own record — cross-scope references fail closed).
+      const value = await economicValueService.getValue(execution, valueRecordId);
+      const organizationScopeId = value.organizationScopeId;
+      const requestedRuleId =
+        typeof input.clearingRuleId === "string" &&
+        input.clearingRuleId.trim() !== ""
+          ? input.clearingRuleId
+          : null;
+
+      return idempotency.withLock(
+        clearingPairLockKey(
+          organizationScopeId,
+          sourceContributionId,
+          targetPlacementId,
+        ),
+        async () => {
+          // Pre-flight pair check: a CLEARED pair fails closed BEFORE
+          // any economic mutation (one clearing per contribution-
+          // placement pair — the W019 active-placement pattern). The
+          // SAME-KEY replay is tolerated: the existing record was
+          // committed under this caller's own compound key
+          // (`{key}:record`), so every chained step replays
+          // identically (idempotent, no new value).
+          const existingPair = await clearingRepo.findByPair(
+            organizationScopeId,
+            sourceContributionId,
+            targetPlacementId,
+          );
+          if (
+            existingPair &&
+            existingPair.idempotencyKey !== `${idempotencyKey}:record`
+          ) {
+            throw new CrossPromotionClearingConflictError(
+              `contribution ${sourceContributionId} and placement ${targetPlacementId} were already cleared (clearing ${existingPair.id}) — one clearing per contribution-placement pair`,
+              {
+                organizationScopeId,
+                sourceContributionId,
+                targetPlacementId,
+                existingClearingId: existingPair.id,
+              },
+            );
+          }
+
+          // Hard gates FIRST (the W014 discipline — the uniform
+          // hard-refusal error codes): risk controls + ACTIVE
+          // disputes over the value record, EVERY upstream source id
+          // (including the contribution) and the placement id, with
+          // the value beneficiary AND the placement owner as person
+          // subjects — BEFORE any settlement mutation (AC-06). The
+          // operation class needs the resolved rule's draw kind; on
+          // the CONSUMED replay path the draw has already committed
+          // and the gates must not block the idempotent replay.
+          const gatePlacement = await clearingPlacementLookup.readiness(
+            organizationScopeId,
+            targetPlacementId,
+          );
+          const gateCampaign =
+            gatePlacement !== null
+              ? await clearingCampaignLookup.resolve(gatePlacement.campaignId)
+              : null;
+          let gateRule: import("../settlement/port.ts").ClearingRuleView | null =
+            null;
+          if (gateCampaign && gateCampaign.administrativeStatus === "ACTIVE") {
+            const rules = gateCampaign.clearingRules;
+            gateRule =
+              requestedRuleId !== null
+                ? rules.find((r) => r.id === requestedRuleId) ?? null
+                : rules.length === 1
+                  ? rules[0]!
+                  : null;
+          }
+          const drawConsumes =
+            gateRule !== null &&
+            (gateRule.drawKind === "reward_allocation" ||
+              gateRule.drawKind === "credit_issuance");
+          const isReplayPath = drawConsumes && value.state === "CONSUMED";
+          if (!isReplayPath && gateRule !== null) {
+            const subjectIds = [
+              value.id,
+              ...value.sources.map((s) => s.id),
+              targetPlacementId,
+            ];
+            await refuseWhenDisputed(execution, organizationScopeId, subjectIds);
+            const operationClass: RiskOperationClass =
+              clearingOperationClass(gateRule.drawKind);
+            for (const subjectId of subjectIds) {
+              await refuseWhenGated(
+                execution,
+                organizationScopeId,
+                operationClass,
+                subjectId,
+                value.beneficiaryPersonId,
+              );
+            }
+            if (gatePlacement?.ownerPersonId) {
+              await refuseWhenGated(
+                execution,
+                organizationScopeId,
+                operationClass,
+                targetPlacementId,
+                gatePlacement.ownerPersonId,
+              );
+            }
+          }
+
+          // The DERIVED eligibility (re-derived from CURRENT
+          // authoritative records — the settlement domain's view). On
+          // the non-replay path the hard gates have already passed;
+          // the view's own risk_dispute_gate check re-reads the same
+          // registries (and the record command's in-tx re-derivation
+          // is the authoritative backstop).
+          const eligibility =
+            await crossPromotionClearingService.evaluateClearingEligibility(
+              execution,
+              {
+                organizationScopeId,
+                sourceContributionId,
+                targetPlacementId,
+                valueRecordId,
+                ...(requestedRuleId !== null
+                  ? { clearingRuleId: requestedRuleId }
+                  : {}),
+              },
+            );
+          if (!eligibility.eligible || !eligibility.resolvedRule) {
+            const { OpenConError: GateError } = await import("../core/errors.ts");
+            const failed = eligibility.checks
+              .filter((c) => !c.satisfied)
+              .map((c) => ({ check: c.check, reason: c.reason }));
+            throw new GateError({
+              code: "CROSS_PROMOTION_CLEARING_VALIDATION",
+              classification: "precondition",
+              message: `cross-promotion clearing for contribution ${sourceContributionId} and placement ${targetPlacementId} is not eligible (${failed.map((f) => `${f.check}:${f.reason}`).join("; ")})`,
+              context: {
+                sourceContributionId,
+                targetPlacementId,
+                valueRecordId,
+                failedChecks: failed,
+              },
+            });
+          }
+          const rule = eligibility.resolvedRule;
+
+          // The draw — the EXISTING settlement primitive the rule
+          // selects (the W014 branches verbatim; `{key}:draw`).
+          const drawKind = rule.drawKind;
+          if (drawKind === "reward_allocation") {
+            if (!rule.rewardPolicyId) {
+              const { OpenConError: GateError } = await import("../core/errors.ts");
+              throw new GateError({
+                code: "ECONOMIC_VALIDATION",
+                classification: "precondition",
+                message: `clearing rule ${rule.id} draw kind reward_allocation requires a reward policy reference`,
+                context: { clearingRuleId: rule.id },
+              });
+            }
+            const result = await rewardService.allocateRewards(execution, {
+              organizationScopeId,
+              sourceValueRecordId: value.id,
+              policyId: rule.rewardPolicyId,
+              idempotencyKey: `${idempotencyKey}:draw`,
+            });
+            const recorded =
+              await crossPromotionClearingService.recordCrossPromotionClearing(
+                execution,
+                {
+                  organizationScopeId,
+                  sourceContributionId,
+                  targetPlacementId,
+                  valueRecordId: value.id,
+                  clearingRuleId: rule.id,
+                  drawKind,
+                  drawResultId: result.allocation.id,
+                  idempotencyKey: `${idempotencyKey}:record`,
+                },
+              );
+            const campaignAfter = await campaignService.recordClearingExecution(
+              execution,
+              {
+                campaignId: recorded.clearing.campaignId,
+                clearingRuleId: rule.id,
+                drawKind,
+                valueRecordId: value.id,
+                resultId: result.allocation.id,
+                amount: result.allocation.totalAllocated,
+                description: `cross-promotion clearing draw (reward allocation ${result.allocation.id}, clearing ${recorded.clearing.id})`,
+                idempotencyKey: `${idempotencyKey}:campaign`,
+              },
+            );
+            return {
+              drawKind,
+              clearing: toCrossPromotionClearingView(recorded.clearing),
+              allocation: toRewardAllocationView(result.allocation),
+              created: recorded.created,
+              value: toEconomicValueView(
+                await economicValueService.getValue(execution, value.id),
+              ),
+              campaignEventCount: campaignAfter.events.length,
+            };
+          }
+          if (drawKind === "credit_issuance") {
+            const creditsPerValueUnit = input.creditsPerValueUnit as
+              | number
+              | undefined;
+            if (
+              creditsPerValueUnit === undefined ||
+              !Number.isFinite(creditsPerValueUnit) ||
+              creditsPerValueUnit <= 0
+            ) {
+              const { OpenConError: GateError } = await import("../core/errors.ts");
+              throw new GateError({
+                code: "ECONOMIC_VALIDATION",
+                classification: "validation",
+                message: "credit draw requires creditsPerValueUnit > 0",
+                context: { creditsPerValueUnit: creditsPerValueUnit ?? null },
+              });
+            }
+            const result = await creditService.issueCredits(execution, {
+              organizationScopeId,
+              beneficiaryPersonId: value.beneficiaryPersonId,
+              sourceValueRecordId: value.id,
+              creditsPerValueUnit,
+              description: `cross-promotion clearing draw (credits) — rule ${rule.id}`,
+              idempotencyKey: `${idempotencyKey}:draw`,
+            });
+            const recorded =
+              await crossPromotionClearingService.recordCrossPromotionClearing(
+                execution,
+                {
+                  organizationScopeId,
+                  sourceContributionId,
+                  targetPlacementId,
+                  valueRecordId: value.id,
+                  clearingRuleId: rule.id,
+                  drawKind,
+                  drawResultId: result.issuance.id,
+                  idempotencyKey: `${idempotencyKey}:record`,
+                },
+              );
+            const campaignAfter = await campaignService.recordClearingExecution(
+              execution,
+              {
+                campaignId: recorded.clearing.campaignId,
+                clearingRuleId: rule.id,
+                drawKind,
+                valueRecordId: value.id,
+                resultId: result.issuance.id,
+                amount: result.issuance.creditAmount,
+                description: `cross-promotion clearing draw (credit issuance ${result.issuance.id}, clearing ${recorded.clearing.id})`,
+                idempotencyKey: `${idempotencyKey}:campaign`,
+              },
+            );
+            return {
+              drawKind,
+              clearing: toCrossPromotionClearingView(recorded.clearing),
+              issuance: toCreditIssuanceView(result.issuance),
+              created: recorded.created,
+              value: toEconomicValueView(
+                await economicValueService.getValue(execution, value.id),
+              ),
+              campaignEventCount: campaignAfter.events.length,
+            };
+          }
+          // cash_obligation — internal payable/receivable state ONLY
+          // (NO external payment execution: /payments stays skeletal,
+          // NET-W030).
+          const cashKind = (input.cashKind as string | undefined) ?? "payable";
+          if (cashKind !== "payable" && cashKind !== "receivable") {
+            const { OpenConError: GateError } = await import("../core/errors.ts");
+            throw new GateError({
+              code: "ECONOMIC_VALIDATION",
+              classification: "validation",
+              message: `cashKind must be payable | receivable (got ${String(cashKind)})`,
+              context: { cashKind },
+            });
+          }
+          const counterpartyPersonId = input.counterpartyPersonId as
+            | string
+            | undefined;
+          if (!counterpartyPersonId || !String(counterpartyPersonId).trim()) {
+            const { OpenConError: GateError } = await import("../core/errors.ts");
+            throw new GateError({
+              code: "ECONOMIC_VALIDATION",
+              classification: "validation",
+              message: "cash draw requires counterpartyPersonId",
+              context: {},
+            });
+          }
+          const cashAmount = input.cashAmount as number | undefined;
+          if (
+            cashAmount === undefined ||
+            !Number.isFinite(cashAmount) ||
+            cashAmount <= 0 ||
+            cashAmount > rule.maxDrawAmount
+          ) {
+            const { OpenConError: GateError } = await import("../core/errors.ts");
+            throw new GateError({
+              code: "ECONOMIC_VALIDATION",
+              classification: "validation",
+              message: `cash draw amount must be > 0 and ≤ the rule max draw amount ${String(rule.maxDrawAmount)}`,
+              context: {
+                cashAmount: cashAmount ?? null,
+                maxDrawAmount: rule.maxDrawAmount,
+              },
+            });
+          }
+          const result = await cashService.recordCashObligation(execution, {
+            organizationScopeId,
+            kind: cashKind,
+            counterpartyPersonId,
+            amount: cashAmount,
+            description: `cross-promotion clearing draw — rule ${rule.id}, value record ${value.id}, placement ${targetPlacementId}`,
+            idempotencyKey: `${idempotencyKey}:draw`,
+          });
+          const recorded =
+            await crossPromotionClearingService.recordCrossPromotionClearing(
+              execution,
+              {
+                organizationScopeId,
+                sourceContributionId,
+                targetPlacementId,
+                valueRecordId: value.id,
+                clearingRuleId: rule.id,
+                drawKind,
+                drawResultId: result.obligation.id,
+                idempotencyKey: `${idempotencyKey}:record`,
+              },
+            );
+          const campaignAfter = await campaignService.recordClearingExecution(
+            execution,
+            {
+              campaignId: recorded.clearing.campaignId,
+              clearingRuleId: rule.id,
+              drawKind,
+              valueRecordId: value.id,
+              resultId: result.obligation.id,
+              amount: result.obligation.amount,
+              description: `cross-promotion clearing draw (cash obligation ${result.obligation.id}, clearing ${recorded.clearing.id})`,
+              idempotencyKey: `${idempotencyKey}:campaign`,
+            },
+          );
+          return {
+            drawKind,
+            clearing: toCrossPromotionClearingView(recorded.clearing),
+            obligation: toCashObligationView(result.obligation),
+            created: recorded.created,
+            value: toEconomicValueView(value),
+            campaignEventCount: campaignAfter.events.length,
+          };
+        },
+      );
+    },
+
+    /** The DERIVED eligibility view (AC-02; public read). */
+    async evaluateCrossPromotionClearing(execution, input) {
+      return crossPromotionClearingService.evaluateClearingEligibility(
+        getExecutionContext() ?? execution,
+        {
+          organizationScopeId: input.organizationScopeId as string,
+          sourceContributionId: input.sourceContributionId as string,
+          targetPlacementId: input.targetPlacementId as string,
+          valueRecordId: input.valueRecordId as string,
+          ...(input.clearingRuleId !== undefined
+            ? { clearingRuleId: input.clearingRuleId as string }
+            : {}),
+        },
+      );
+    },
+
+    async getCrossPromotionClearing(execution, organizationScopeId, clearingId) {
+      const clearing = await crossPromotionClearingService.getCrossPromotionClearing(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        clearingId,
+      );
+      return toCrossPromotionClearingView(clearing);
+    },
+
+    async listCrossPromotionClearings(execution, organizationScopeId) {
+      const clearings = await crossPromotionClearingService.listCrossPromotionClearings(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+      );
+      return clearings.map(toCrossPromotionClearingView);
+    },
   };
 
   const registry = createModuleRegistry(snapshot, logger);
@@ -7786,6 +8426,8 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     creatorSponsorshipService,
     // NET-W019 inventory (supply registration + placement context).
     inventoryService,
+    // NET-W020 cross-promotion clearing (records + derived eligibility).
+    crossPromotionClearingService,
     helpfulnessService,
     // NET-W013 quality/moderation/anti-spam services + LLM providers.
     qualityService,

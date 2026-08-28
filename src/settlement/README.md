@@ -56,6 +56,29 @@ consumes these ONLY through composition-root orchestration (it never
 posts); this domain carries NO dispute lifecycle (asserted by the
 NET-W008/W010 regressions).
 
+## Scope in NET-W020 — cross-promotion clearing
+
+`clearing-service.ts` + `clearing-eligibility.ts` (the pure evaluator)
++ `authority-clearing-repository.ts` (collection
+`cross_promotion_clearings`): the durable clearing EXECUTION records
+linking a qualifying source contribution and a settlement-ready target
+placement through canonical inventory/campaign references (CAMP-004/
+005 multilateral clearing). The records are pure LINEAGE — the
+eligibility snapshot is RE-DERIVED inside the authoritative record
+transaction through the neutral lookups (contribution qualification,
+the W019 placement settlement readiness, the campaign clearing rules,
+the risk/dispute gate) and the draw result is verified against the
+same domain's allocation/issuance/obligation records. ONE clearing per
+(contribution, placement) pair (advisory pair mutex + in-tx
+create-once). The record posts NOTHING — the economic mutation flows
+exclusively through the EXISTING `allocateRewards` / `issueCredits` /
+`recordCashObligation` primitives composed at the bootstrap boundary
+(the W014 `executeCampaignClearing` precedent); no new account kind,
+transaction kind or value source exists (no second ledger). The
+clearing composite is the composition-root apiCommand
+`executeCrossPromotionClearing`; the derived eligibility view is
+`evaluateClearingEligibility`.
+
 ## Dependencies
 
 `core` contracts only. Upstream record resolution (evidence,

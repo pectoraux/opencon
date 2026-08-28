@@ -1112,6 +1112,8 @@ export interface SettlementPort {
     readonly stakeCommitted: "stake.committed";
     readonly stakeReleased: "stake.released";
     readonly stakeForfeited: "stake.forfeited";
+    // NET-W020 (additive): the cross-promotion clearing execution record.
+    readonly crossPromotionClearingRecorded: "cross_promotion_clearing.recorded";
   };
 }
 
@@ -1270,6 +1272,293 @@ export interface StakeService {
     organizationScopeId: string,
     ownerPersonId?: string,
   ): Promise<readonly EconomicStake[]>;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W020 — Cross-promotion clearing (issue #39).
+//
+// Clearing is an ORCHESTRATION/INTEGRATION concern composed at the
+// bootstrap boundary; /settlement stays the SOLE economic authority.
+// The CrossPromotionClearingRecord below is pure LINEAGE: it references
+// the campaign/contribution/placement/value-record/draw-result and
+// snapshots the DERIVED eligibility trace — it posts NOTHING itself (no
+// new account kind, transaction kind or value source exists; the draws
+// flow exclusively through the UNTOUCHED allocateRewards /
+// issueCredits / recordCashObligation primitives). There is no second
+// ledger. /workflows is COMPLETELY untouched (clearing carries no
+// lifecycle subject); /inventory, /campaigns, /contributions and
+// /disputes are consumed READ-ONLY through the neutral lookups below.
+// ---------------------------------------------------------------------------
+
+/**
+ * ClearingContributionLookup — structural interface over the
+ * contributions boundary + the W012/W013 derived states (the EXACT
+ * NET-W014 recognition-bar views, read-only; domain→domain imports are
+ * prohibited so the composition root wires the adapter).
+ */
+export interface ClearingContributionLookup {
+  resolve(contributionId: string): Promise<{
+    readonly organizationScopeId: string;
+    readonly lifecycleState: string;
+    readonly contributorPersonId: string;
+    readonly proofOfHelpfulnessState: string;
+    readonly moderationStatus: string;
+    readonly qualityBand: string | null;
+  } | null>;
+}
+
+/**
+ * ClearingPlacementLookup — structural interface over the inventory
+ * boundary's DERIVED settlement readiness (NET-W019 INV-004) plus the
+ * placement's campaign binding and registered owner. Read-only; a
+ * placement that does not resolve in the requested scope resolves to
+ * null (fail-closed).
+ */
+export interface ClearingPlacementLookup {
+  readiness(
+    organizationScopeId: string,
+    placementId: string,
+  ): Promise<{
+    readonly placementId: string;
+    readonly organizationScopeId: string;
+    readonly campaignId: string;
+    readonly campaignPolicyVersion: number;
+    readonly ownerPersonId: string;
+    readonly settlementReady: boolean;
+  } | null>;
+}
+
+/** One declared campaign clearing rule (read-only view). */
+export interface ClearingRuleView {
+  readonly id: string;
+  readonly objectiveId: string;
+  readonly basis: string;
+  readonly drawKind: string;
+  readonly rewardPolicyId: string | null;
+  readonly maxDrawAmount: number;
+}
+
+/**
+ * ClearingCampaignRuleLookup — structural interface over the campaigns
+ * boundary (existence + tenant scope + administrative status + the
+ * CURRENT policy version's declared clearing rules). Read-only;
+ * /campaigns stays the campaign policy authority.
+ */
+export interface ClearingCampaignRuleLookup {
+  resolve(campaignId: string): Promise<{
+    readonly campaignId: string;
+    readonly organizationScopeId: string;
+    readonly administrativeStatus: string;
+    readonly currentPolicyVersion: number;
+    readonly clearingRules: readonly ClearingRuleView[];
+  } | null>;
+}
+
+/** The risk/dispute gate view over the clearing source contexts. */
+export interface ClearingGateView {
+  readonly clear: boolean;
+  /** "risk_control" | "active_dispute" | null (null when clear). */
+  readonly source: string | null;
+  readonly controlId: string | null;
+  readonly disputeId: string | null;
+  readonly detail: Record<string, unknown>;
+}
+
+/**
+ * ClearingGateLookup — structural interface over the disputes
+ * boundary's active-control registry + ACTIVE dispute registry (the
+ * NET-W014 gate discipline; PENDING_STAKE disputes NEVER gate — the
+ * NET-W010 griefing-resistance semantics). Read-only.
+ */
+export interface ClearingGateLookup {
+  assess(input: {
+    readonly organizationScopeId: string;
+    readonly operationClass: string;
+    readonly recordSubjectIds: readonly string[];
+    readonly personSubjectId: string | null;
+  }): Promise<ClearingGateView>;
+}
+
+/** The NET-W020 neutral lookup bundle. */
+export interface ClearingLookups {
+  readonly contribution: ClearingContributionLookup;
+  readonly placement: ClearingPlacementLookup;
+  readonly campaign: ClearingCampaignRuleLookup;
+  readonly gate: ClearingGateLookup;
+}
+
+/**
+ * A CrossPromotionClearingRecord — the durable, tenant-scoped,
+ * append-only execution record of ONE cross-promotion clearing (the
+ * clearing COMMITMENT linking a source contribution and a target
+ * placement through canonical inventory/campaign references).
+ *
+ * Invariants:
+ *  - ONE record per (sourceContributionId, targetPlacementId): a
+ *    stable CLEARING_CONFLICT otherwise (the W019 active-placement pair
+ *    precedent — a cleared pair cannot be cleared again under any
+ *    idempotency key);
+ *  - the eligibility snapshot was RE-DERIVED inside the authoritative
+ *    record transaction through the neutral lookups + the value
+ *    repository (nothing caller-asserted qualifies);
+ *  - the draw result was VERIFIED against the SAME domain's
+ *    allocation/issuance/obligation records (same scope, same value
+ *    record, kind-consistent) — a fabricated draw reference cannot be
+ *    recorded;
+ *  - the record posts NOTHING: `drawTransactionId` references the
+ *    EXISTING primitive's ledger transaction (lineage only).
+ */
+export interface CrossPromotionClearingRecord {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly campaignId: string;
+  readonly campaignPolicyVersion: number;
+  readonly clearingRuleId: string;
+  readonly sourceContributionId: string;
+  readonly targetPlacementId: string;
+  readonly valueRecordId: string;
+  readonly drawKind: "reward_allocation" | "credit_issuance" | "cash_obligation";
+  /** The executed primitive's own result id (allocation/issuance/obligation). */
+  readonly drawResultId: string;
+  /** The executed primitive's ledger transaction (lineage only). */
+  readonly drawTransactionId: string;
+  /** The drawn amount (the primitive's own amount semantics). */
+  readonly amount: number;
+  /** The re-derived eligibility trace the clearing executed under. */
+  readonly eligibility: {
+    readonly eligible: true;
+    readonly checks: readonly {
+      readonly check: string;
+      readonly satisfied: boolean;
+      readonly reason: string;
+      readonly detail: Record<string, unknown>;
+    }[];
+  };
+  readonly status: "cleared";
+  readonly clearedAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+export interface RecordCrossPromotionClearingInput {
+  readonly organizationScopeId: string;
+  readonly sourceContributionId: string;
+  readonly targetPlacementId: string;
+  readonly valueRecordId: string;
+  readonly clearingRuleId: string;
+  readonly drawKind: string;
+  readonly drawResultId: string;
+  readonly idempotencyKey: string;
+}
+
+export interface RecordCrossPromotionClearingResult {
+  readonly clearing: CrossPromotionClearingRecord;
+  /** false when the idempotency key replayed the committed record. */
+  readonly created: boolean;
+}
+
+export interface EvaluateCrossPromotionClearingInput {
+  readonly organizationScopeId: string;
+  readonly sourceContributionId: string;
+  readonly targetPlacementId: string;
+  readonly valueRecordId: string;
+  /** Optional explicit rule id; omitted → the single declared rule. */
+  readonly clearingRuleId?: string;
+}
+
+export interface CrossPromotionClearingRepository {
+  findById(id: string): Promise<CrossPromotionClearingRecord | null>;
+  listByOrganization(
+    organizationScopeId: string,
+  ): Promise<readonly CrossPromotionClearingRecord[]>;
+  findByPair(
+    organizationScopeId: string,
+    sourceContributionId: string,
+    targetPlacementId: string,
+  ): Promise<CrossPromotionClearingRecord | null>;
+  /** In-tx fresh read (the create-once pair backstop). */
+  findByPairWithinTx(
+    organizationScopeId: string,
+    sourceContributionId: string,
+    targetPlacementId: string,
+    tx: AuthorityTransaction,
+  ): Promise<CrossPromotionClearingRecord | null>;
+  createWithinTx(
+    clearing: CrossPromotionClearingRecord,
+    tx: AuthorityTransaction,
+  ): Promise<CrossPromotionClearingRecord>;
+}
+
+export interface CrossPromotionClearingService {
+  /**
+   * THE DERIVED ELIGIBILITY VIEW (AC-02): re-derived from CURRENT
+   * authoritative records on every read — the qualified source
+   * contribution (the W014 bar), the settlement-ready target placement
+   * (the W019 gate) bound to the clearing campaign, the ACTIVE
+   * campaign's current clearing rules, the clearable value record with
+   * the contribution in its lineage, and the risk/dispute gate. There
+   * is NO command that asserts, stores or waives eligibility; callers
+   * can only REFERENCE records.
+   */
+  evaluateClearingEligibility(
+    execution: ExecutionContext,
+    input: EvaluateCrossPromotionClearingInput,
+  ): Promise<{
+    readonly organizationScopeId: string;
+    readonly sourceContributionId: string;
+    readonly targetPlacementId: string;
+    readonly valueRecordId: string;
+    readonly eligible: boolean;
+    readonly checks: readonly {
+      readonly check: string;
+      readonly satisfied: boolean;
+      readonly reason: string;
+      readonly detail: Record<string, unknown>;
+    }[];
+    readonly resolvedRule: ClearingRuleView | null;
+    readonly evaluatedAt: string;
+  }>;
+  /**
+   * The AUTHORITATIVE record command (AC-03/04/07): serialized under
+   * the advisory pair mutex, applied idempotently in ONE authoritative
+   * transaction that RE-DERIVES the full eligibility in-tx, VERIFIES
+   * the draw result against the same domain's allocation/issuance/
+   * obligation records, enforces the create-once pair constraint and
+   * commits the `cross_promotion_clearing.recorded` audit event
+   * binding campaign + contribution + placement + clearing record +
+   * idempotency record + authoritative transaction + draw transaction.
+   */
+  recordCrossPromotionClearing(
+    execution: ExecutionContext,
+    input: RecordCrossPromotionClearingInput,
+  ): Promise<RecordCrossPromotionClearingResult>;
+  /** Tenant-scoped reads (cross-scope = NotFoundError). */
+  getCrossPromotionClearing(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    clearingId: string,
+  ): Promise<CrossPromotionClearingRecord>;
+  listCrossPromotionClearings(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+  ): Promise<readonly CrossPromotionClearingRecord[]>;
+}
+
+export interface CrossPromotionClearingServiceDeps {
+  readonly clearingRepository: CrossPromotionClearingRepository;
+  readonly valueRepository: EconomicValueRepository;
+  readonly allocationRepository: RewardAllocationRepository;
+  readonly issuanceRepository: CreditIssuanceRepository;
+  readonly obligationRepository: CashObligationRepository;
+  readonly lookups: ClearingLookups;
+  readonly idempotency: IdempotencyStore;
+  readonly auditWriter: TransactionalAuditWriter;
+  readonly logger: {
+    info(message: string, fields?: Record<string, unknown>): void;
+    debug(message: string, fields?: Record<string, unknown>): void;
+  };
 }
 
 export type {
