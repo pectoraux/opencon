@@ -45,7 +45,10 @@ import {
 import { createExecutionContext } from "../../src/core/execution-context.ts";
 import type { ExecutionContext } from "../../src/core/execution-context.ts";
 import { policyActionFor } from "../../src/core/workflow.ts";
-import { PUBLICATION_TRANSITION_TABLE } from "../../src/workflows/transition-table.ts";
+import {
+  PUBLICATION_TRANSITION_TABLE,
+  PUBLICATION_SANCTIONED_TRANSITION_TABLE,
+} from "../../src/workflows/transition-table.ts";
 import type {
   CommercialRelationship,
   DisclosureDeclaration,
@@ -90,9 +93,22 @@ export async function createNetW018Harness(): Promise<NetW018Harness> {
     });
   }
   // Per-transition ALLOW policies for the publication subject kind
-  // (the W004/W017 harness pattern).
+  // (the W004/W017 harness pattern). BOTH tables: the generic
+  // publication transitions AND the SANCTIONED verification edge —
+  // the harness persons are deliberately AUTHORIZED for
+  // `publication.transition.draft_to_verified` so tests can prove
+  // the PR #36 remediation's structural point: an AUTHORIZED caller
+  // requesting the verification transition through the GENERIC
+  // workflow path is STILL rejected (the edge is absent from the
+  // generic table) — authorization is not the gate; the sanction is.
   for (const personId of [w017.creatorPersonId, w017.operatorPersonId]) {
-    for (const rule of PUBLICATION_TRANSITION_TABLE) {
+    const publicationRules: readonly {
+      readonly policyAction: string;
+    }[] = [
+      ...PUBLICATION_TRANSITION_TABLE,
+      ...PUBLICATION_SANCTIONED_TRANSITION_TABLE,
+    ];
+    for (const rule of publicationRules) {
       await runtime.policyService.createPolicy(bootstrapCtx, {
         subject: personId,
         action: rule.policyAction,

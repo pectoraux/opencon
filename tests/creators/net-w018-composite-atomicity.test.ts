@@ -400,12 +400,14 @@ describe("NET-W018 composite atomicity (fault injection)", () => {
             execution,
             tx,
             idempotencyRecordId,
+            sanction,
           ) {
             return harness.runtime.workflowService.requestTransitionWithinTx(
               request,
               execution,
               tx,
               idempotencyRecordId,
+              sanction,
             );
           },
         },

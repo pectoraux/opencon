@@ -122,6 +122,54 @@ export function auditEventFor(
 }
 
 /**
+ * SANCTIONED TRANSITION VOCABULARY (the PR #36 remediation — architect
+ * CHANGES REQUESTED on NET-W018).
+ *
+ * A few lifecycle edges are not ordinary caller-requestable workflow
+ * transitions: they ARE domain gates whose preconditions can only be
+ * derived by a specific composite inside its authoritative
+ * transaction. The first (and so far only) such edge is the
+ * publication `DRAFT → VERIFIED` transition — THE DISCLOSURE GATE of
+ * NET-W018 §3.4. The verification is only sound after the creators
+ * domain's publication-verification composite derives the applicable
+ * disclosure obligations from DURABLE RECORDS (campaign policy ∪
+ * commercial-relationship obligations) and proves each satisfied by
+ * an evidence-bound declaration FOR THIS PUBLICATION.
+ *
+ * Structural consequence (the remediation decision of record): the
+ * sanctioned edges live in a SEPARATE sanctioned transition table —
+ * they are absent from the generic tables, so `findRule` (the ONLY
+ * resolver the generic `WorkflowService.requestTransition` path and
+ * the `/api/workflows/transitions` endpoint use) structurally CANNOT
+ * resolve them. The ONLY way to execute a sanctioned edge is the
+ * in-transaction composition twin
+ * (`WorkflowService.requestTransitionWithinTx`) invoked WITH the
+ * matching sanction constant by the owning composite. A caller —
+ * however authorized — cannot request the edge, because no code path
+ * from the public transition surface passes a sanction.
+ *
+ * The vocabulary lives in CORE (like `policyActionFor`) so the
+ * workflow authority (transition table + state machine), the owning
+ * domain composite (creators), and tests share ONE frozen constant
+ * without a domain→domain import.
+ */
+export const PUBLICATION_VERIFICATION_SANCTION =
+  "creators.publication-verification";
+
+/**
+ * The exhaustive set of transition sanctions (frozen — additions are
+ * deliberate architecture decisions, never incidental). Each entry
+ * names the single composite sanctioned to execute its edge.
+ */
+export const WORKFLOW_TRANSITION_SANCTIONS = [
+  PUBLICATION_VERIFICATION_SANCTION,
+] as const;
+
+/** A transition sanction (see {@link WORKFLOW_TRANSITION_SANCTIONS}). */
+export type WorkflowTransitionSanction =
+  (typeof WORKFLOW_TRANSITION_SANCTIONS)[number];
+
+/**
  * The kind of lifecycle subject. NET-W004 introduced two first-class
  * subjects: opportunities and contributions. NET-W005 added the
  * Proof-of-Value (the evidence-backed claim object whose lifecycle is
@@ -149,8 +197,11 @@ export function auditEventFor(
  * publication carries canonical, subject-bound evidence. The boundary
  * itself never performs the external publication act (no silent
  * publication authority — CRE-004/HELP-005) and the DRAFT → VERIFIED
- * transition is the disclosure gate: it is structurally unreachable
- * while required disclosure obligations remain unsatisfied.
+ * transition is the disclosure gate: it is a SANCTIONED edge
+ * (`PUBLICATION_VERIFICATION_SANCTION`) resolvable ONLY through the
+ * in-transaction composition twin invoked by the creators domain's
+ * verification composite — NEVER through the generic transition path
+ * (the PR #36 remediation decision of record).
  * Later work items (campaigns, disputes, etc.) may add more. The
  * transition table is parameterized by subject kind so each subject
  * can have its own legal-transition set.

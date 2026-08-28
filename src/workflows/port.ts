@@ -50,6 +50,7 @@ import type {
   LifecycleSubjectKind,
   TransitionRequest,
   TransitionResult,
+  WorkflowTransitionSanction,
 } from "../core/workflow.ts";
 
 /**
@@ -271,6 +272,21 @@ export interface WorkflowService {
    * still executes exclusively through the shared `performTransition`
    * path below (one state machine, no divergent copy).
    *
+   * SANCTIONED EDGES (the PR #36 remediation — architect CHANGES
+   * REQUESTED on NET-W018): certain transitions (currently exactly
+   * one: publication DRAFT → VERIFIED, THE DISCLOSURE GATE) are NOT
+   * requestable through the generic `requestTransition` surface —
+   * their preconditions can only be derived by one specific
+   * composite inside its own authoritative transaction. Such edges
+   * resolve ONLY when this twin is invoked with the EXACT matching
+   * `sanction` constant (see src/core/workflow.ts —
+   * WORKFLOW_TRANSITION_SANCTIONS) by the owning composite. The
+   * generic path passes no sanction, so a caller — however
+   * authorized — cannot reach a sanctioned edge through
+   * `/api/workflows/transitions`; the state machine rejects it as
+   * IllegalTransitionError (structurally — the edge is absent from
+   * the generic table).
+   *
    * Throws the same errors as `requestTransition` (the rollback of the
    * caller's transaction is the caller's — via the idempotency store).
    */
@@ -279,6 +295,7 @@ export interface WorkflowService {
     execution: ExecutionContext,
     tx: AuthorityTransaction,
     idempotencyRecordId: string,
+    sanction?: WorkflowTransitionSanction,
   ): Promise<TransitionResult>;
 }
 
@@ -301,4 +318,4 @@ export interface WorkflowsPort {
   };
 }
 
-export type { ExecutionContext, AuthorityTransaction, LifecycleSubject, LifecycleSubjectKind, TransitionRequest, TransitionResult, TransactionalAuditWriter };
+export type { ExecutionContext, AuthorityTransaction, LifecycleSubject, LifecycleSubjectKind, TransitionRequest, TransitionResult, TransactionalAuditWriter, WorkflowTransitionSanction };

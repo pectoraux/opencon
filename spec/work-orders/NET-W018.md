@@ -135,10 +135,13 @@ VERIFIED  — terminal: the applicable disclosure obligations are
 CANCELLED — terminal: withdrawn before verification
 ```
 
-- `DRAFT → VERIFIED` (requiresEvidenceReference: true) executes ONLY
-  through the verification composite — THE DISCLOSURE GATE;
-- `DRAFT → CANCELLED` is a pure workflow transition (the existing
-  `requestTransition` API command with subjectKind "publication");
+- `DRAFT → VERIFIED` (requiresEvidenceReference: true) is a
+  SANCTIONED transition — it is ABSENT from the generic table and
+  executes ONLY through the verification composite — THE DISCLOSURE
+  GATE (see §3.4a — the PR #36 remediation decision of record);
+- `DRAFT → CANCELLED` is a pure generic workflow transition (the
+  `requestTransition` API command with subjectKind "publication" —
+  withdrawal is a plain lifecycle act with no derivation behind it);
 - retraction AFTER verification is an explicit non-goal (a
   `/disputes` case + a later work item own post-publication
   semantics);
@@ -172,6 +175,60 @@ Unsatisfied obligations raise the stable
 `DISCLOSURE_OBLIGATIONS_UNSATISFIED` error with machine-readable
 required/satisfied/missing sets — publication is BLOCKED while any
 obligation is unsatisfied.
+
+### §3.4a The sanction — generic-path unreachability (the PR #36 remediation decision of record)
+
+Architect CHANGES REQUESTED on PR #36 (accepted): the verification
+transition was resolvable through the GENERIC `/workflows`
+transition machinery (the table edge + an authorized
+`publication.transition.draft_to_verified` policy), so a caller able
+to invoke the generic transition path could bypass the disclosure
+derivation in `verifyPublication()` — violating the PR's own stated
+invariant that DRAFT → VERIFIED is requested ONLY by the creators
+domain's publication-verification composite.
+
+The remediation (same branch/PR):
+
+- the `DRAFT → VERIFIED` edge moved OUT of
+  `PUBLICATION_TRANSITION_TABLE` into a separate
+  `PUBLICATION_SANCTIONED_TRANSITION_TABLE`
+  (`src/workflows/transition-table.ts`). `findRule` — the ONLY
+  resolver behind `WorkflowService.requestTransition` and
+  `/api/workflows/transitions` — reads ONLY the generic tables, so
+  the edge is structurally UNRESOLVABLE on the generic path:
+  `IllegalTransitionError` (code `ILLEGAL_TRANSITION`) with a
+  machine-readable `requiredSanction` context, regardless of the
+  caller's authorization, the evidence, or the disclosure state;
+- a NEW frozen core sanction vocabulary
+  (`src/core/workflow.ts`): `WORKFLOW_TRANSITION_SANCTIONS` =
+  `["creators.publication-verification"]`;
+- the in-tx composition twin
+  (`requestTransitionWithinTx`) gains an optional `sanction`
+  argument — the ONLY path that can resolve a sanctioned edge. The
+  creators domain's `verifyPublication` presents
+  `PUBLICATION_VERIFICATION_SANCTION` (core constant — no
+  domain→domain import) AFTER the gate derivation proved every
+  obligation satisfied; THAT call site IS the disclosure gate;
+- `DRAFT → CANCELLED` remains a generic transition (the API
+  transition parser admits subjectKind `"publication"` for it);
+- regression evidence (the architect's exact scenario):
+  `tests/creators/net-w018-ac-04-publication-gate.test.ts` —
+  authorized direct generic transition + valid publication +
+  UNSATISFIED obligations → REJECTED, publication remains DRAFT,
+  NO `publication.verified` audit; plus the structural variant
+  (obligations SATISFIED → generic path STILL rejected, the
+  sanctioned composite then verifies the SAME publication) and the
+  no-over-block proof (DRAFT → CANCELLED keeps working generically);
+- the structural pin (a future contributor cannot accidentally
+  re-expose the verification transition through the generic API):
+  `tests/regression/net-w018-ac-07-architecture-out-of-scope.test.ts`
+  pins the generic table to EXACTLY `[DRAFT→CANCELLED]` with NO
+  `to: "VERIFIED"` rule, pins `findRule("publication","DRAFT",
+  "VERIFIED") === null` + `legalTargets("publication","DRAFT") ===
+  `["CANCELLED"]`, pins the sanctioned table to EXACTLY the one
+  expected rule (frozen sanction + requiresEvidenceReference), and
+  pins the pure evaluator split (no sanction → illegal;
+  exact sanction → legal; wrong sanction → illegal).
 
 ### §3.5 Composite atomicity (built in from the start — the W017 remediation decision of record)
 
@@ -227,7 +284,7 @@ twin. NO economic/reputation/risk/outcome mutation, NO AI path.
 | 1 | Commercial relationships are explicit, durable, tenant-scoped records with creator/campaign/engagement lineage | `CommercialRelationship` record + in-tx lineage coherence checks + one-per-engagement create-once; AC-01 suite |
 | 2 | Required disclosures are derived from explicit campaign/engagement policy and cannot be bypassed by caller claims | the pure union derivation over durable records (policy section + relationship obligations); the verify input has no compliance field; AC-02/AC-04 suites |
 | 3 | A disclosure declaration is auditable and bound to the relevant publication/evidence context | the immutable `DisclosureDeclaration` + `disclosure_declaration.recorded` audit event + canonical subject-bound evidence references; AC-03 suite |
-| 4 | Publication requires the applicable disclosure obligations to be satisfied; producing or owning content does not itself imply publication authority | THE DISCLOSURE GATE (§3.4): derived obligations all satisfied + ≥1 subject-bound publication evidence before DRAFT → VERIFIED; publication creation requires a VERIFIED engagement; `DISCLOSURE_OBLIGATIONS_UNSATISFIED` stable error; AC-04 suite |
+| 4 | Publication requires the applicable disclosure obligations to be satisfied; producing or owning content does not itself imply publication authority | THE DISCLOSURE GATE (§3.4): derived obligations all satisfied + ≥1 subject-bound publication evidence before DRAFT → VERIFIED; publication creation requires a VERIFIED engagement; `DISCLOSURE_OBLIGATIONS_UNSATISFIED` stable error; the transition is a SANCTIONED edge unreachable through the generic workflow path (§3.4a — PR #36 remediation); AC-04 suite |
 | 5 | Settlement references compensation terms; no parallel payment or reward ledger | `CommercialCompensationTerms` REFERENCE DATA ONLY (structural + behavioral pins; no economic command); AC-05 suite |
 | 6 | Evidence references resolve to canonical `/evidence` records; disclosure proof cannot be fabricated in the creator domain | neutral evidence lookup validation with EXACT subject binding (`publication:{id}`) on declarations AND verification; AC-03 suite |
 | 7 | AI/model output cannot directly authorize sponsorship, disclosure compliance, publication, settlement or reputation mutation | NO AI path in the sponsorship surface (no LlmPort/advisory; the llm purpose union untouched); AC-07 pins |
@@ -250,10 +307,10 @@ provider-specific platform semantics inside `/creators` or
 | 1 — first-class commercial relationships with lineage | `tests/creators/net-w018-ac-01-commercial-relationships.test.ts` |
 | 2 — explicit, deterministic, tenant-scoped, auditable disclosure requirements | `tests/creators/net-w018-ac-02-disclosure-requirements.test.ts` |
 | 3 — declarations + publication evidence preserve provenance + canonical evidence references | `tests/creators/net-w018-ac-03-declarations-evidence.test.ts` |
-| 4 — publication blocked while obligations unsatisfied; caller claims cannot override | `tests/creators/net-w018-ac-04-publication-gate.test.ts` |
+| 4 — publication blocked while obligations unsatisfied; caller claims cannot override | `tests/creators/net-w018-ac-04-publication-gate.test.ts` (incl. the PR #36 remediation regression: generic-path unreachability + structural/no-over-block proofs) |
 | 5 — compensation remains a `/settlement` reference; no parallel economic state | `tests/creators/net-w018-ac-05-settlement-reference.test.ts` |
 | 6 — provider-neutral adapter boundaries + secret isolation | `tests/creators/net-w018-ac-06-provider-neutrality.test.ts` |
-| 7 — architecture/out-of-scope regression with frozen Architecture v1.0 + unchanged lock | `tests/regression/net-w018-ac-07-architecture-out-of-scope.test.ts` |
+| 7 — architecture/out-of-scope regression with frozen Architecture v1.0 + unchanged lock | `tests/regression/net-w018-ac-07-architecture-out-of-scope.test.ts` (incl. THE STRUCTURAL PIN: the sanctioned verification edge resolves only through the sanctioned table + exact sanction) |
 | 8 — idempotency, concurrency, tenancy, PostgreSQL authority, transactional audit lineage | `tests/creators/net-w018-ac-08-tenancy-idempotency.test.ts` |
 | (composite atomicity — the W017 remediation standard applied from the start) | `tests/creators/net-w018-composite-atomicity.test.ts` |
 

@@ -4609,9 +4609,19 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       subjectKind !== "contribution" &&
       subjectKind !== "proof_of_value" &&
       subjectKind !== "outcome_measurement" &&
-      subjectKind !== "engagement"
+      subjectKind !== "engagement" &&
+      // NET-W018: publications join the generic transition surface for
+      // their GENERIC edge only (DRAFT → CANCELLED). The verification
+      // edge (DRAFT → VERIFIED) is a SANCTIONED transition — it is
+      // structurally absent from the generic table, so even an
+      // authorized caller sending subjectKind "publication" +
+      // targetState "VERIFIED" is rejected here as ILLEGAL_TRANSITION
+      // (the PR #36 remediation): the edge resolves exclusively
+      // through the creators domain's verification composite via the
+      // in-tx twin + PUBLICATION_VERIFICATION_SANCTION.
+      subjectKind !== "publication"
     ) {
-      throw apiValidationError(`subjectKind must be "opportunity", "contribution", "proof_of_value", "outcome_measurement" or "engagement" (got ${String(subjectKind)})`);
+      throw apiValidationError(`subjectKind must be "opportunity", "contribution", "proof_of_value", "outcome_measurement", "engagement" or "publication" (got ${String(subjectKind)})`);
     }
     const targetState = strField(obj, "targetState");
     const expectedVersion = numField(obj, "expectedVersion");

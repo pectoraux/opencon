@@ -31,9 +31,21 @@ import {
   CANONICAL_LIFECYCLE_STATES,
   EXCEPTIONAL_LIFECYCLE_STATES,
   TERMINAL_LIFECYCLE_STATES,
+  PUBLICATION_VERIFICATION_SANCTION,
+  WORKFLOW_TRANSITION_SANCTIONS,
+  IllegalTransitionError,
   type LifecycleSubjectKind,
 } from "../../src/core/workflow.ts";
-import { ENGAGEMENT_TRANSITION_TABLE, PUBLICATION_TRANSITION_TABLE } from "../../src/workflows/transition-table.ts";
+import {
+  ENGAGEMENT_TRANSITION_TABLE,
+  PUBLICATION_TRANSITION_TABLE,
+  PUBLICATION_SANCTIONED_TRANSITION_TABLE,
+  findRule,
+  findSanctionedRule,
+  sanctionRequiredFor,
+  legalTargets,
+} from "../../src/workflows/transition-table.ts";
+import { evaluateTransition } from "../../src/workflows/state-machine.ts";
 
 const REPO = join(import.meta.dir, "../..");
 const SRC = join(REPO, "src");
@@ -152,21 +164,135 @@ describe("NET-W018-AC-07 architecture / out-of-scope", () => {
     expect(ENGAGEMENT_TRANSITION_TABLE).toHaveLength(11);
   });
 
-  test("the publication transition table is the exhaustive legal matrix with NO terminal sources and NO risk states", () => {
-    expect(PUBLICATION_TRANSITION_TABLE).toHaveLength(2);
+  test("the publication GENERIC transition table is the exhaustive legal matrix with NO verification edge, NO terminal sources and NO risk states", () => {
+    // The PR #36 remediation pin (architect CHANGES REQUESTED): the
+    // verification transition is ABSENT from the generic table —
+    // exactly ONE generic rule remains (DRAFT → CANCELLED).
+    expect(PUBLICATION_TRANSITION_TABLE).toHaveLength(1);
     const rules = PUBLICATION_TRANSITION_TABLE.map((r) => `${r.from}→${r.to}`);
-    expect(rules).toContain("DRAFT→VERIFIED");
-    expect(rules).toContain("DRAFT→CANCELLED");
-    const verifyRule = PUBLICATION_TRANSITION_TABLE.find(
-      (r) => r.from === "DRAFT" && r.to === "VERIFIED",
-    )!;
-    // The gate transition DECLARES its evidence-backed nature (the
-    // W004 stance).
-    expect(verifyRule.requiresEvidenceReference).toBe(true);
+    expect(rules).toEqual(["DRAFT→CANCELLED"]);
+    // The verification edge MUST NOT reappear in the generic table.
+    expect(
+      PUBLICATION_TRANSITION_TABLE.find((r) => r.to === "VERIFIED"),
+    ).toBeUndefined();
     for (const rule of PUBLICATION_TRANSITION_TABLE) {
       expect(["VERIFIED", "REJECTED", "CANCELLED"]).not.toContain(rule.from);
       expect(["BLOCKED", "FRAUD_REVIEW", "DISPUTED"]).not.toContain(rule.to);
     }
+  });
+
+  test("THE STRUCTURAL PIN: the verification transition resolves ONLY through the sanctioned table + sanction (PR #36 remediation)", () => {
+    // 1) The sanctioned table is EXACTLY the whitelist: one rule,
+    //    publication DRAFT → VERIFIED, carrying the frozen sanction
+    //    and declaring requiresEvidenceReference (the W004 stance).
+    //    ANY addition or change here breaks this pin — a future
+    //    contributor cannot silently widen the sanctioned surface.
+    expect(PUBLICATION_SANCTIONED_TRANSITION_TABLE).toHaveLength(1);
+    const sanctioned = PUBLICATION_SANCTIONED_TRANSITION_TABLE[0]!;
+    expect(sanctioned.from).toBe("DRAFT");
+    expect(sanctioned.to).toBe("VERIFIED");
+    expect(sanctioned.sanction).toBe(PUBLICATION_VERIFICATION_SANCTION);
+    expect(sanctioned.requiresEvidenceReference).toBe(true);
+    expect(sanctioned.policyAction).toBe(
+      "publication.transition.draft_to_verified",
+    );
+    expect(sanctioned.auditEventName).toBe(
+      "publication.transition.draft_to_verified",
+    );
+    // The sanction vocabulary itself is frozen.
+    expect([...WORKFLOW_TRANSITION_SANCTIONS]).toEqual([
+      "creators.publication-verification",
+    ]);
+
+    // 2) The GENERIC resolver CANNOT see the verification edge — a
+    //    future contributor re-adding the edge to the generic table
+    //    breaks THIS assertion (the re-exposure the architect
+    //    required a structural pin against).
+    expect(findRule("publication", "DRAFT", "VERIFIED")).toBeNull();
+    expect(legalTargets("publication", "DRAFT")).toEqual(["CANCELLED"]);
+
+    // 3) The SANCTIONED resolver requires an EXACT sanction match —
+    //    a mismatched (or absent) sanction does not resolve.
+    expect(
+      findSanctionedRule(
+        "publication",
+        "DRAFT",
+        "VERIFIED",
+        PUBLICATION_VERIFICATION_SANCTION,
+      ),
+    ).toBe(sanctioned);
+    expect(
+      findSanctionedRule(
+        "publication",
+        "DRAFT",
+        "VERIFIED",
+        "not-the-sanction",
+      ),
+    ).toBeNull();
+    expect(
+      sanctionRequiredFor("publication", "DRAFT", "VERIFIED"),
+    ).toBe(PUBLICATION_VERIFICATION_SANCTION);
+    expect(sanctionRequiredFor("publication", "DRAFT", "CANCELLED")).toBeNull();
+
+    // 4) The PURE evaluator enforces the same split: without a
+    //    sanction the verification edge is ILLEGAL (with the
+    //    precise sanction-naming error); with the EXACT sanction it
+    //    is legal and resolves the sanctioned rule.
+    const publication: Parameters<typeof evaluateTransition>[0]["subject"] = {
+      id: "pin-publication-1",
+      kind: "publication",
+      state: "DRAFT",
+      version: 1,
+      organizationScopeId: "org-pin",
+      ownerId: "person-pin",
+      executionId: "exec-pin",
+      correlationId: "corr-pin",
+      causationId: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const execution = {
+      executionId: "exec-pin",
+      correlationId: "corr-pin",
+      causationId: null,
+      actor: null,
+    } as Parameters<typeof evaluateTransition>[0]["execution"];
+    const unsanctioned = evaluateTransition({
+      subject: publication,
+      targetState: "VERIFIED",
+      expectedVersion: 1,
+      execution,
+    });
+    expect(unsanctioned.legal).toBe(false);
+    expect(unsanctioned.error).toBeInstanceOf(IllegalTransitionError);
+    expect(unsanctioned.error?.context?.requiredSanction).toBe(
+      PUBLICATION_VERIFICATION_SANCTION,
+    );
+    const wrongSanction = evaluateTransition({
+      subject: publication,
+      targetState: "VERIFIED",
+      expectedVersion: 1,
+      execution,
+      sanction: "not-the-sanction" as never,
+    });
+    expect(wrongSanction.legal).toBe(false);
+    const sanctionedEvaluation = evaluateTransition({
+      subject: publication,
+      targetState: "VERIFIED",
+      expectedVersion: 1,
+      execution,
+      sanction: PUBLICATION_VERIFICATION_SANCTION,
+    });
+    expect(sanctionedEvaluation.legal).toBe(true);
+    expect(sanctionedEvaluation.rule).toBe(sanctioned);
+    // The generic edge still resolves without any sanction.
+    const cancel = evaluateTransition({
+      subject: publication,
+      targetState: "CANCELLED",
+      expectedVersion: 1,
+      execution,
+    });
+    expect(cancel.legal).toBe(true);
   });
 
   test("SPONSORSHIP IS NOT A SECOND LIFECYCLE AUTHORITY: the implementation has NO local transition machinery", async () => {

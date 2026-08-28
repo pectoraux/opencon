@@ -23,6 +23,10 @@ import {
   type NetW018Harness,
 } from "./_net-w018-harness.ts";
 import { DisclosureObligationsUnsatisfiedError } from "../../src/core/creators.ts";
+import {
+  IllegalTransitionError,
+  policyActionFor,
+} from "../../src/core/workflow.ts";
 
 const REPO = join(import.meta.dir, "../..");
 
@@ -500,5 +504,209 @@ describe("NET-W018-AC-04 the disclosure gate", () => {
       code: "DISCLOSURE_OBLIGATIONS_UNSATISFIED",
       context: { missingKinds: ["material_connection"] },
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE PR #36 REMEDIATION REGRESSION (architect CHANGES REQUESTED):
+// the publication DRAFT → VERIFIED transition is THE DISCLOSURE GATE
+// and must be unreachable through the GENERIC workflow transition
+// path. An authorized caller able to invoke
+// `publication.transition.draft_to_verified` through
+// /api/workflows/transitions must be REJECTED — the edge is not in
+// the generic table (structural), and only the creators domain's
+// publication-verification composite, presenting
+// PUBLICATION_VERIFICATION_SANCTION through the in-tx twin, can
+// resolve it.
+// ---------------------------------------------------------------------------
+
+describe("NET-W018-AC-04 the disclosure gate is UNREACHABLE through the generic workflow path (PR #36 remediation)", () => {
+  test("authorized direct generic transition + valid publication + UNSATISFIED obligations → REJECTED; publication remains DRAFT; NO verification audit", async () => {
+    // A valid DRAFT publication with UNSATISFIED obligations (the
+    // architect's regression scenario: exactly the state in which the
+    // generic path would have bypassed the disclosure derivation).
+    const publication = await createPublication(harness, {
+      requiredKinds: ["material_connection", "genuine_experience"],
+    });
+    const { evidenceId } = await createPublicationEvidence(
+      harness,
+      publication.id,
+    );
+
+    // The operator IS authorized for the policy action (the harness
+    // seeds the ALLOW policy) — authorization is deliberately NOT the
+    // thing under test. The generic transition request is rejected
+    // STRUCTURALLY: the verification edge does not exist for the
+    // generic path.
+    const attempt = harness.runtime.apiCommands.requestTransition(
+      operatorCtx(harness, "w018-ac04-generic-unsat"),
+      harness.operatorPersonId,
+      {
+        subjectId: publication.id,
+        subjectKind: "publication",
+        targetState: "VERIFIED",
+        expectedVersion: publication.version,
+        idempotencyKey: key("w018-ac04-generic-unsat"),
+        policyAction: policyActionFor("publication", "DRAFT", "VERIFIED"),
+      },
+    );
+    await expect(attempt).rejects.toBeInstanceOf(IllegalTransitionError);
+    const error = await attempt.catch((e) => e);
+    expect(error.code).toBe("ILLEGAL_TRANSITION");
+    // The rejection is PRECISE: it names the required sanction and
+    // records that none was presented.
+    expect(error.context.requiredSanction).toBe(
+      "creators.publication-verification",
+    );
+    expect(error.context.presentedSanction).toBeNull();
+
+    // NOTHING committed: the publication remains DRAFT with no
+    // verification bookkeeping…
+    const after = await harness.runtime.creatorSponsorshipService.getPublication(
+      operatorCtx(harness, "w018-ac04-generic-unsat-read"),
+      harness.organizationScopeId,
+      publication.id,
+    );
+    expect(after.state).toBe("DRAFT");
+    expect(after.version).toBe(publication.version);
+    expect(after.verifiedAt).toBeNull();
+    expect(after.publicationEvidenceReferences).toEqual([]);
+    // …and NO verification audit exists (neither the composite's
+    // publication.verified event nor the workflow transition event).
+    expect(
+      await harness.runtime.auditWriter.query({
+        eventType: "publication.verified",
+        resourceId: publication.id,
+      }),
+    ).toHaveLength(0);
+    expect(
+      await harness.runtime.auditWriter.query({
+        eventType: "publication.transition.draft_to_verified",
+        resourceId: publication.id,
+      }),
+    ).toHaveLength(0);
+
+    // The gate itself still holds for the sanctioned path: the
+    // composite on this publication (obligations still unsatisfied)
+    // rejects with the DISCLOSURE error — the obligations were never
+    // derivable away.
+    await expect(
+      harness.runtime.creatorSponsorshipService.verifyPublication(
+        operatorCtx(harness, "w018-ac04-generic-unsat-composite"),
+        {
+          organizationScopeId: harness.organizationScopeId,
+          publicationId: publication.id,
+          expectedVersion: publication.version,
+          evidenceReferences: [evidenceId],
+          idempotencyKey: key("w018-ac04-generic-unsat-composite"),
+        },
+      ),
+    ).rejects.toMatchObject({ code: "DISCLOSURE_OBLIGATIONS_UNSATISFIED" });
+  });
+
+  test("the block is STRUCTURAL, not obligation-dependent: obligations SATISFIED → generic path STILL REJECTED; the sanctioned composite then verifies the SAME publication", async () => {
+    // Stage a publication whose obligations are FULLY satisfied (the
+    // composite would pass the gate right now).
+    const publication = await createPublication(harness, {
+      requiredKinds: ["material_connection"],
+    });
+    await declareKind(harness, publication.id, "material_connection");
+    const { evidenceId } = await createPublicationEvidence(
+      harness,
+      publication.id,
+    );
+
+    // The generic transition STILL cannot verify — the edge is absent
+    // from the generic table REGARDLESS of the disclosure state.
+    const attempt = harness.runtime.apiCommands.requestTransition(
+      operatorCtx(harness, "w018-ac04-generic-sat"),
+      harness.operatorPersonId,
+      {
+        subjectId: publication.id,
+        subjectKind: "publication",
+        targetState: "VERIFIED",
+        expectedVersion: publication.version,
+        idempotencyKey: key("w018-ac04-generic-sat"),
+        policyAction: policyActionFor("publication", "DRAFT", "VERIFIED"),
+      },
+    );
+    await expect(attempt).rejects.toMatchObject({
+      code: "ILLEGAL_TRANSITION",
+      context: {
+        requiredSanction: "creators.publication-verification",
+        presentedSanction: null,
+      },
+    });
+    const after = await harness.runtime.creatorSponsorshipService.getPublication(
+      operatorCtx(harness, "w018-ac04-generic-sat-read"),
+      harness.organizationScopeId,
+      publication.id,
+    );
+    expect(after.state).toBe("DRAFT");
+    expect(after.verifiedAt).toBeNull();
+    expect(
+      await harness.runtime.auditWriter.query({
+        eventType: "publication.verified",
+        resourceId: publication.id,
+      }),
+    ).toHaveLength(0);
+
+    // The SANCTIONED path verifies the SAME publication through the
+    // composite (the only route to VERIFIED — via the derived gate).
+    const result =
+      await harness.runtime.creatorSponsorshipService.verifyPublication(
+        operatorCtx(harness, "w018-ac04-generic-sat-composite"),
+        {
+          organizationScopeId: harness.organizationScopeId,
+          publicationId: publication.id,
+          expectedVersion: publication.version,
+          evidenceReferences: [evidenceId],
+          idempotencyKey: key("w018-ac04-generic-sat-composite"),
+        },
+      );
+    expect(result.transition.executed).toBe(true);
+    expect(result.transition.auditEventName).toBe(
+      "publication.transition.draft_to_verified",
+    );
+    expect(result.publication.state).toBe("VERIFIED");
+    expect(result.publication.publicationEvidenceReferences).toEqual([
+      evidenceId,
+    ]);
+    expect(
+      await harness.runtime.auditWriter.query({
+        eventType: "publication.verified",
+        resourceId: publication.id,
+      }),
+    ).toHaveLength(1);
+  });
+
+  test("DRAFT → CANCELLED remains an ordinary GENERIC transition (withdrawal is not gated)", async () => {
+    // The remediation must not over-block: cancelling a publication
+    // through the generic workflow path keeps working.
+    const publication = await createPublication(harness, {
+      requiredKinds: ["material_connection"],
+    });
+    const result = await harness.runtime.apiCommands.requestTransition(
+      operatorCtx(harness, "w018-ac04-generic-cancel"),
+      harness.operatorPersonId,
+      {
+        subjectId: publication.id,
+        subjectKind: "publication",
+        targetState: "CANCELLED",
+        expectedVersion: publication.version,
+        idempotencyKey: key("w018-ac04-generic-cancel"),
+        policyAction: policyActionFor("publication", "DRAFT", "CANCELLED"),
+      },
+    );
+    expect(result.state).toBe("CANCELLED");
+    expect(result.auditEventName).toBe(
+      "publication.transition.draft_to_cancelled",
+    );
+    const after = await harness.runtime.creatorSponsorshipService.getPublication(
+      operatorCtx(harness, "w018-ac04-generic-cancel-read"),
+      harness.organizationScopeId,
+      publication.id,
+    );
+    expect(after.state).toBe("CANCELLED");
   });
 });

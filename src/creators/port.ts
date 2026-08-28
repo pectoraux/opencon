@@ -87,6 +87,7 @@ import type {
   LifecycleSubject,
   TransitionRequest,
   TransitionResult,
+  WorkflowTransitionSanction,
 } from "../core/workflow.ts";
 import type {
   CampaignDisclosureKind,
@@ -2464,6 +2465,14 @@ export interface CampaignDisclosurePolicyLookup {
  * the authorized DRAFT → VERIFIED transition IN-TX — /workflows
  * stays the SOLE lifecycle authority and the material verification
  * bookkeeping AND the transition commit as ONE authoritative unit.
+ *
+ * THE SANCTION (the PR #36 remediation — architect CHANGES
+ * REQUESTED): the publication DRAFT → VERIFIED edge is a SANCTIONED
+ * transition — it is NOT requestable through the generic workflow
+ * transition surface. It resolves ONLY when the composite invokes
+ * this twin with `PUBLICATION_VERIFICATION_SANCTION`
+ * (src/core/workflow.ts), which `verifyPublication` does. No caller
+ * — however authorized — can reach the edge directly.
  */
 export interface SponsorshipWorkflowPort {
   requestTransitionWithinTx(
@@ -2471,6 +2480,7 @@ export interface SponsorshipWorkflowPort {
     execution: ExecutionContext,
     tx: AuthorityTransaction,
     idempotencyRecordId: string,
+    sanction?: WorkflowTransitionSanction,
   ): Promise<TransitionResult>;
 }
 

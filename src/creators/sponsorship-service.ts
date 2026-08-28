@@ -65,7 +65,10 @@ import type { IdempotencyStore } from "../core/idempotency.ts";
 import { AuthorizationError, NotFoundError, OpenConError } from "../core/errors.ts";
 import type { Logger } from "../core/logger.ts";
 import type { AuthorityTransaction } from "../core/postgres-authority.ts";
-import { policyActionFor } from "../core/workflow.ts";
+import {
+  PUBLICATION_VERIFICATION_SANCTION,
+  policyActionFor,
+} from "../core/workflow.ts";
 import { isCampaignDisclosureKind } from "../core/campaigns.ts";
 import type { CampaignDisclosureKind } from "../core/campaigns.ts";
 import {
@@ -1176,6 +1179,17 @@ export function createCreatorSponsorshipService(
             // rejection here rolls the verification bookkeeping back
             // with everything else (composite atomicity — the W017
             // remediation precedent applied from the start).
+            //
+            // THE SANCTION (the PR #36 remediation decision of
+            // record): publication DRAFT → VERIFIED is a SANCTIONED
+            // edge — it is structurally ABSENT from the generic
+            // transition table, so NO caller (however authorized)
+            // can request it through requestTransition or
+            // /api/workflows/transitions. It resolves ONLY here,
+            // through the in-tx twin invoked with
+            // PUBLICATION_VERIFICATION_SANCTION AFTER the gate
+            // derivation above proved every obligation satisfied.
+            // THIS call site is the disclosure gate.
             const transition = await workflow.requestTransitionWithinTx(
               {
                 subjectId: recorded.id,
@@ -1207,6 +1221,7 @@ export function createCreatorSponsorshipService(
               execution,
               tx,
               ctx.recordId,
+              PUBLICATION_VERIFICATION_SANCTION,
             );
             // The post-transition record (in-tx read sees the
             // transition's save: state VERIFIED, version+1, WITH the

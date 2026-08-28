@@ -29,7 +29,12 @@ import {
   type LifecycleSubjectKind,
 } from "../core/workflow.ts";
 import type { ExecutionContext } from "../core/execution-context.ts";
-import { findRule, type TransitionRule } from "./transition-table.ts";
+import {
+  findRule,
+  findSanctionedRule,
+  sanctionRequiredFor,
+  type TransitionRule,
+} from "./transition-table.ts";
 
 /**
  * Inputs to evaluateTransition.
@@ -44,12 +49,22 @@ import { findRule, type TransitionRule } from "./transition-table.ts";
  *   not by the pure state machine — the state machine only checks
  *   legality (is the transition enumerated?).
  * - `execution`: the request's execution context (carried for lineage).
+ * - `sanction`: the transition sanction presented by the CALLER OF THE
+ *   EVALUATOR (the PR #36 remediation). The GENERIC path
+ *   (`WorkflowService.requestTransition`) NEVER presents one — it
+ *   structurally cannot resolve SANCTIONED edges (e.g. publication
+ *   DRAFT → VERIFIED, the disclosure gate). Only the in-transaction
+ *   composition twin invoked with a matching sanction by the owning
+ *   composite (e.g. the creators domain's publication-verification
+ *   composite presenting `PUBLICATION_VERIFICATION_SANCTION`) can
+ *   resolve a sanctioned edge.
  */
 export interface EvaluateTransitionInput {
   readonly subject: LifecycleSubject;
   readonly targetState: LifecycleState;
   readonly expectedVersion: number;
   readonly execution: ExecutionContext;
+  readonly sanction?: string;
 }
 
 /**
@@ -102,9 +117,45 @@ export function evaluateTransition(input: EvaluateTransitionInput): EvaluateTran
     };
   }
 
-  // 2) Look up the rule for this (from, to) pair.
-  const rule = findRule(kind, subject.state, targetState);
+  // 2) Look up the rule for this (from, to) pair. The GENERIC table
+  //    first; then — ONLY when the evaluator's caller presented a
+  //    sanction — the sanctioned table with an EXACT sanction match
+  //    (the PR #36 remediation: sanctioned edges such as publication
+  //    DRAFT → VERIFIED are invisible to the generic path and resolve
+  //    exclusively for the sanctioned composite).
+  const rule =
+    findRule(kind, subject.state, targetState) ??
+    (input.sanction !== undefined
+      ? findSanctionedRule(kind, subject.state, targetState, input.sanction)
+      : null);
   if (!rule) {
+    // A sanctioned edge requested WITHOUT (or with the wrong)
+    // sanction gets a PRECISE rejection naming the required sanction
+    // — an authorized caller attempting the generic path learns the
+    // edge exists only through the owning composite.
+    const requiredSanction = sanctionRequiredFor(
+      kind,
+      subject.state,
+      targetState,
+    );
+    if (requiredSanction !== null) {
+      return {
+        legal: false,
+        error: new IllegalTransitionError(
+          `illegal transition for ${kind} ${subject.id}: ${subject.state} → ${targetState} is a SANCTIONED transition (sanction "${requiredSanction}") — it is executable only by the sanctioned composite through the in-transaction workflow twin, never through the generic transition path`,
+          {
+            subjectId: subject.id,
+            subjectKind: kind,
+            fromState: subject.state,
+            toState: targetState,
+            requiredSanction,
+            presentedSanction: input.sanction ?? null,
+            executionId: execution.executionId,
+            correlationId: execution.correlationId,
+          },
+        ),
+      };
+    }
     return {
       legal: false,
       error: new IllegalTransitionError(

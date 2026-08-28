@@ -2192,13 +2192,23 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     // transitions, exactly as for engagements). The verification
     // composite executes the transition IN-TX through the sanctioned
     // twin so the material bookkeeping + the transition commit as
-    // ONE authoritative unit.
-    async requestTransitionWithinTx(request, execution, tx, idempotencyRecordId) {
+    // ONE authoritative unit. The `sanction` argument passes through
+    // VERBATIM: the DRAFT → VERIFIED edge resolves only for the
+    // composite presenting PUBLICATION_VERIFICATION_SANCTION (the
+    // PR #36 remediation); the generic path passes no sanction.
+    async requestTransitionWithinTx(
+      request,
+      execution,
+      tx,
+      idempotencyRecordId,
+      sanction,
+    ) {
       return workflowService.requestTransitionWithinTx(
         request,
         execution,
         tx,
         idempotencyRecordId,
+        sanction,
       );
     },
   };
