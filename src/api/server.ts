@@ -3539,6 +3539,316 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // ------------------------------------------------------------------
+    // NET-W019 — Inventory and placements (supply registration,
+    // placement context, supply authorization, source provenance).
+    // ------------------------------------------------------------------
+
+    // POST /api/inventory/items — register supply (protected; guard
+    // action inventory.items.register; the acting person BECOMES the
+    // registered owner — there is no ownerPersonId input).
+    if (path === "/api/inventory/items" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "inventory.items.register",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.registerInventoryItem(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          surfaceKind: strField(obj, "surfaceKind"),
+          format: strField(obj, "format"),
+          ...(obj.externalReference !== undefined &&
+          obj.externalReference !== null
+            ? { externalReference: obj.externalReference }
+            : {}),
+          attributes: obj.attributes,
+          ...(obj.description !== undefined && obj.description !== null
+            ? { description: obj.description as string }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/inventory/items/:id/retirement — withdraw supply
+    // (one-way, owner-only; protected; guard action
+    // inventory.items.retire).
+    if (
+      path.startsWith("/api/inventory/items/") &&
+      path.endsWith("/retirement") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/inventory/items/".length,
+        -"/retirement".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "inventory.items.retire",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.retireInventoryItem(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          itemId: id,
+          ...(obj.reason !== undefined && obj.reason !== null
+            ? { reason: obj.reason as string }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/inventory/items/:id/supply-verification — attach the
+    // supply-verification evidence reference (owner-only, one-time;
+    // protected; guard action inventory.items.attachSupplyVerification;
+    // the reference must be subject-bound to THIS item).
+    if (
+      path.startsWith("/api/inventory/items/") &&
+      path.endsWith("/supply-verification") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/inventory/items/".length,
+        -"/supply-verification".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "inventory.items.attachSupplyVerification",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.attachSupplyVerification(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          itemId: id,
+          evidenceReference: strField(obj, "evidenceReference"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/inventory/placements — record the placement context
+    // (protected; guard action inventory.placements.create; the
+    // acting person must be the item's registered owner —
+    // server-enforced; the eligibility evaluation is DERIVED).
+    if (path === "/api/inventory/placements" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "inventory.placements.create",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createPlacement(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          inventoryItemId: strField(obj, "inventoryItemId"),
+          campaignId: strField(obj, "campaignId"),
+          ...(obj.campaignPolicyVersion !== undefined &&
+          obj.campaignPolicyVersion !== null
+            ? { campaignPolicyVersion: obj.campaignPolicyVersion as number }
+            : {}),
+          context: obj.context,
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/inventory/placements/:id/retirement — retire the
+    // placement (one-way, owner-only; protected; guard action
+    // inventory.placements.retire).
+    if (
+      path.startsWith("/api/inventory/placements/") &&
+      path.endsWith("/retirement") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/inventory/placements/".length,
+        -"/retirement".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "inventory.placements.retire",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.retirePlacement(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          placementId: id,
+          ...(obj.reason !== undefined && obj.reason !== null
+            ? { reason: obj.reason as string }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // GET /api/inventory/placements/:id/settlement-readiness — THE
+    // SETTLEMENT GATE: the DERIVED settlement readiness of one
+    // placement (public; tenant-scoped; re-derived from CURRENT
+    // durable records on every read — never stored, never asserted).
+    if (
+      path.startsWith("/api/inventory/placements/") &&
+      path.endsWith("/settlement-readiness") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice(
+        "/api/inventory/placements/".length,
+        -"/settlement-readiness".length,
+      );
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const view = await opts.commands.getPlacementSettlementReadiness(
+        ctx,
+        organizationScopeId,
+        id,
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/inventory/items/:id — one inventory item (public;
+    // tenant-scoped; a cross-scope id is not found).
+    if (
+      path.startsWith("/api/inventory/items/") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/inventory/items/".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const view = await opts.commands.getInventoryItem(
+        ctx,
+        organizationScopeId,
+        id,
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/inventory/items — an org's inventory items (public;
+    // tenant-scoped; optional surfaceKind/format/ownerPersonId/retired
+    // filters).
+    if (
+      path === "/api/inventory/items" &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const retiredParam = url.searchParams.get("retired");
+      const views = await opts.commands.listInventoryItems(
+        ctx,
+        organizationScopeId,
+        url.searchParams.get("surfaceKind") ?? undefined,
+        url.searchParams.get("format") ?? undefined,
+        url.searchParams.get("ownerPersonId") ?? undefined,
+        retiredParam === null ? undefined : retiredParam === "true",
+      );
+      await send(res, 200, { organizationScopeId, items: views });
+      return true;
+    }
+
+    // GET /api/inventory/placements/:id — one placement (public;
+    // tenant-scoped; a cross-scope id is not found).
+    if (
+      path.startsWith("/api/inventory/placements/") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/inventory/placements/".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const view = await opts.commands.getPlacement(
+        ctx,
+        organizationScopeId,
+        id,
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/inventory/placements — an org's placements (public;
+    // tenant-scoped; optional inventoryItemId/campaignId/
+    // ownerPersonId/retired filters).
+    if (
+      path === "/api/inventory/placements" &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const retiredParam = url.searchParams.get("retired");
+      const views = await opts.commands.listPlacements(
+        ctx,
+        organizationScopeId,
+        url.searchParams.get("inventoryItemId") ?? undefined,
+        url.searchParams.get("campaignId") ?? undefined,
+        url.searchParams.get("ownerPersonId") ?? undefined,
+        retiredParam === null ? undefined : retiredParam === "true",
+      );
+      await send(res, 200, { organizationScopeId, placements: views });
+      return true;
+    }
+
     // GET /api/creators/engagements/:id — one engagement (public;
     // tenant-scoped; a cross-scope id is not found).
     if (

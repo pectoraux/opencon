@@ -152,7 +152,28 @@ const NET_W011_DOMAINS = ["campaigns"];
 // work order §2 authority separation).
 const NET_W015_DOMAINS = ["creators"];
 
-// Domains still deferred past NET-W015 (must remain skeletons).
+// Domains implemented in NET-W019 (no longer skeletons). The inventory
+// domain (the Phase-5 Inventory boundary) carries the INVENTORY
+// DOMAIN: first-class registered supply records with explicit
+// ownership (the acting person at registration — no owner input
+// exists), provider-neutral external references, declared supply
+// attributes, the optional canonical supply-verification evidence
+// signal (subject-bound references), policy-scoped placement-context
+// records with server-written provenance snapshots and the DERIVED
+// placement-eligibility evaluation (the pure engine over the pinned
+// campaign policy version's rules), and the DERIVED
+// settlement-readiness source-context gate (INV-004 — re-derived
+// from durable records on every read, never stored or asserted). It
+// introduces NO economically material behaviour (NO economic command
+// exists — /settlement stays the economic authority), NO lifecycle
+// mutation (items and placements carry NO lifecycle subject kind —
+// /workflows is untouched; withdrawal/retirement are one-way field
+// mutations), NO campaign-policy authority (the policy scope arrives
+// through the neutral lookup) and NO provider-specific platform
+// semantics (NET-W019 work order §2 authority separation).
+const NET_W019_DOMAINS = ["inventory"];
+
+// Domains still deferred past NET-W019 (must remain skeletons).
 const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
   (d) =>
     !NET_W002_DOMAINS.includes(d) &&
@@ -163,7 +184,8 @@ const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
     !NET_W008_DOMAINS.includes(d) &&
     !NET_W009_DOMAINS.includes(d) &&
     !NET_W011_DOMAINS.includes(d) &&
-    !NET_W015_DOMAINS.includes(d),
+    !NET_W015_DOMAINS.includes(d) &&
+    !NET_W019_DOMAINS.includes(d),
 );
 
 // Patterns that would indicate economically/material domain logic,
@@ -376,6 +398,27 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
       // /workflows per the NET-W011 work order §4).
       expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
       expect(moduleExport.describe?.() ?? "").toMatch(/NET-W011/);
+    }
+  });
+
+  test("NET-W019 domain modules are non-skeletal (tier domain, no 'skeleton' marker, reference NET-W019)", async () => {
+    for (const dir of NET_W019_DOMAINS) {
+      const modulePath = join(SRC, dir, "module.ts");
+      expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
+      const mod = await import(`../../src/${dir}/module.ts`);
+      const moduleExport = Object.values(mod)[0] as {
+        name: string;
+        tier: string;
+        describe?: () => string;
+      };
+      expect(moduleExport.tier).toBe("domain");
+      // NET-W019 modules are no longer skeletons — the inventory
+      // boundary carries the inventory domain (registered supply +
+      // placement context; the settlement gate is derived and NO
+      // economic command exists; lifecycle stays with /workflows per
+      // the NET-W019 work order §2).
+      expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
+      expect(moduleExport.describe?.() ?? "").toMatch(/NET-W019/);
     }
   });
 
