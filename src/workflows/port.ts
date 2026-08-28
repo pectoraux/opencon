@@ -50,6 +50,7 @@ import type {
   LifecycleSubjectKind,
   TransitionRequest,
   TransitionResult,
+  WorkflowTransitionSanction,
 } from "../core/workflow.ts";
 
 /**
@@ -149,6 +150,11 @@ export interface TransitionAuthorizer {
  * spec/work-orders/NET-W017.md §3.1) transitions through the SAME
  * machinery — acceptance/production execute through the canonical
  * workflow authority, never a second lifecycle engine.
+ * NET-W018 adds the PUBLICATION lifecycle repository: the creator
+ * publication lifecycle (DRAFT → VERIFIED + CANCELLED,
+ * spec/work-orders/NET-W018.md §3.4) transitions through the SAME
+ * machinery — the DRAFT → VERIFIED transition is the disclosure
+ * gate composite (creators domain) composed through the in-tx twin.
  */
 export interface WorkflowServiceDeps {
   /** Opportunity lifecycle repository (used for opportunity transitions). */
@@ -161,6 +167,8 @@ export interface WorkflowServiceDeps {
   readonly outcomeMeasurementRepository: LifecycleRepository;
   /** Engagement lifecycle repository (used for engagement transitions). */
   readonly engagementRepository: LifecycleRepository;
+  /** Publication lifecycle repository (used for publication transitions). */
+  readonly publicationRepository: LifecycleRepository;
   /** Server-side authorization (deny-by-default). */
   readonly authorizer: TransitionAuthorizer;
   /**
@@ -264,6 +272,21 @@ export interface WorkflowService {
    * still executes exclusively through the shared `performTransition`
    * path below (one state machine, no divergent copy).
    *
+   * SANCTIONED EDGES (the PR #36 remediation — architect CHANGES
+   * REQUESTED on NET-W018): certain transitions (currently exactly
+   * one: publication DRAFT → VERIFIED, THE DISCLOSURE GATE) are NOT
+   * requestable through the generic `requestTransition` surface —
+   * their preconditions can only be derived by one specific
+   * composite inside its own authoritative transaction. Such edges
+   * resolve ONLY when this twin is invoked with the EXACT matching
+   * `sanction` constant (see src/core/workflow.ts —
+   * WORKFLOW_TRANSITION_SANCTIONS) by the owning composite. The
+   * generic path passes no sanction, so a caller — however
+   * authorized — cannot reach a sanctioned edge through
+   * `/api/workflows/transitions`; the state machine rejects it as
+   * IllegalTransitionError (structurally — the edge is absent from
+   * the generic table).
+   *
    * Throws the same errors as `requestTransition` (the rollback of the
    * caller's transaction is the caller's — via the idempotency store).
    */
@@ -272,6 +295,7 @@ export interface WorkflowService {
     execution: ExecutionContext,
     tx: AuthorityTransaction,
     idempotencyRecordId: string,
+    sanction?: WorkflowTransitionSanction,
   ): Promise<TransitionResult>;
 }
 
@@ -279,7 +303,7 @@ export interface WorkflowService {
  * The WorkflowsPort describes the boundary's readiness. After NET-W004
  * it is `"ready"` (the boundary now carries the authoritative workflow
  * service + transition table). NET-W017 adds the engagement audit
- * namespace (additive).
+ * namespace; NET-W018 adds the publication audit namespace (additive).
  */
 export interface WorkflowsPort {
   readonly boundary: "workflows";
@@ -290,7 +314,8 @@ export interface WorkflowsPort {
     readonly proofOfValue: "proof_of_value.transition";
     readonly outcomeMeasurement: "outcome_measurement.transition";
     readonly engagement: "engagement.transition";
+    readonly publication: "publication.transition";
   };
 }
 
-export type { ExecutionContext, AuthorityTransaction, LifecycleSubject, LifecycleSubjectKind, TransitionRequest, TransitionResult, TransactionalAuditWriter };
+export type { ExecutionContext, AuthorityTransaction, LifecycleSubject, LifecycleSubjectKind, TransitionRequest, TransitionResult, TransactionalAuditWriter, WorkflowTransitionSanction };

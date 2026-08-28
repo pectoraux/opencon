@@ -65,6 +65,7 @@ import { createAuthorityContributionRepository } from "../../src/contributions/a
 import { createAuthorityProofOfValueRepository } from "../../src/evidence/authority-proof-of-value-repository.ts";
 import { createAuthorityMeasuredOutcomeRepository } from "../../src/outcomes/authority-measured-outcome-repository.ts";
 import { createAuthorityEngagementRepository } from "../../src/creators/authority-engagement-repositories.ts";
+import { createAuthorityPublicationRepository } from "../../src/creators/authority-sponsorship-repositories.ts";
 import { createPostgresIdempotencyStore } from "../../src/persistence/idempotency-store.ts";
 import type { PostgresAuthorityShim } from "../../src/persistence/postgres-authority-shim.ts";
 import type { TransitionAuthorizer } from "../../src/workflows/port.ts";
@@ -112,6 +113,10 @@ function buildWorkflow(
     // NET-W017: same for engagement transitions.
     engagementRepository: createLifecycleRepository(
       createAuthorityEngagementRepository({ authority: runtime.postgresAuthority }),
+    ),
+    // NET-W018: same for publication transitions.
+    publicationRepository: createLifecycleRepository(
+      createAuthorityPublicationRepository({ authority: runtime.postgresAuthority }),
     ),
     authorizer: allowAllAuthorizer,
     auditWriter,

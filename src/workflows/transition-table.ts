@@ -49,15 +49,21 @@ import type {
   ExceptionalLifecycleState,
   LifecycleState,
   LifecycleSubjectKind,
+  WorkflowTransitionSanction,
 } from "../core/workflow.ts";
 // NET-W005: the pure policy-action/audit-event string builders moved to
 // CORE (src/core/workflow.ts) so domain services that REQUEST
 // transitions (the evidence domain's PoV service) derive IDENTICAL
 // actions without importing the workflows domain. Re-exported here for
 // existing consumers.
-import { policyActionFor, auditEventFor } from "../core/workflow.ts";
+import {
+  policyActionFor,
+  auditEventFor,
+  PUBLICATION_VERIFICATION_SANCTION,
+} from "../core/workflow.ts";
 
 export { policyActionFor, auditEventFor };
+export { PUBLICATION_VERIFICATION_SANCTION };
 
 /**
  * A single legal transition rule. Every entry in the transition table
@@ -537,6 +543,128 @@ export const ENGAGEMENT_TRANSITION_TABLE: readonly TransitionRule[] = [
 ];
 
 /**
+ * The exhaustive GENERIC transition table for creator PUBLICATIONS
+ * (NET-W018 §3.4, as remediated on PR #36 — architect CHANGES
+ * REQUESTED: the verification transition must be unreachable through
+ * the generic workflow path). The publication is the workflow-mediated
+ * record of creator content going live on a channel; its lifecycle
+ * REUSES the canonical state vocabulary (the W005/W006 precedent —
+ * the state universe stays small, the workflow machinery is
+ * untouched):
+ *
+ *   DRAFT    — publication recorded (verified engagement + production
+ *              + provider-neutral channel), disclosure obligations
+ *              pending
+ *   VERIFIED — terminal: publication VERIFIED — the applicable
+ *              disclosure obligations are satisfied and canonical,
+ *              subject-bound publication evidence is recorded
+ *   CANCELLED — terminal: withdrawn before verification
+ *
+ * THE DISCLOSURE GATE (work order §2/§4 — the decision of record):
+ * the DRAFT → VERIFIED transition is requested ONLY by the creators
+ * domain's publication-verification composite AFTER it derives the
+ * applicable disclosure obligations (campaign policy ∪ commercial-
+ * relationship obligations — DURABLE RECORDS, never caller claims)
+ * and proves every obligation satisfied by an evidence-bound
+ * declaration for THIS publication. The workflow table itself stays
+ * PURE routing (the W004 stance: `requiresEvidenceReference`
+ * DECLARES the evidence-backed nature); the gate evaluation lives in
+ * the creators domain service (src/creators/sponsorship-service.ts)
+ * and composes the transition through the in-tx twin so the material
+ * record + the gate + the transition commit as ONE authoritative
+ * transaction (the NET-W017 remediation precedent).
+ *
+ * STRUCTURAL ENFORCEMENT (the PR #36 remediation decision of record):
+ * the DRAFT → VERIFIED edge is NOT in this generic table — it lives
+ * ONLY in PUBLICATION_SANCTIONED_TRANSITION_TABLE below. `findRule`
+ * (the sole resolver behind `WorkflowService.requestTransition` and
+ * the `/api/workflows/transitions` endpoint) reads ONLY the generic
+ * tables, so an authorized caller requesting
+ * `publication.transition.draft_to_verified` through the generic
+ * path is rejected as IllegalTransitionError REGARDLESS of the
+ * disclosure obligations — the edge simply does not exist for that
+ * path. The edge resolves exclusively through
+ * `findSanctionedRule(..., sanction)` when the in-transaction
+ * composition twin is invoked WITH `PUBLICATION_VERIFICATION_SANCTION`
+ * by the verification composite. `DRAFT → CANCELLED` remains an
+ * ordinary generic transition (withdrawal is a plain lifecycle act
+ * with no derivation behind it).
+ *
+ * No BLOCKED/FRAUD_REVIEW/DISPUTED states for the publication: risk
+ * escalation (e.g. a challenged disclosure) is a /disputes case
+ * referencing the publication, not a local lifecycle branch (the
+ * PoV/measured-outcome/engagement precedent).
+ */
+export const PUBLICATION_TRANSITION_TABLE: readonly TransitionRule[] = [
+  {
+    from: "DRAFT",
+    to: "CANCELLED",
+    policyAction: policyActionFor("publication", "DRAFT", "CANCELLED"),
+    auditEventName: auditEventFor("publication", "DRAFT", "CANCELLED"),
+  },
+  // DRAFT → VERIFIED is deliberately ABSENT: it is the sanctioned
+  // disclosure-gate edge (see PUBLICATION_SANCTIONED_TRANSITION_TABLE)
+  // and cannot be requested through the generic transition path.
+  // VERIFIED / CANCELLED are terminal: the table intentionally
+  // contains no rule whose source is a terminal state. Retraction
+  // AFTER verification is an explicit non-goal (a /disputes case + a
+  // later work item own post-publication semantics).
+];
+
+/**
+ * A SANCTIONED transition rule — an edge that is NOT requestable
+ * through the generic transition surface (`requestTransition` / the
+ * `/api/workflows/transitions` endpoint) because its preconditions
+ * can only be derived by one specific composite inside its own
+ * authoritative transaction. The edge resolves ONLY when the
+ * in-transaction composition twin is invoked with the EXACT matching
+ * {@link sanction} constant by the owning composite (see
+ * src/core/workflow.ts — the sanction vocabulary).
+ */
+export interface SanctionedTransitionRule extends TransitionRule {
+  /**
+   * The sanction that unlocks this edge — a frozen core constant
+   * naming the single composite sanctioned to execute it (e.g.
+   * `PUBLICATION_VERIFICATION_SANCTION` → the creators domain's
+   * publication-verification composite).
+   */
+  readonly sanction: WorkflowTransitionSanction;
+}
+
+/**
+ * The exhaustive SANCTIONED transition table (the PR #36 remediation
+ * — architect CHANGES REQUESTED on NET-W018: "make publication
+ * DRAFT → VERIFIED available only through the sanctioned creators
+ * composite / in-transaction workflow twin").
+ *
+ * Currently exactly ONE edge: the publication disclosure gate. The
+ * verification transition carries the same policy action + audit
+ * event name it always had (`publication.transition.draft_to_verified`)
+ * and still declares `requiresEvidenceReference` (the W004 stance) —
+ * but the edge is resolvable ONLY through
+ * `WorkflowService.requestTransitionWithinTx` invoked with
+ * `PUBLICATION_VERIFICATION_SANCTION` by the creators domain's
+ * verification composite (src/creators/sponsorship-service.ts), which
+ * derives + proves the disclosure obligations IN THE SAME
+ * authoritative transaction (the gate).
+ */
+export const PUBLICATION_SANCTIONED_TRANSITION_TABLE: readonly SanctionedTransitionRule[] =
+  [
+    {
+      from: "DRAFT",
+      to: "VERIFIED",
+      policyAction: policyActionFor("publication", "DRAFT", "VERIFIED"),
+      auditEventName: auditEventFor("publication", "DRAFT", "VERIFIED"),
+      // Requires ≥1 subject-bound canonical publication-evidence
+      // reference AND every applicable disclosure obligation satisfied
+      // (validated by the creators domain's verification composite
+      // BEFORE the transition is requested — the disclosure gate).
+      requiresEvidenceReference: true,
+      sanction: PUBLICATION_VERIFICATION_SANCTION,
+    },
+  ];
+
+/**
  * Look up the transition table for a subject kind.
  */
 export function transitionTableFor(
@@ -548,12 +676,18 @@ export function transitionTableFor(
   if (subjectKind === "outcome_measurement") {
     return OUTCOME_MEASUREMENT_TRANSITION_TABLE;
   }
+  if (subjectKind === "publication") return PUBLICATION_TRANSITION_TABLE;
   return ENGAGEMENT_TRANSITION_TABLE;
 }
 
 /**
  * Find the legal rule for a (subjectKind, from, to) triple. Returns null
  * when no rule exists — the state machine rejects as IllegalTransitionError.
+ *
+ * GENERIC RESOLVER: reads ONLY the generic tables. Sanctioned edges
+ * (e.g. publication DRAFT → VERIFIED) are deliberately ABSENT here —
+ * they resolve exclusively through {@link findSanctionedRule} (the
+ * PR #36 remediation decision of record).
  */
 export function findRule(
   subjectKind: LifecycleSubjectKind,
@@ -568,10 +702,69 @@ export function findRule(
 }
 
 /**
- * Return all legal target states from a given source state for a
- * subject kind. Used by tests to exhaustively assert "every legal
- * transition succeeds" (AC-03) and "every illegal transition is
- * rejected" (AC-03).
+ * Find the SANCTIONED rule for a (subjectKind, from, to, sanction)
+ * quadruple. Returns null unless a sanctioned rule exists whose
+ * `sanction` EXACTLY equals the provided constant — a sanctioned edge
+ * with a missing or mismatched sanction does not resolve (it is
+ * illegal for that caller, exactly like an unlisted edge).
+ *
+ * This is the ONLY resolver that can see sanctioned edges, and the
+ * ONLY caller path that reaches it is the in-transaction composition
+ * twin (`WorkflowService.requestTransitionWithinTx`) invoked with an
+ * explicit sanction by the owning composite. The generic
+ * `requestTransition` path never passes a sanction, so it can never
+ * resolve a sanctioned edge — structurally (the PR #36 remediation:
+ * the publication disclosure gate cannot be bypassed through
+ * `/api/workflows/transitions`).
+ */
+export function findSanctionedRule(
+  subjectKind: LifecycleSubjectKind,
+  from: LifecycleState,
+  to: LifecycleState,
+  sanction: string,
+): SanctionedTransitionRule | null {
+  if (subjectKind !== "publication") return null;
+  for (const rule of PUBLICATION_SANCTIONED_TRANSITION_TABLE) {
+    if (
+      rule.from === from &&
+      rule.to === to &&
+      rule.sanction === sanction
+    ) {
+      return rule;
+    }
+  }
+  return null;
+}
+
+/**
+ * The sanction REQUIRED to execute a (subjectKind, from, to) edge, if
+ * that edge exists ONLY as a sanctioned rule. Returns null when the
+ * edge is generic (or does not exist at all). Used by the state
+ * machine to produce a PRECISE rejection message when a caller
+ * requests a sanctioned edge without (or with the wrong) sanction —
+ * the error names the sanction and states that the edge is available
+ * only through the owning composite.
+ */
+export function sanctionRequiredFor(
+  subjectKind: LifecycleSubjectKind,
+  from: LifecycleState,
+  to: LifecycleState,
+): WorkflowTransitionSanction | null {
+  if (subjectKind !== "publication") return null;
+  for (const rule of PUBLICATION_SANCTIONED_TRANSITION_TABLE) {
+    if (rule.from === from && rule.to === to) return rule.sanction;
+  }
+  return null;
+}
+
+/**
+ * Return all GENERIC legal target states from a given source state
+ * for a subject kind — the targets reachable through the ordinary
+ * transition surface. SANCTIONED edges are deliberately excluded
+ * (they are not caller-requestable; see
+ * {@link PUBLICATION_SANCTIONED_TRANSITION_TABLE}). Used by tests to
+ * exhaustively assert "every legal transition succeeds" (AC-03) and
+ * "every illegal transition is rejected" (AC-03).
  */
 export function legalTargets(
   subjectKind: LifecycleSubjectKind,

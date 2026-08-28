@@ -26,6 +26,7 @@ import { createTransactionalAuditWriter } from "../../src/audit/transactional-au
 import { createWorkflowService } from "../../src/workflows/workflow-service.ts";
 import { createLifecycleRepository } from "../../src/workflows/lifecycle-repository.ts";
 import { createAuthorityEngagementRepository } from "../../src/creators/authority-engagement-repositories.ts";
+import { createAuthorityPublicationRepository } from "../../src/creators/authority-sponsorship-repositories.ts";
 import { createAuthorityOpportunityRepository } from "../../src/opportunities/authority-opportunity-repository.ts";
 import { createAuthorityContributionRepository } from "../../src/contributions/authority-contribution-repository.ts";
 import { createAuthorityProofOfValueRepository } from "../../src/evidence/authority-proof-of-value-repository.ts";
@@ -382,6 +383,10 @@ describe("NET-W006-AC-06 atomicity/idempotency/concurrency", () => {
       ),
       engagementRepository: createLifecycleRepository(
         createAuthorityEngagementRepository({ authority: harness.runtime.postgresAuthority }),
+      ),
+      // NET-W018: same shape the runtime wires for publications.
+      publicationRepository: createLifecycleRepository(
+        createAuthorityPublicationRepository({ authority: harness.runtime.postgresAuthority }),
       ),
       outcomeMeasurementRepository: createLifecycleRepository(
         createAuthorityMeasuredOutcomeRepository({ authority: failingAuthority }),

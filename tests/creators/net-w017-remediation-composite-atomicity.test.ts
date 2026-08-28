@@ -499,6 +499,12 @@ describe("NET-W017 remediation — composite atomicity (fault injection)", () =>
           }),
         ),
         engagementRepository: createLifecycleRepository(failingEngagementRepo),
+        // NET-W018: same shape the runtime wires for publications.
+        publicationRepository: createLifecycleRepository(
+          createAuthorityEngagementRepository({
+            authority: failingAuthority,
+          }),
+        ),
         authorizer: allowAllAuthorizer,
         auditWriter: harness.runtime.auditWriter,
         idempotency: failingIdempotency,

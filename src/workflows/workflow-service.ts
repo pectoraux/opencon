@@ -83,6 +83,7 @@ import type {
   LifecycleSubject,
   TransitionRequest,
   TransitionResult,
+  WorkflowTransitionSanction,
 } from "../core/workflow.ts";
 import {
   LifecycleSubjectNotFoundError,
@@ -123,6 +124,7 @@ export function createWorkflowService(
     proofOfValueRepository,
     outcomeMeasurementRepository,
     engagementRepository,
+    publicationRepository,
     authorizer,
     auditWriter,
     idempotency,
@@ -134,6 +136,7 @@ export function createWorkflowService(
     if (kind === "contribution") return contributionRepository;
     if (kind === "proof_of_value") return proofOfValueRepository;
     if (kind === "outcome_measurement") return outcomeMeasurementRepository;
+    if (kind === "publication") return publicationRepository;
     return engagementRepository;
   }
 
@@ -169,6 +172,7 @@ export function createWorkflowService(
     execution: ExecutionContext,
     tx: AuthorityTransaction,
     idempotencyRecordId: string,
+    sanction?: WorkflowTransitionSanction,
   ): Promise<TransitionResult> {
     const repo = repositoryFor(request.subjectKind);
     // The transactional audit buffer bound to the SAME authoritative
@@ -236,12 +240,21 @@ export function createWorkflowService(
       );
     }
 
-    // c. Evaluate transition legality (pure state machine).
+    // c. Evaluate transition legality (pure state machine). The
+    //    `sanction` (when the in-tx composition twin's caller
+    //    presented one — the ONLY path that can) unlocks SANCTIONED
+    //    edges such as publication DRAFT → VERIFIED, the NET-W018
+    //    disclosure gate. The generic `requestTransition` path below
+    //    passes NO sanction, so sanctioned edges are structurally
+    //    unresolvable there (the PR #36 remediation decision of
+    //    record: no caller — however authorized — can bypass the
+    //    gate through the generic workflow API).
     const evaluation = evaluateTransition({
       subject,
       targetState: request.targetState,
       expectedVersion: request.expectedVersion,
       execution,
+      sanction,
     });
     assertLegal(evaluation);
     const rule = evaluation.rule!;
@@ -327,17 +340,43 @@ export function createWorkflowService(
      * bookkeeping here — the composite caller owns both (see the port
      * contract). /workflows remains the sole lifecycle authority:
      * there is exactly ONE transition path (performTransition).
+     *
+     * SANCTIONED EDGES (the PR #36 remediation): the optional
+     * `sanction` argument is the ONLY way a sanctioned transition
+     * (e.g. publication DRAFT → VERIFIED — the NET-W018 disclosure
+     * gate) can resolve. The generic `requestTransition` path passes
+     * no sanction — structurally — so sanctioned edges are executable
+     * exclusively by the owning composite through THIS twin.
      */
     async requestTransitionWithinTx(
       request,
       execution,
       tx,
       idempotencyRecordId,
+      sanction?,
     ) {
-      return performTransition(request, execution, tx, idempotencyRecordId);
+      return performTransition(
+        request,
+        execution,
+        tx,
+        idempotencyRecordId,
+        sanction,
+      );
     },
 
     async requestTransition(request, execution) {
+      // 0. NO SANCTION — EVER. The generic public transition path
+      //    deliberately passes NO sanction to performTransition, so
+      //    SANCTIONED edges (publication DRAFT → VERIFIED, the
+      //    NET-W018 disclosure gate) can never resolve here: the pure
+      //    state machine rejects them as IllegalTransitionError
+      //    regardless of authorization, evidence or obligations. This
+      //    is the PR #36 remediation decision of record (architect
+      //    CHANGES REQUESTED): the verification transition is
+      //    reachable ONLY through requestTransitionWithinTx invoked
+      //    with the matching sanction by the creators domain's
+      //    publication-verification composite.
+      //
       // 1. Per-subject coordination lock (non-authoritative serializer).
       //    Losing the coordination store cannot corrupt authoritative
       //    state — the lock only reduces the number of optimistic-
