@@ -18,9 +18,22 @@ The repository, not prior conversation, is the source of truth.
 
 ## Current checkpoint
 
-NET-W001 through NET-W020 are complete. NET-W020 merged as `3f1f6aaddfb1ceb0b28b5570b2d902bd06e84c48`.
+NET-W001 through **NET-W022 are complete**.
 
-The next implementation target is **NET-W021 — Campaign matching and optimization**.
+Latest merge:
+- NET-W022 issue #44
+- PR #45
+- merge SHA `45f1884656e470666e764266735ea59ec728c0ea`
+
+The current implementation target is **NET-W023 — OpenRTB and supply-chain adapters**.
+
+- GitHub issue: #46
+- Status: READY_FOR_IMPLEMENTATION
+- Prepared branch: `feat/net-w023-openrtb-supply-chain-adapters`
+- Requirements: ADAPTER-001..002
+- Dependencies: NET-W019 and NET-W022 — merged
+- Decision record: `spec/work-orders/NET-W023.md`
+- Evidence artifact: `docs/net-w023-openrtb-supply-chain.md`
 
 ## Frozen authority map
 
@@ -33,31 +46,63 @@ The next implementation target is **NET-W021 — Campaign matching and optimizat
 - `/campaigns` — campaign policy authority
 - `/creators` — creator semantics and creator-facing records
 - `/inventory` — inventory and placement authority
-- `/adapters` — provider-specific integrations
+- `/measurement` — measurement integration/neutral measurement boundary
+- `/adapters` — provider-specific external integrations
 - `/llm` — provider-neutral LLM boundary
 - `/agents` — agent/orchestration mechanisms
 
 The v1.0 architecture freezes sixteen domain boundaries. A new domain requires an explicit Architecture Change Request and a new architecture version.
 
-## W021 acceptance shape
+## W023 acceptance shape
 
-W021 must remain an optimization/matching layer, not an authority:
+W023 must connect external advertising infrastructure without becoming an advertising authority:
 
 ```text
-campaign policy + inventory + creator data + measured performance
+OpenRTB / ads.txt / app-ads.txt / sellers.json / schain input
                          ↓
-                 hard eligibility
+              provider-specific adapter
                          ↓
-                  eligible set
+             normalized neutral facts
                          ↓
-            evidence-backed features
+               composition root only
                          ↓
-             deterministic ranking
-                         ↓
-          bounded AI advisory ranking
+ existing inventory/campaign/measurement/evidence/risk/settlement authorities
 ```
 
-Hard policy, rights, tenancy, risk, and settlement constraints always win. AI cannot authorize a candidate that failed eligibility and cannot mutate another authority directly.
+Provider-specific protocol vocabulary and SDK types remain inside `/adapters`. External syntax or signatures do not equal OpenCon ownership, eligibility, risk clearance or settlement authorization.
+
+## W023 non-negotiables
+
+1. `/inventory` owns supply ownership, placement context, eligibility and settlement-readiness.
+2. `/campaigns` owns campaign policy/targeting; external bid-request fields cannot override campaign policy.
+3. `/outcomes` owns normalized measurement semantics; W022 attribution remains a provider fact, not protocol authority.
+4. `/evidence` owns material provenance/truth; adapter integrity checks are evidence inputs, not authorization.
+5. `/disputes` owns risk/control decisions; adapter assertions cannot self-clear risk.
+6. `/settlement` owns all economic mutation; bids, impressions, clicks and external responses cannot create ledger state directly.
+7. External seller/publisher/app identifiers must resolve to exactly one registered inventory source or fail closed.
+8. Raw vendor/bid payloads are opaque outside the owning adapter and are not persisted by default.
+9. Normalization is deterministic, versioned, bounded and privacy-minimized.
+10. Any material mutation uses established authorization, tenancy, idempotency, concurrency, transaction and audit patterns.
+11. Coupled material mutations use one authoritative transaction or an explicitly approved recoverable saga.
+12. No provider SDK/type leakage into domains.
+13. No new domain boundary.
+
+## Required acceptance coverage
+
+The implementation must include tests for:
+
+- provider-neutral OpenRTB request/response contract and version validation;
+- fail-closed malformed/unsupported/cardinality/critical-value validation;
+- provider-field containment and no SDK vocabulary crossing into domains;
+- normalized ads.txt/app-ads.txt/sellers.json/schain-style authorization facts with provenance and verification state;
+- exact-one inventory identity resolution, with unknown/ambiguous mappings rejected;
+- stale/unverified supply-chain facts unable to create ownership, placement eligibility, risk clearance or settlement readiness;
+- deterministic normalization and bounded privacy retention;
+- absence of raw payload persistence by default;
+- secret isolation from records/logs/audit/errors;
+- tenant/auth/idempotency/concurrency/audit/transaction lineage for any material composite;
+- mutation checks proving the major architectural invariants;
+- frozen architecture and architecture-lock remain unchanged.
 
 ## Merge protocol
 
@@ -74,4 +119,4 @@ Never merge solely because CI is green.
 
 ## Required persistence after every work item
 
-Update `spec/PROJECT-STATE.md` with the merged PR/SHA, next work item, architectural lessons, and verification baseline. Update `spec/ROADMAP.md` only when roadmap interpretation or sequencing changes. Keep `spec/work-items.md` as the original canonical backlog unless the project explicitly versions it.
+After merge, update `spec/PROJECT-STATE.md` with the merged PR/SHA, next work item, architectural lessons, verification baseline, and active issue/work-order/evidence links. Update `spec/ROADMAP.md` when roadmap interpretation or sequencing changes. Keep `spec/work-items.md` as the original backlog unless the project explicitly versions it.
