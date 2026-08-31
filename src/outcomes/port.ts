@@ -212,6 +212,19 @@ export interface ProviderIngestionResult {
   readonly createdObservations: readonly OutcomeObservation[];
 }
 
+/**
+ * NET-W022: the result of ingesting ONE pushed provider report (push
+ * ingestion through the neutral measurement adapter boundary — the
+ * raw vendor payload is normalized by the provider's adapter BEFORE
+ * it reaches this domain). `created` is false on a deterministic
+ * idempotent replay (same key = the cached observation, no second
+ * record).
+ */
+export interface ProviderReportIngestionResult {
+  readonly observation: OutcomeObservation;
+  readonly created: boolean;
+}
+
 export interface OutcomeObservationService {
   /**
    * Create an outcome observation. Validates the outcome type against
@@ -268,6 +281,35 @@ export interface OutcomeObservationService {
       readonly since?: string;
     },
   ): Promise<ProviderIngestionResult>;
+  /**
+   * NET-W022 (ADAPTER-003..004): ingest ONE pre-normalized provider
+   * report delivered through the neutral measurement adapter boundary
+   * (push ingestion). The raw vendor payload was validated,
+   * integrity-verified and privacy-redacted by the provider's adapter
+   * in `/measurement` BEFORE reaching this domain; HERE the report is
+   * validated against the SAME W006 rules (outcome type, observed
+   * value, confidence, provider provenance) and persisted as a
+   * provider-sourced observation with full provenance.
+   *
+   * The mutation is exactly-once-per-idempotency-key (the observation
+   * + its audit record + the idempotency record commit atomically in
+   * ONE authoritative transaction); replays return the cached
+   * observation with `created: false`. The measurement lifecycle and
+   * transition matrix are UNCHANGED — this is an additive neutral
+   * interface, not a new lifecycle authority (issue #44 scope 6).
+   */
+  ingestProviderReport(
+    execution: ExecutionContext,
+    input: {
+      readonly subjectReference: MeasurementSubjectReference;
+      readonly organizationScopeId: string;
+      readonly observerId: string;
+      readonly report: ProviderObservationReport;
+      /** The adapter version that performed the normalization (provenance). */
+      readonly providerAdapterVersion: string;
+      readonly idempotencyKey: string;
+    },
+  ): Promise<ProviderReportIngestionResult>;
 }
 
 /**

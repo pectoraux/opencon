@@ -789,6 +789,38 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // POST /api/measurement-reports — submit ONE raw provider
+    // attribution report (NET-W022 ADAPTER-003..004; protected). The
+    // raw vendor payload is an opaque passthrough to the provider's
+    // adapter in /measurement; the resulting provider-sourced
+    // observation persists through /outcomes semantics.
+    if (path === "/api/measurement-reports" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "measurementReport.submit", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = body as Record<string, unknown>;
+      if (obj.report === undefined) {
+        await send(res, 400, {
+          error: "validation",
+          classification: "validation",
+          message: "report (the raw provider report payload) is required",
+        });
+        return true;
+      }
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.submitMeasurementReport(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          subjectReference: parseSubjectReference(obj),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+          providerId: strField(obj, "providerId"),
+          report: obj.report,
+        }),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
     // POST /api/measurement-experiments — create an experiment (protected).
     if (path === "/api/measurement-experiments" && method === "POST" && opts.commands) {
       const commands = opts.commands;

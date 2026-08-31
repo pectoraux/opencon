@@ -313,6 +313,9 @@ describe("NET-W006-AC-06 atomicity/idempotency/concurrency", () => {
         },
       },
       providerAdapters: [],
+      // NET-W022: the service now requires the idempotency store for
+      // push report ingestion (unused on the create path under test).
+      idempotency: harness.runtime.idempotency,
       authority: harness.runtime.postgresAuthority,
       auditWriter: flakyTxWriter,
       logger: silentLogger,

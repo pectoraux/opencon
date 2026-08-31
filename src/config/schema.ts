@@ -36,6 +36,16 @@ export const ConfigSchema = z.object({
   // well-known dev default is permitted only in development (warned)
   // and test (silent).
   ATTESTATION_SIGNING_KEY: z.string().optional(),
+  // NET-W022: provider verification secrets (HMAC-SHA256 keys) for
+  // the reference attribution adapters. Classified secrets, resolved
+  // ONLY through the SecretProvider at composition time. When
+  // present, the respective reference adapter (browser-attribution /
+  // ios-attribution) is auto-wired into the measurement provider
+  // registry; when absent, pushed reports for that provider fail
+  // closed (unverifiable integrity). Never logged, persisted, or
+  // echoed into audit/error payloads (PRIV-002).
+  MEASUREMENT_BROWSER_ATTRIBUTION_KEY: z.string().optional(),
+  MEASUREMENT_IOS_ATTRIBUTION_KEY: z.string().optional(),
 
   // Observability
   LOG_LEVEL: LogLevelSchema.default("info"),
@@ -61,6 +71,8 @@ export const CONFIG_FIELD_CLASSIFICATIONS: readonly FieldClassification[] = [
   { key: "REDIS_URL", classification: "secret", required: false },
   { key: "OBJECT_STORAGE_BUCKET", classification: "secret", required: false },
   { key: "ATTESTATION_SIGNING_KEY", classification: "secret", required: false },
+  { key: "MEASUREMENT_BROWSER_ATTRIBUTION_KEY", classification: "secret", required: false },
+  { key: "MEASUREMENT_IOS_ATTRIBUTION_KEY", classification: "secret", required: false },
   { key: "LOG_LEVEL", classification: "optional", required: false },
   { key: "LOG_PRETTY", classification: "optional", required: false },
 ] as const;

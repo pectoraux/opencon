@@ -403,6 +403,38 @@ export interface ApiProviderIngestionResultView {
   readonly createdObservations: readonly ApiOutcomeObservationView[];
 }
 
+/**
+ * Inputs to submit ONE raw provider attribution report through the
+ * measurement adapter boundary (NET-W022, ADAPTER-003..004). The
+ * `report` field is the RAW vendor-shaped payload — OPAQUE at the API
+ * tier; only the provider's adapter (selected by `providerId`)
+ * interprets it. The observer is the server-resolved authenticated
+ * actor.
+ */
+export interface ApiSubmitMeasurementReportInput {
+  readonly organizationScopeId: string;
+  readonly subjectReference: { readonly subjectId: string; readonly subjectType: string };
+  readonly idempotencyKey: string;
+  readonly providerId: string;
+  /** The raw vendor report payload (untyped passthrough to the adapter). */
+  readonly report: unknown;
+}
+
+/**
+ * The result of a pushed measurement report submission (NET-W022):
+ * the persisted provider-sourced observation + the normalization
+ * provenance (provider id/version + the NAMES of the privacy-redacted
+ * vendor fields — never values). `created` is false on a
+ * deterministic idempotent replay.
+ */
+export interface ApiMeasurementReportSubmissionView {
+  readonly providerId: string;
+  readonly providerVersion: string;
+  readonly redactedFieldNames: readonly string[];
+  readonly created: boolean;
+  readonly observation: ApiOutcomeObservationView;
+}
+
 /** The public view of a measurement experiment (NET-W006 AC-03). */
 export interface ApiMeasurementExperimentView {
   readonly id: string;
@@ -1462,6 +1494,20 @@ export interface ApiCommands {
       readonly since?: string;
     },
   ): Promise<ApiProviderIngestionResultView>;
+
+  /**
+   * Submit ONE raw provider attribution report (NET-W022,
+   * ADAPTER-003..004): normalize it through the provider's adapter
+   * (measurement boundary) and persist the resulting provider-sourced
+   * observation through /outcomes semantics — exactly-once-per
+   * idempotency key, atomically audited. The observer is the
+   * authenticated actor.
+   */
+  submitMeasurementReport(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiSubmitMeasurementReportInput,
+  ): Promise<ApiMeasurementReportSubmissionView>;
 
   /** Create a measurement experiment (NET-W006 AC-03, protected). */
   createMeasurementExperiment(
