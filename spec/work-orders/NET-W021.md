@@ -200,6 +200,27 @@ ranking signals only, and `evaluateEligibility` has no advisory
 parameter (regression-pinned: no advisory value can reach the
 verdict code).
 
+**§3.3a Per-candidate advisory recording (the PR #43 review
+remediation — the decision of record).** The persisted
+`CampaignMatchCandidateResult.advisory` is the faithful record of
+THAT candidate's own matching and risk assessments, resolved by
+inventory item id from the per-candidate assessment maps
+(`buildCandidateResults(ranked, matchingByItem, riskByItem,
+placedItemIds)`) — NEVER a run-level or top-candidate projection. The
+run-level `advisory` block remains a SUMMARY: `used` reflects the
+consultations actually made; `provider`/`modelRef` are the
+advisory-source identity shared by EVERY consultation of that purpose
+in the run (uniform under the single-adapter wiring), and `null` when
+none were consulted or the assessments diverge (a divergent run
+cannot be faithfully summarized by one value — the per-candidate
+results carry the faithful identities). Regression-pinned: ≥2
+eligible candidates with intentionally distinct assessments preserve
+their distinct scores/provider/modelRef per candidate (both purposes,
+matching and risk); the digest/recomputation suite pins that the
+per-candidate advisory metadata is digest-covered, so a future
+refactor that collapses it back to a single run-level value can no
+longer reproduce the stored digest.
+
 ### §3.4 The match-run record — selection, not authority (AC-04/05/06)
 
 `runCampaignMatch` — the single material command:
@@ -211,6 +232,14 @@ verdict code).
   status (CAMP-002 fail-closed) + the pinned in-scope policy version;
 - merges the effective targeting (explicit ∪ the policy's POSITIVE
   region/language rules) and derives the required outcome types;
+- derives the run's SINGLE deterministic evaluation anchor
+  (`evaluatedAt`) at the service boundary (the W019 `nowIso()`
+  precedent) — every /inventory rule evaluation in the run receives
+  this EXPLICIT anchor (the composition-root adapter NEVER consults
+  wall-clock time), and the anchor is recorded on the run record as
+  part of the decision; it is NOT digested (wall-clock identity —
+  re-runs of identical decision content stay bit-for-bit
+  reproducible) — the PR #43 review remediation;
 - enumerates candidates (the org's non-retired supply by default, or
   an explicit tenant-scoped item-id list — cross-scope is
   indistinguishable from nonexistent) + the already-placed set;
@@ -289,10 +318,10 @@ economic mutation of any kind.
 |---|---|---|
 | 01 | tests/campaigns/net-w021-ac-01-hard-gates.test.ts | every hard gate fails with its closed-vocabulary reason; conjunction semantics + complete traces (engine-level); the run-level CAMP-002 constraints fail closed (no partial run); risk holds exclude; no existence oracle; deterministic verdicts |
 | 02 | tests/campaigns/net-w021-ac-02-evidence-ranking.test.ts | only eligible options ranked; six explicit signals with exact deterministic scores; weights validation (sum 100); deterministic total order + stable tie-break; VERIFIED-only outcome evidence; digest-pinned reputation bases; per-signal machine-readable explanations |
-| 03 | tests/campaigns/net-w021-ac-03-advisory-non-authority.test.ts | both advisories disabled by default; echo-reproducible blends with provider identity; ≤25% caps; only-eligible consultation (spy); privacy-minimized neutral facts (pinned bit-for-bit); no score can flip eligibility or override a hold (structural) |
+| 03 | tests/campaigns/net-w021-ac-03-advisory-non-authority.test.ts | both advisories disabled by default; echo-reproducible blends with provider identity; ≤25% caps; only-eligible consultation (spy); privacy-minimized neutral facts (pinned bit-for-bit); no score can flip eligibility or override a hold (structural); REGRESSION (PR #43): the persisted per-candidate advisory is each candidate's OWN assessment (distinct score/provider/modelRef per candidate, both purposes — never a top-candidate projection); REGRESSION (PR #43): every inventory-rule evaluation receives the run's SINGLE recorded evaluation anchor |
 | 04 | tests/campaigns/net-w021-ac-04-optimization-adversarial.test.ts | the optimization fixture (evidence-backed performers outrank unevidenced supply under identical constraints); baseline + final orderings with rank deltas; adversarial raw/matiring observations never influence; alreadyPlaced explainability; run-relative normalization with recorded bounds |
 | 05 | tests/campaigns/net-w021-ac-05-selection-not-authority.test.ts | a run writes ONLY the run record + one audit event (before/after counts + state assertions across campaign/inventory/outcomes/reputation); byte-identical side-effect-free replays; structural no-mutation-surface scan |
-| 06 | tests/campaigns/net-w021-ac-06-tenancy-idempotency-contract.test.ts | tenant-scoped reads (cross-scope = NotFoundError); person-actor requirement; policy-version pinning; digest determinism + recomputability; the pinned run-record contract; the HTTP surface (403/201/created=false/400/404/200) |
+| 06 | tests/campaigns/net-w021-ac-06-tenancy-idempotency-contract.test.ts | tenant-scoped reads (cross-scope = NotFoundError); person-actor requirement; policy-version pinning; digest determinism + recomputability; the pinned run-record contract (incl. the recorded evaluation anchor); the HTTP surface (403/201/created=false/400/404/200); REGRESSION (PR #43): the digest covers the PER-CANDIDATE advisory metadata (per-candidate echo recomputation + swap/mutation sensitivity — a top-candidate collapse cannot reproduce the stored digest) |
 | 07 | tests/regression/net-w021-ac-07-architecture-out-of-scope.test.ts | authority guard 0 violations; frozen specs unchanged; frozen vocabularies pinned UNCHANGED + the new matching vocabulary pinned; no mutation surface + no cross-domain imports in the matching boundary; advisory cannot reach the eligibility evaluator (structural); provider-neutral wiring; the /outcomes change is read-only; no NET-W022/W023 leakage; file list; secret scan |
 
 ## §7 Verification

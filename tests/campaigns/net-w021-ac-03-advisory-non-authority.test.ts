@@ -26,6 +26,7 @@ import {
 } from "./_net-w021-harness.ts";
 import { createCampaignMatchingService } from "../../src/campaigns/matching-service.ts";
 import type {
+  CampaignMatchAdvisory,
   CampaignMatchAdvisoryAssessment,
   CampaignMatchRunRecord,
   CampaignMatchRunRepository,
@@ -63,6 +64,11 @@ interface AdvisoryCall {
   readonly neutralFacts: readonly { label: string; value: string }[];
 }
 
+/** The rule-evaluation anchors the fake supply lookup received. */
+interface RuleEvaluationCall {
+  readonly evaluatedAt: string;
+}
+
 function spyAdvisory(spy: { calls: AdvisoryCall[] }, score: number) {
   const assess = (kind: "matching" | "risk") => {
     return async (input: {
@@ -78,6 +84,43 @@ function spyAdvisory(spy: { calls: AdvisoryCall[] }, score: number) {
     };
   };
   return { assessMatching: assess("matching"), assessRisk: assess("risk") };
+}
+
+/**
+ * A per-consultation advisory: the nth consultation of each kind
+ * returns the nth entry (distinct score/provider/modelRef per
+ * candidate — the PR #43 per-candidate-advisory regression).
+ */
+function perCallAdvisory(
+  spy: { calls: AdvisoryCall[] },
+  matchingByCall: readonly CampaignMatchAdvisoryAssessment[],
+  riskByCall: readonly CampaignMatchAdvisoryAssessment[],
+): CampaignMatchAdvisory {
+  const counts: Record<"matching" | "risk", number> = {
+    matching: 0,
+    risk: 0,
+  };
+  const assess = (
+    kind: "matching" | "risk",
+    byCall: readonly CampaignMatchAdvisoryAssessment[],
+  ) =>
+    async (input: {
+      readonly rubricRef: string;
+      readonly neutralFacts: readonly { label: string; value: string }[];
+    }): Promise<CampaignMatchAdvisoryAssessment> => {
+      spy.calls.push({
+        kind,
+        rubricRef: input.rubricRef,
+        neutralFacts: [...input.neutralFacts],
+      });
+      const assessment = byCall[counts[kind]]!;
+      counts[kind] += 1;
+      return assessment;
+    };
+  return {
+    assessMatching: assess("matching", matchingByCall),
+    assessRisk: assess("risk", riskByCall),
+  };
 }
 
 function fakeCampaignRepo(
@@ -163,9 +206,10 @@ async function createSpyService(
   campaign: CampaignRecord,
   policies: readonly CampaignPolicy[],
   itemIds: readonly string[],
-  spy: { calls: AdvisoryCall[] },
+  spy: { calls: AdvisoryCall[]; ruleEvaluations: RuleEvaluationCall[] },
   opts: {
     readonly advisoryScore?: number;
+    readonly advisoryPort?: CampaignMatchAdvisory;
     readonly supplyVerified?: boolean;
     readonly safetyHeld?: boolean;
     readonly standingScore?: number;
@@ -208,9 +252,17 @@ async function createSpyService(
         async placedItemIds() {
           return [];
         },
-        async evaluateEligibilityRules(rules, supply) {
+        async evaluateEligibilityRules(rules, supply, evaluatedAt) {
+          // A small per-call delay so a per-call wall-clock defect
+          // cannot hide inside a single millisecond: the correct
+          // code passes a FIXED anchor string (delay-insensitive);
+          // a per-call new Date() would drift across the delays.
+          await new Promise((resolve) => setTimeout(resolve, 2));
           // Neutral evaluation: positive language/region rules over
           // the declared supply (the /inventory engine's semantics).
+          // The received evaluation anchor is RECORDED (the spy
+          // witness for the deterministic-anchor regression).
+          spy.ruleEvaluations.push({ evaluatedAt });
           let satisfied = true;
           const ruleResults = rules.map((rule) => {
             const offered =
@@ -234,7 +286,7 @@ async function createSpyService(
               reason: ok ? "satisfied" : "offered_value_outside_rule",
             };
           });
-          return { eligible: satisfied, ruleResults };
+          return { eligible: satisfied, evaluatedAt, ruleResults };
         },
       },
       reputation: {
@@ -265,7 +317,7 @@ async function createSpyService(
         },
       },
     },
-    advisory: spyAdvisory(spy, opts.advisoryScore ?? 80),
+    advisory: opts.advisoryPort ?? spyAdvisory(spy, opts.advisoryScore ?? 80),
     idempotency: harness.runtime.idempotency,
     auditWriter: harness.runtime.auditWriter,
     logger: SILENT,
@@ -462,7 +514,10 @@ describe("NET-W021 AC-03: advisory consultation + privacy (spy service)", () => 
       operatorCtx(harness, "w021-ac03-policy"),
       campaign.id,
     );
-    const spy: { calls: AdvisoryCall[] } = { calls: [] };
+    const spy: { calls: AdvisoryCall[]; ruleEvaluations: RuleEvaluationCall[] } = {
+      calls: [],
+      ruleEvaluations: [],
+    };
     // One ELIGIBLE item, one INELIGIBLE item (unverified supply).
     const service = await createSpyService(
       campaign,
@@ -473,7 +528,10 @@ describe("NET-W021 AC-03: advisory consultation + privacy (spy service)", () => 
     );
     // The ineligible candidate is introduced through explicit ids
     // with a separate service instance whose supply is unverified.
-    const spy2: { calls: AdvisoryCall[] } = { calls: [] };
+    const spy2: {
+      calls: AdvisoryCall[];
+      ruleEvaluations: RuleEvaluationCall[];
+    } = { calls: [], ruleEvaluations: [] };
     const service2 = await createSpyService(
       campaign,
       [policy!],
@@ -517,7 +575,10 @@ describe("NET-W021 AC-03: advisory consultation + privacy (spy service)", () => 
       operatorCtx(harness, "w021-ac03-policy2"),
       campaign.id,
     );
-    const spy: { calls: AdvisoryCall[] } = { calls: [] };
+    const spy: { calls: AdvisoryCall[]; ruleEvaluations: RuleEvaluationCall[] } = {
+      calls: [],
+      ruleEvaluations: [],
+    };
     const service = await createSpyService(
       campaign,
       [policy!],
@@ -581,7 +642,10 @@ describe("NET-W021 AC-03: advisory consultation + privacy (spy service)", () => 
       campaign.id,
     );
     // A maximal advisory score (100) + maximal blend on BOTH signals.
-    const spy: { calls: AdvisoryCall[] } = { calls: [] };
+    const spy: {
+      calls: AdvisoryCall[];
+      ruleEvaluations: RuleEvaluationCall[];
+    } = { calls: [], ruleEvaluations: [] };
     const heldService = await createSpyService(
       campaign,
       [policy!],
@@ -605,7 +669,10 @@ describe("NET-W021 AC-03: advisory consultation + privacy (spy service)", () => 
 
     // And an eligible option stays eligible regardless of a ZERO
     // advisory score (no demotion to ineligible either).
-    const spyZero: { calls: AdvisoryCall[] } = { calls: [] };
+    const spyZero: {
+      calls: AdvisoryCall[];
+      ruleEvaluations: RuleEvaluationCall[];
+    } = { calls: [], ruleEvaluations: [] };
     const zeroService = await createSpyService(
       campaign,
       [policy!],
@@ -624,5 +691,213 @@ describe("NET-W021 AC-03: advisory consultation + privacy (spy service)", () => 
     });
     expect(zero.run.eligibleCount).toBe(1);
     expect(zero.run.results[0]!.rank).toBe(1);
+  });
+
+  test("REGRESSION (PR #43 review): the persisted per-candidate advisory is EACH candidate's own assessment — never a top-candidate projection", async () => {
+    // The blocking defect under review: buildCandidateResults was
+    // handed only ranked[0]'s assessments, so EVERY candidate's
+    // persisted result.advisory carried the TOP candidate's matching
+    // and risk assessments. This regression pins the per-candidate
+    // resolution by candidate id.
+    const campaign = await createMatchCampaign(harness);
+    const [policy] = await harness.runtime.campaignService.listPolicyVersions(
+      operatorCtx(harness, "w021-ac03-per-candidate"),
+      campaign.id,
+    );
+    // Three eligible candidates; each consultation returns an
+    // intentionally DISTINCT assessment (score AND provider AND
+    // modelRef) — consultation order === the explicit candidate
+    // order (matching first, then risk, each in candidate order).
+    const itemIds = ["item-a", "item-b", "item-c"];
+    const matchingByCall: readonly CampaignMatchAdvisoryAssessment[] = [
+      { score: 90, provider: "provider-a", modelRef: "model-a-1" },
+      { score: 50, provider: "provider-b", modelRef: "model-b-1" },
+      { score: 10, provider: "provider-c", modelRef: "model-c-1" },
+    ];
+    const riskByCall: readonly CampaignMatchAdvisoryAssessment[] = [
+      { score: 15, provider: "risk-provider-a", modelRef: "risk-model-a" },
+      { score: 55, provider: "risk-provider-b", modelRef: "risk-model-b" },
+      { score: 95, provider: "risk-provider-c", modelRef: "risk-model-c" },
+    ];
+    const spy: {
+      calls: AdvisoryCall[];
+      ruleEvaluations: RuleEvaluationCall[];
+    } = { calls: [], ruleEvaluations: [] };
+    const service = await createSpyService(
+      campaign,
+      [policy!],
+      itemIds,
+      spy,
+      {
+        advisoryPort: perCallAdvisory(spy, matchingByCall, riskByCall),
+      },
+    );
+    const { run } = await spyRun(service, {
+      campaignId: campaign.id,
+      candidateInventoryItemIds: itemIds,
+      advisory: {
+        matching: { enabled: true, maxWeight: 25 },
+        risk: { enabled: true, maxWeight: 25 },
+      },
+      idempotencyKey: key("w021-ac03-per-candidate"),
+    });
+    expect(run.eligibleCount).toBe(3);
+    expect(run.results).toHaveLength(3);
+    // Exactly one consultation per candidate per purpose.
+    expect(spy.calls.filter((c) => c.kind === "matching")).toHaveLength(3);
+    expect(spy.calls.filter((c) => c.kind === "risk")).toHaveLength(3);
+
+    // Each persisted result carries ITS OWN candidate's assessments,
+    // for BOTH purposes, with the distinct scores AND provider/model
+    // metadata preserved per candidate.
+    const callIndexOf = new Map(itemIds.map((id, i) => [id, i]));
+    for (const result of run.results) {
+      const index = callIndexOf.get(result.inventoryItemId)!;
+      expect(result.advisory.matching).toEqual(matchingByCall[index]!);
+      expect(result.advisory.risk).toEqual(riskByCall[index]!);
+      // The per-signal ranking inputs agree with the persisted
+      // per-candidate advisory (the same assessment fed both).
+      const alignment = result.signals.find((s) => s.signal === "alignment")!;
+      expect(alignment.inputs).toMatchObject({
+        advisoryScore: matchingByCall[index]!.score,
+        advisoryProvider: matchingByCall[index]!.provider,
+        advisoryModelRef: matchingByCall[index]!.modelRef,
+        advisoryBlend: 0.25,
+      });
+      const risk = result.signals.find((s) => s.signal === "risk")!;
+      expect(risk.inputs).toMatchObject({
+        advisoryScore: riskByCall[index]!.score,
+        advisoryProvider: riskByCall[index]!.provider,
+        advisoryModelRef: riskByCall[index]!.modelRef,
+        advisoryBlend: 0.25,
+      });
+    }
+    // The per-candidate scores are pairwise distinct (both purposes).
+    expect(new Set(run.results.map((r) => r.advisory.matching!.score)).size).toBe(3);
+    expect(new Set(run.results.map((r) => r.advisory.risk!.score)).size).toBe(3);
+
+    // THE ANTI-COLLAPSE PROOF (the exact defect under review): the
+    // rank-2 and rank-3 candidates' persisted advisories are NOT the
+    // rank-1 candidate's advisory.
+    const byRank = [...run.results].sort((a, b) => a.rank - b.rank);
+    const topMatching = byRank[0]!.advisory.matching!;
+    const topRisk = byRank[0]!.advisory.risk!;
+    expect(byRank[1]!.advisory.matching).not.toEqual(topMatching);
+    expect(byRank[2]!.advisory.matching).not.toEqual(topMatching);
+    expect(byRank[1]!.advisory.risk).not.toEqual(topRisk);
+    expect(byRank[2]!.advisory.risk).not.toEqual(topRisk);
+
+    // The run-level advisory block is an honest SUMMARY of a
+    // divergent run: used=true, but no single provider/modelRef can
+    // faithfully summarize three distinct sources, so both are null
+    // (the per-candidate results carry the faithful identities).
+    expect(run.advisory.matching).toEqual({
+      used: true,
+      blend: 0.25,
+      provider: null,
+      modelRef: null,
+    });
+    expect(run.advisory.risk).toEqual({
+      used: true,
+      blend: 0.25,
+      provider: null,
+      modelRef: null,
+    });
+
+    // And for a UNIFORM run the run-level summary still records the
+    // shared identity (the single-adapter wiring: echo/spy ports).
+    const spyUniform: {
+      calls: AdvisoryCall[];
+      ruleEvaluations: RuleEvaluationCall[];
+    } = { calls: [], ruleEvaluations: [] };
+    const uniformService = await createSpyService(
+      campaign,
+      [policy!],
+      itemIds,
+      spyUniform,
+      { advisoryScore: 70 },
+    );
+    const uniform = await spyRun(uniformService, {
+      campaignId: campaign.id,
+      candidateInventoryItemIds: itemIds,
+      advisory: {
+        matching: { enabled: true, maxWeight: 25 },
+        risk: { enabled: true, maxWeight: 25 },
+      },
+      idempotencyKey: key("w021-ac03-uniform"),
+    });
+    expect(uniform.run.advisory.matching).toEqual({
+      used: true,
+      blend: 0.25,
+      provider: "spy-provider",
+      modelRef: "spy-model",
+    });
+    // Every candidate still carries its own (here identical) record.
+    for (const result of uniform.run.results) {
+      expect(result.advisory.matching).toEqual({
+        score: 70,
+        provider: "spy-provider",
+        modelRef: "spy-model",
+      });
+    }
+  });
+
+  test("REGRESSION (PR #43 review): every inventory-rule evaluation in a run receives the run's SINGLE recorded evaluation anchor (no composition-root wall clock)", async () => {
+    // The secondary defect under review: the composition-root supply
+    // lookup called the /inventory rule engine with
+    // new Date().toISOString() — an implicit per-candidate wall-clock
+    // dependency at the matching boundary. The anchor is now derived
+    // ONCE per run at the service boundary, passed explicitly to the
+    // lookup, and recorded on the run record.
+    const campaign = await createMatchCampaign(harness);
+    const [policy] = await harness.runtime.campaignService.listPolicyVersions(
+      operatorCtx(harness, "w021-ac03-anchor"),
+      campaign.id,
+    );
+    const itemIds = ["item-a", "item-b", "item-c"];
+    const spy: {
+      calls: AdvisoryCall[];
+      ruleEvaluations: RuleEvaluationCall[];
+    } = { calls: [], ruleEvaluations: [] };
+    const service = await createSpyService(
+      campaign,
+      [policy!],
+      itemIds,
+      spy,
+    );
+    const { run } = await spyRun(service, {
+      campaignId: campaign.id,
+      candidateInventoryItemIds: itemIds,
+      idempotencyKey: key("w021-ac03-anchor"),
+    });
+    // One rule evaluation per candidate — ALL at the SAME anchor,
+    // and that anchor is exactly the one recorded on the decision.
+    expect(spy.ruleEvaluations).toHaveLength(3);
+    expect(
+      new Set(spy.ruleEvaluations.map((c) => c.evaluatedAt)).size,
+    ).toBe(1);
+    for (const call of spy.ruleEvaluations) {
+      expect(call.evaluatedAt).toBe(run.evaluatedAt);
+    }
+    // The anchor is a recorded ISO instant on the run record.
+    expect(run.evaluatedAt).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
+    // The anchor is NOT part of the digest (wall-clock identity):
+    // mutating it on the stored record cannot change the recomputed
+    // digest, and a second run of identical decision content
+    // reproduces the digest bit-for-bit.
+    const { computeMatchDigest } = await import(
+      "../../src/campaigns/matching-engine.ts"
+    );
+    const reanchored = { ...run, evaluatedAt: "1999-01-01T00:00:00.000Z" };
+    expect(computeMatchDigest(reanchored)).toBe(run.digest);
+    expect(computeMatchDigest(run)).toBe(run.digest);
+    const second = await spyRun(service, {
+      campaignId: campaign.id,
+      candidateInventoryItemIds: itemIds,
+      idempotencyKey: key("w021-ac03-anchor-2"),
+    });
+    expect(second.run.digest).toBe(run.digest);
   });
 });

@@ -64,6 +64,7 @@ function factsFor(overrides: {
     item,
     eligibility: {
       eligible: overrides.rulesSatisfied !== false,
+      evaluatedAt: "2026-01-01T00:00:00.000Z",
       ruleResults:
         overrides.rulesSatisfied === false
           ? [

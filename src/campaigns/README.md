@@ -91,13 +91,19 @@ explainable candidate ordering.
   path.
 - `matching-service.ts` — all I/O: request validation, the campaign
   subject (read-only, CAMP-002 fail-closed: ACTIVE + pinned in-scope
-  policy version), the effective-targeting merge, candidate
-  enumeration + fact assembly through the NEUTRAL lookups
+  policy version), the effective-targeting merge, the run's SINGLE
+  deterministic evaluation anchor (derived once per run, passed
+  explicitly to every /inventory rule evaluation, recorded on the
+  decision), candidate enumeration + fact assembly through the NEUTRAL
+  lookups
   (supply/eligibility over /inventory, reputation over /reputation,
   safety over /disputes, outcome evidence over /outcomes), the
   only-eligible advisory consultations, and ONE append-only,
   idempotent, tenant-scoped run record (`campaign_match_runs`) +
-  its `campaign_match.recorded` audit event — the ONLY writes.
+  its `campaign_match.recorded` audit event — the ONLY writes. The
+  persisted per-candidate `advisory` blocks are each candidate's OWN
+  assessments (resolved by item id, never a top-candidate projection);
+  the run-level `advisory` block is a uniform-identity summary.
 - `authority-match-run-repository.ts` — the run-record collection
   over the `PostgresAuthority` contract.
 

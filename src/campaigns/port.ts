@@ -863,9 +863,14 @@ export interface CampaignMatchInventoryItemView {
  * attributes, produced by the /inventory authority's OWN rule
  * semantics through the neutral lookup (matching never re-implements
  * eligibility-rule semantics — no second eligibility authority).
+ * `evaluatedAt` is the deterministic evaluation anchor the caller
+ * supplied and the engine recorded for this evaluation (the anchor
+ * is derived ONCE per run by the service and persisted on the run
+ * record — never a per-candidate or composition-root wall clock).
  */
 export interface CampaignMatchSupplyEligibilityEvaluation {
   readonly eligible: boolean;
+  readonly evaluatedAt: string;
   readonly ruleResults: readonly {
     readonly attribute: string;
     readonly operator: string;
@@ -900,7 +905,10 @@ export interface CampaignMatchSupplyLookup {
    * Evaluate the pinned policy's eligibility rules against a supply
    * option's declared attributes (the /inventory eligibility
    * engine's semantics — region/language are supply-carried; other
-   * attributes are not carried by supply).
+   * attributes are not carried by supply). `evaluatedAt` is the
+   * run's explicit deterministic evaluation anchor (an ISO instant
+   * the service derives once per run and records on the decision) —
+   * the adapter NEVER consults wall-clock time itself.
    */
   evaluateEligibilityRules(
     rules: readonly CampaignEligibilityRule[],
@@ -908,6 +916,7 @@ export interface CampaignMatchSupplyLookup {
       readonly territories: readonly string[];
       readonly languages: readonly string[];
     },
+    evaluatedAt: string,
   ): Promise<CampaignMatchSupplyEligibilityEvaluation>;
 }
 
@@ -1082,6 +1091,17 @@ export interface CampaignMatchRunRecord {
   /** The outcome types the pinned policy's outcome section demands. */
   readonly requiredOutcomeTypes: readonly string[];
   readonly weights: CampaignMatchWeightsShape;
+  /**
+   * The run-level advisory summary. `provider`/`modelRef` are the
+   * advisory-source identity shared by EVERY consultation of that
+   * purpose in the run (the wired adapter is uniform per run); when
+   * the assessments diverge (impossible under the current single-
+   * adapter wiring) a single run-level value could only falsify the
+   * record, so the field records `null` and the per-candidate
+   * `results[].advisory` entries carry each candidate's OWN
+   * assessment identity (the PR #43 review contract: the run-level
+   * block is a summary, never a top-candidate projection).
+   */
   readonly advisory: {
     readonly config: CampaignMatchAdvisoryConfig;
     readonly matching: {
@@ -1104,6 +1124,16 @@ export interface CampaignMatchRunRecord {
   readonly digest: string;
   readonly createdBy: string;
   readonly createdAt: string;
+  /**
+   * The single wall-clock anchor at which EVERY eligibility-rule
+   * evaluation in this run was evaluated — derived once per run at
+   * the service boundary (the W019 `nowIso()` precedent), passed
+   * explicitly to the neutral /inventory rule engine, and recorded
+   * here as part of the decision (replay/audit can pin it). NOT
+   * part of the digest (wall-clock identity — the digest stays
+   * bit-for-bit reproducible across re-runs).
+   */
+  readonly evaluatedAt: string;
   readonly idempotencyKey: string;
   readonly executionId: string;
   readonly correlationId: string;

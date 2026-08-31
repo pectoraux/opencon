@@ -675,16 +675,24 @@ export function orderCandidates(
 // Result views (§3.4)
 // ---------------------------------------------------------------------------
 
-/** Build the ranked candidate result view (the run's `results`). */
+/**
+ * Build the ranked candidate result view (the run's `results`).
+ *
+ * The advisory metadata is resolved **by candidate id** from the
+ * per-candidate assessment maps the service collected (the PR #43
+ * review fix): each persisted `CampaignMatchCandidateResult.advisory`
+ * is the faithful record of THAT candidate's own matching/risk
+ * assessments — never a run-level or top-candidate projection. A
+ * candidate with no assessment for a purpose (that advisory disabled)
+ * records `null` for that purpose.
+ */
 export function buildCandidateResults(
   ranked: readonly (ScoredCandidate & {
     readonly rank: number;
     readonly baselineRank: number;
   })[],
-  advisory: {
-    readonly matching: CampaignMatchAdvisoryAssessment | null;
-    readonly risk: CampaignMatchAdvisoryAssessment | null;
-  },
+  matchingByItem: ReadonlyMap<string, CampaignMatchAdvisoryAssessment>,
+  riskByItem: ReadonlyMap<string, CampaignMatchAdvisoryAssessment>,
   placedItemIds: ReadonlySet<string>,
 ): readonly CampaignMatchCandidateResult[] {
   return Object.freeze(
@@ -701,24 +709,27 @@ export function buildCandidateResults(
         alreadyPlaced: placedItemIds.has(c.facts.item.id),
         signals: c.finalSignals,
         advisory: {
-          matching: advisory.matching
-            ? {
-                score: advisory.matching.score,
-                provider: advisory.matching.provider,
-                modelRef: advisory.matching.modelRef,
-              }
-            : null,
-          risk: advisory.risk
-            ? {
-                score: advisory.risk.score,
-                provider: advisory.risk.provider,
-                modelRef: advisory.risk.modelRef,
-              }
-            : null,
+          matching: advisoryViewOf(
+            matchingByItem.get(c.facts.item.id) ?? null,
+          ),
+          risk: advisoryViewOf(riskByItem.get(c.facts.item.id) ?? null),
         },
       } satisfies CampaignMatchCandidateResult),
     ),
   );
+}
+
+/** The persisted per-candidate advisory view (identity preserved). */
+function advisoryViewOf(
+  assessment: CampaignMatchAdvisoryAssessment | null,
+): CampaignMatchAdvisoryAssessment | null {
+  return assessment
+    ? Object.freeze({
+        score: assessment.score,
+        provider: assessment.provider,
+        modelRef: assessment.modelRef,
+      })
+    : null;
 }
 
 /** Build the excluded-candidate view (the run's `excluded`). */
@@ -755,7 +766,11 @@ export function buildExcludedCandidates(
  * precedents): identical inputs + results → identical digest.
  * Re-running the same match reproduces it bit-for-bit
  * (advisory-off); with the advisory on, the provider identity is
- * part of the recorded decision.
+ * part of the recorded decision. Wall-clock identity fields
+ * (createdAt, evaluatedAt) are deliberately NOT digested — the
+ * anchor is recorded on the run for replay/audit, but two runs
+ * of the same decision content seconds apart remain
+ * bit-for-bit reproducible.
  */
 export function computeMatchDigest(
   run: Omit<
@@ -768,6 +783,7 @@ export function computeMatchDigest(
     | "id"
     | "createdBy"
     | "createdAt"
+    | "evaluatedAt"
   >,
 ): string {
   const canonical = JSON.stringify({

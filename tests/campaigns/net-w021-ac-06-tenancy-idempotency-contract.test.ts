@@ -5,6 +5,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { createHash } from "node:crypto";
 import { createExecutionContext } from "../../src/core/execution-context.ts";
 import { NotFoundError } from "../../src/core/errors.ts";
 import { InvalidCampaignMatchError } from "../../src/core/campaigns.ts";
@@ -241,6 +242,7 @@ describe("NET-W021 AC-06: tenancy + idempotency + contract + HTTP", () => {
       "createdBy",
       "digest",
       "eligibleCount",
+      "evaluatedAt",
       "excluded",
       "executionId",
       "formatVersion",
@@ -252,6 +254,11 @@ describe("NET-W021 AC-06: tenancy + idempotency + contract + HTTP", () => {
       "targeting",
       "weights",
     ]);
+    // The deterministic evaluation anchor is recorded on the
+    // decision (the PR #43 review fix: an ISO instant, one per run).
+    expect(run.evaluatedAt).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
     expect(run.formatVersion).toBe("NET-W021:1");
     expect(run.createdBy).toBe(harness.operatorPersonId);
     expect(run.organizationScopeId).toBe(harness.organizationScopeId);
@@ -386,5 +393,153 @@ describe("NET-W021 AC-06: tenancy + idempotency + contract + HTTP", () => {
     );
     const recomputed = computeMatchDigest(run);
     expect(recomputed).toBe(run.digest);
+  });
+
+  test("REGRESSION (PR #43 review): the digest covers the PER-CANDIDATE advisory metadata (a top-candidate collapse cannot reproduce it)", async () => {
+    // Two eligible candidates whose echo advisory scores are
+    // intentionally DISTINCT (different formats → different privacy-
+    // minimized neutral facts → different deterministic echo hashes
+    // for BOTH purposes).
+    const campaign = await createMatchCampaign(harness);
+    const display = await registerSupplyItem(harness, {
+      actorPersonId: harness.operatorPersonId,
+    });
+    const video = await registerSupplyItem(harness, {
+      actorPersonId: harness.operatorPersonId,
+      format: "video",
+    });
+    const { run } = await runCampaignMatch(harness, {
+      campaignId: campaign.id,
+      candidateInventoryItemIds: [display.id, video.id],
+      advisory: {
+        matching: { enabled: true, maxWeight: 25 },
+        risk: { enabled: true, maxWeight: 25 },
+      },
+      idempotencyKey: key("w021-ac06-per-candidate-digest"),
+    });
+    expect(run.eligibleCount).toBe(2);
+    const displayResult = run.results.find(
+      (r) => r.inventoryItemId === display.id,
+    )!;
+    const videoResult = run.results.find(
+      (r) => r.inventoryItemId === video.id,
+    )!;
+
+    // The per-candidate echo score for EACH candidate's OWN fact set
+    // (the provider-input proof, per candidate — the fact order is
+    // the service's fixed construction order).
+    const echoScore = (purpose: "matching" | "safety", format: string) => {
+      const neutralFacts =
+        purpose === "matching"
+          ? [
+              { label: "campaign_required_outcome_type", value: "view" },
+              { label: "supply_surface_kind", value: "publisher" },
+              { label: "supply_format", value: format },
+              { label: "supply_territory_count", value: "2" },
+              { label: "supply_language_count", value: "1" },
+              { label: "evidence_present", value: "view:no" },
+            ]
+          : [
+              { label: "supply_surface_kind", value: "publisher" },
+              { label: "supply_format", value: format },
+              { label: "supply_territory_count", value: "2" },
+              { label: "supply_language_count", value: "1" },
+              { label: "evidence_present", value: "view:no" },
+              { label: "owner_has_standing_snapshot", value: "no" },
+              { label: "owner_has_reliability_snapshot", value: "no" },
+              { label: "owner_has_fraud_resistance_snapshot", value: "no" },
+            ];
+      const canonical = JSON.stringify({
+        purpose,
+        rubricRef:
+          purpose === "matching"
+            ? "campaign-matching:NET-W021:1"
+            : "campaign-matching-risk:NET-W021:1",
+        neutralFacts,
+      });
+      const digest = createHash("sha256")
+        .update(canonical, "utf8")
+        .digest("hex");
+      return (
+        Math.round(
+          (Number.parseInt(digest.slice(0, 8), 16) / 0x1_0000_0000) * 1000,
+        ) / 10
+      );
+    };
+    // Candidate A → advisory A; candidate B → advisory B — for BOTH
+    // purposes, through the real adapter chain (LlmPort purposes
+    // "matching" and "safety").
+    expect(displayResult.advisory.matching).toEqual({
+      score: echoScore("matching", "display"),
+      provider: "echo",
+      modelRef: "echo-scoring-v1",
+    });
+    expect(videoResult.advisory.matching).toEqual({
+      score: echoScore("matching", "video"),
+      provider: "echo",
+      modelRef: "echo-scoring-v1",
+    });
+    expect(displayResult.advisory.risk).toEqual({
+      score: echoScore("safety", "display"),
+      provider: "echo",
+      modelRef: "echo-scoring-v1",
+    });
+    expect(videoResult.advisory.risk).toEqual({
+      score: echoScore("safety", "video"),
+      provider: "echo",
+      modelRef: "echo-scoring-v1",
+    });
+    // The two candidates' advisory scores are distinct (both
+    // purposes) — the guard for the sensitivity assertions below.
+    expect(displayResult.advisory.matching!.score).not.toBe(
+      videoResult.advisory.matching!.score,
+    );
+    expect(displayResult.advisory.risk!.score).not.toBe(
+      videoResult.advisory.risk!.score,
+    );
+
+    // Recomputation over the stored decision reproduces the digest.
+    const { computeMatchDigest } = await import(
+      "../../src/campaigns/matching-engine.ts"
+    );
+    expect(computeMatchDigest(run)).toBe(run.digest);
+
+    // DIGEST SENSITIVITY: swapping ONLY the two candidates' advisory
+    // blocks on the stored record changes the recomputed digest —
+    // the per-candidate advisory metadata is digest-covered, so a
+    // future refactor that collapses it back to a single run-level
+    // value can no longer reproduce the stored digest (the swap
+    // would be a no-op for a run-level-only digest).
+    const swapped = {
+      ...run,
+      results: run.results.map((r) =>
+        r.inventoryItemId === display.id
+          ? { ...r, advisory: videoResult.advisory }
+          : r.inventoryItemId === video.id
+            ? { ...r, advisory: displayResult.advisory }
+            : r,
+      ),
+    };
+    expect(computeMatchDigest(swapped)).not.toBe(run.digest);
+    // Mutating ONE candidate's matching advisory score alone changes
+    // it too (the guard picks a value guaranteed different from the
+    // recorded one).
+    const mutatedScore =
+      displayResult.advisory.matching!.score === 12.5 ? 88.8 : 12.5;
+    const oneMutated = {
+      ...run,
+      results: run.results.map((r) =>
+        r.inventoryItemId === display.id
+          ? {
+              ...r,
+              advisory: {
+                ...r.advisory,
+                matching: { ...r.advisory.matching!, score: mutatedScore },
+              },
+            }
+          : r,
+      ),
+    };
+    expect(computeMatchDigest(oneMutated)).not.toBe(run.digest);
   });
 });

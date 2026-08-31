@@ -288,6 +288,27 @@ function requiredOutcomeTypesOf(policy: CampaignPolicy): readonly string[] {
 }
 
 /**
+ * The run-level advisory-source identity shared by every assessment
+ * in the map: the single distinct provider/modelRef when the run's
+ * consultations are uniform (the single-adapter wiring), `null` when
+ * none were consulted, and `null` when the assessments diverge — a
+ * divergent run cannot be faithfully summarized by one value, and
+ * the per-candidate results carry each candidate's own identity
+ * (the PR #43 review contract: no top-candidate projection anywhere).
+ */
+function advisoryIdentityOf(
+  assessments: ReadonlyMap<string, CampaignMatchAdvisoryAssessment>,
+): { readonly provider: string | null; readonly modelRef: string | null } {
+  const values = [...assessments.values()];
+  const providers = new Set(values.map((a) => a.provider));
+  const modelRefs = new Set(values.map((a) => a.modelRef));
+  return {
+    provider: providers.size === 1 ? ([...providers][0] as string) : null,
+    modelRef: modelRefs.size === 1 ? ([...modelRefs][0] as string) : null,
+  };
+}
+
+/**
  * The privacy-minimized neutral facts for the AI-002 matching
  * assessment: campaign-side requirement labels + the item's PUBLIC
  * aggregate supply facts + evidence PRESENCE (booleans only) — NO
@@ -553,6 +574,15 @@ export function createCampaignMatchingService(
       const effectiveTargeting = mergeTargeting(explicitTargeting, policy);
       const requiredOutcomeTypes = requiredOutcomeTypesOf(policy);
 
+      // -- the deterministic evaluation anchor (ONE per run) --------
+      // Every /inventory rule evaluation in this run is evaluated at
+      // this single explicit instant (the W019 nowIso() service-
+      // boundary precedent), recorded on the run record as part of
+      // the decision. The neutral lookup and the composition root
+      // NEVER consult wall-clock time themselves — the anchor is
+      // derived once, here, at the matching boundary.
+      const evaluatedAt = new Date().toISOString();
+
       // -- candidate enumeration (tenant-scoped) ---------------------
       let items: readonly CampaignMatchInventoryItemView[];
       if (
@@ -613,6 +643,7 @@ export function createCampaignMatchingService(
         const eligibility = await lookups.supply.evaluateEligibilityRules(
           policy.eligibility.rules,
           { territories: item.territories, languages: item.languages },
+          evaluatedAt,
         );
         const reputation = await resolveReputationFacts(
           input.organizationScopeId,
@@ -708,17 +739,15 @@ export function createCampaignMatchingService(
         };
       });
       const ranked = orderCandidates(scored);
+      // Per-candidate advisory resolution (the PR #43 review fix):
+      // EVERY result records ITS OWN candidate's matching/risk
+      // assessments, resolved by inventory item id — never a
+      // run-level or top-candidate projection.
       const results: readonly CampaignMatchCandidateResult[] =
         buildCandidateResults(
           ranked,
-          {
-            matching: matchingEnabled && ranked.length > 0
-              ? (matchingByItem.get(ranked[0]!.facts.item.id) ?? null)
-              : null,
-            risk: riskEnabled && ranked.length > 0
-              ? (riskByItem.get(ranked[0]!.facts.item.id) ?? null)
-              : null,
-          },
+          matchingByItem,
+          riskByItem,
           placedItemIds,
         );
       const excluded: readonly CampaignMatchExcludedCandidate[] =
@@ -727,6 +756,15 @@ export function createCampaignMatchingService(
         );
 
       // -- the run record + digest ----------------------------------
+      // Run-level advisory summary: `used` reflects the consultations
+      // actually made; provider/modelRef are the identity shared by
+      // EVERY assessment of that purpose in the run (uniform under the
+      // single-adapter wiring; `null` when none were consulted or the
+      // assessments diverge — a divergent run cannot be faithfully
+      // summarized by one value, and the per-candidate results carry
+      // each candidate's own identity). NO top-candidate projection.
+      const matchingIdentity = advisoryIdentityOf(matchingByItem);
+      const riskIdentity = advisoryIdentityOf(riskByItem);
       const advisoryMeta = Object.freeze({
         config: Object.freeze({
           matching: Object.freeze({
@@ -739,24 +777,16 @@ export function createCampaignMatchingService(
           }),
         }),
         matching: Object.freeze({
-          used: matchingEnabled && ranked.length > 0,
+          used: matchingByItem.size > 0,
           blend: round1(matchingBlend * 100) / 100,
-          provider: matchingEnabled && ranked.length > 0
-            ? (matchingByItem.get(ranked[0]!.facts.item.id)?.provider ?? null)
-            : null,
-          modelRef: matchingEnabled && ranked.length > 0
-            ? (matchingByItem.get(ranked[0]!.facts.item.id)?.modelRef ?? null)
-            : null,
+          provider: matchingIdentity.provider,
+          modelRef: matchingIdentity.modelRef,
         }),
         risk: Object.freeze({
-          used: riskEnabled && ranked.length > 0,
+          used: riskByItem.size > 0,
           blend: round1(riskBlend * 100) / 100,
-          provider: riskEnabled && ranked.length > 0
-            ? (riskByItem.get(ranked[0]!.facts.item.id)?.provider ?? null)
-            : null,
-          modelRef: riskEnabled && ranked.length > 0
-            ? (riskByItem.get(ranked[0]!.facts.item.id)?.modelRef ?? null)
-            : null,
+          provider: riskIdentity.provider,
+          modelRef: riskIdentity.modelRef,
         }),
       });
 
@@ -789,6 +819,7 @@ export function createCampaignMatchingService(
             digest,
             createdBy: actor,
             createdAt: new Date().toISOString(),
+            evaluatedAt,
             idempotencyKey: input.idempotencyKey,
             executionId: execution.executionId,
             correlationId: execution.correlationId,
@@ -809,6 +840,7 @@ export function createCampaignMatchingService(
               candidateCount: run.candidateCount,
               eligibleCount: run.eligibleCount,
               digest: run.digest,
+              evaluatedAt: run.evaluatedAt,
               advisoryMatchingUsed: run.advisory.matching.used,
               advisoryRiskUsed: run.advisory.risk.used,
               advisoryProvider: run.advisory.matching.provider,

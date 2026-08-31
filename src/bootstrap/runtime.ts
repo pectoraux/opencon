@@ -2882,10 +2882,15 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       );
       return placements.map((p) => p.inventoryItemId);
     },
-    async evaluateEligibilityRules(rules, supply) {
+    async evaluateEligibilityRules(rules, supply, evaluatedAt) {
       // THE /inventory authority's own rule semantics (the W019 pure
       // engine) — the composition root may import it; the campaigns
-      // domain sees only the neutral interface.
+      // domain sees only the neutral interface. The evaluation
+      // anchor is the run's EXPLICIT deterministic anchor (derived
+      // once per run by the matching service and recorded on the
+      // decision) — this adapter NEVER consults wall-clock time
+      // (the PR #43 review fix: no implicit nondeterministic
+      // dependency at the matching boundary).
       const evaluation = evaluatePlacementEligibility(
         rules.map((rule) => ({
           attribute: rule.attribute,
@@ -2896,10 +2901,11 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
           territories: [...supply.territories],
           languages: [...supply.languages],
         },
-        new Date().toISOString(),
+        evaluatedAt,
       );
       return {
         eligible: evaluation.eligible,
+        evaluatedAt: evaluation.evaluatedAt,
         ruleResults: evaluation.ruleResults.map((r) => ({
           attribute: r.attribute,
           operator: r.operator,
@@ -3719,6 +3725,7 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       digest: run.digest,
       createdBy: run.createdBy,
       createdAt: run.createdAt,
+      evaluatedAt: run.evaluatedAt,
     };
   }
   // -- NET-W017 view builders (provenance-preserving) ------------------

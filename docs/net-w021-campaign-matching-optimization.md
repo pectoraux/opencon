@@ -1,7 +1,50 @@
 # NET-W021 — Campaign matching and optimization (evidence)
 
-**Work order:** spec/work-orders/NET-W021.md · **Issue:** #42 · **PR:** the canonical implementation PR closing #42
-**Status:** implemented; `bun run verify` green (typecheck + arch:check + authority:check + the full suite).
+**Work order:** spec/work-orders/NET-W021.md · **Issue:** #42 · **PR:** #43
+**Status:** implemented; `bun run verify` green (typecheck + arch:check + authority:check + the full suite); PR #43 review remediation applied (per-candidate advisory recording + the deterministic evaluation anchor).
+
+## PR #43 review remediation (CHANGES REQUESTED)
+
+The architect review found two defects; both remediated on the same
+branch with regression pins:
+
+1. **Per-candidate advisory metadata (blocking).** The result
+   builder was handed only the top-ranked candidate's advisory
+   assessments, so every persisted
+   `CampaignMatchCandidateResult.advisory` carried `ranked[0]`'s
+   matching/risk assessments — semantically false for every candidate
+   except the first. **Fix:** `buildCandidateResults(ranked,
+   matchingByItem, riskByItem, placedItemIds)` resolves each result's
+   advisory **by inventory item id** from the per-candidate
+   assessment maps the service already collected. The run-level
+   `advisory` block is now an honest SUMMARY (`used` = consultations
+   actually made; `provider`/`modelRef` = the identity shared by every
+   consultation of that purpose, `null` when none or divergent — no
+   top-candidate projection anywhere). **Regressions:** (a) AC-03 —
+   ≥2 eligible candidates with intentionally distinct assessments
+   (score AND provider AND modelRef) preserve their distinct
+   per-candidate records for BOTH purposes, the rank-2/rank-3
+   candidates' advisories are proven NOT the rank-1 candidate's, and
+   the ranking-signal inputs agree with the persisted per-candidate
+   advisory; (b) AC-06 — the per-candidate echo scores are
+   recomputed for each candidate's own fact set through the real
+   adapter chain, and the digest/recomputation suite proves the
+   per-candidate advisory metadata is digest-covered (swapping or
+   mutating one candidate's advisory on the stored record changes the
+   recomputed digest — a future collapse back to a single run-level
+   value can no longer reproduce the stored digest).
+2. **Deterministic inventory-rule evaluation (secondary).** The
+   composition-root supply lookup called the /inventory rule engine
+   with `new Date().toISOString()` — an implicit per-candidate
+   wall-clock dependency at the matching boundary. **Fix:** the
+   service derives ONE evaluation anchor per run at the service
+   boundary (the W019 `nowIso()` precedent), passes it EXPLICITLY to
+   every rule evaluation through the neutral lookup (the adapter
+   never consults wall-clock time — pinned in AC-07), records it on
+   the run record (`evaluatedAt`, part of the decision) and the audit
+   event, and keeps it OUT of the digest (wall-clock identity —
+   re-runs of identical decision content stay bit-for-bit
+   reproducible; regression-pinned in AC-03/AC-06).
 
 ## What shipped
 
@@ -150,10 +193,10 @@ explainable candidate ordering  baseline + final ranks with deltas, per-signal
 |---|---|---|
 | 01 | tests/campaigns/net-w021-ac-01-hard-gates.test.ts | 11 |
 | 02 | tests/campaigns/net-w021-ac-02-evidence-ranking.test.ts | 9 |
-| 03 | tests/campaigns/net-w021-ac-03-advisory-non-authority.test.ts | 7 |
+| 03 | tests/campaigns/net-w021-ac-03-advisory-non-authority.test.ts | 9 |
 | 04 | tests/campaigns/net-w021-ac-04-optimization-adversarial.test.ts | 6 |
 | 05 | tests/campaigns/net-w021-ac-05-selection-not-authority.test.ts | 3 |
-| 06 | tests/campaigns/net-w021-ac-06-tenancy-idempotency-contract.test.ts | 7 |
+| 06 | tests/campaigns/net-w021-ac-06-tenancy-idempotency-contract.test.ts | 8 |
 | 07 | tests/regression/net-w021-ac-07-architecture-out-of-scope.test.ts | 11 |
 
 Shared harness: tests/campaigns/_net-w021-harness.ts (wraps the
@@ -165,6 +208,7 @@ measured-outcome transition policies).
 ## Verification
 
 `bun run verify` — typecheck PASS; arch:check 0 violations;
-authority:check 0 violations; full suite green including the 54 new
-NET-W021 tests. The dev/test PostgresAuthorityShim provides the
+authority:check 0 violations; full suite green including the 57 new
+NET-W021 tests (54 + the three PR #43 review regressions). The
+dev/test PostgresAuthorityShim provides the
 authority boundary; real-PostgreSQL/Redis integration runs in CI.

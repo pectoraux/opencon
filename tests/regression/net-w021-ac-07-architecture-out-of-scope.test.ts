@@ -376,6 +376,29 @@ describe("NET-W021-AC-07 architecture / out-of-scope", () => {
     // The policy-rule evaluation delegates to the /inventory pure
     // engine (the W019 eligibility semantics authority).
     expect(w021Section).toContain("evaluatePlacementEligibility(");
+    // The supply-lookup adapter NEVER consults wall-clock time: the
+    // inventory rule engine receives the run's EXPLICIT deterministic
+    // evaluation anchor (the PR #43 review fix — no implicit
+    // nondeterministic dependency at the matching boundary).
+    const supplyLookupSection = runtime.slice(
+      runtime.indexOf("const campaignMatchSupplyLookup"),
+      runtime.indexOf("const campaignMatchReputationLookup"),
+    );
+    expect(supplyLookupSection).not.toContain("new Date(");
+    expect(supplyLookupSection).toContain("evaluatedAt");
+    // The matching service derives ONE anchor per run at the service
+    // boundary (recorded on the decision) and passes it to every
+    // rule evaluation — the only wall-clock consult in the W021 path.
+    const matchingService = await readFile(
+      join(REPO, "src/campaigns/matching-service.ts"),
+      "utf8",
+    );
+    expect(matchingService).toContain(
+      "const evaluatedAt = new Date().toISOString()",
+    );
+    expect(
+      matchingService.match(/new Date\(\)/g)?.length ?? 0,
+    ).toBeLessThanOrEqual(2);
     // The outcomes lookup consumes the /outcomes authority's
     // verified-performance read.
     expect(w021Section).toContain(
