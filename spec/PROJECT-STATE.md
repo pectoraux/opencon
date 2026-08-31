@@ -15,98 +15,96 @@
 
 ### Last merged work item
 
-**NET-W020 — Cross-promotion clearing**
+**NET-W022 — Attribution and privacy measurement adapters**
 
-- PR: #40
-- Merge SHA: `3f1f6aaddfb1ceb0b28b5570b2d902bd06e84c48`
+- GitHub issue: #44 — completed
+- PR: #45
+- Merge SHA: `45f1884656e470666e764266735ea59ec728c0ea`
 - Status: MERGED
-- Authority: `/settlement`
-- Important review lesson: coupled economic draw + clearing record + campaign bookkeeping + audit must share one authoritative transaction. The implementation was remediated to use `...WithinTx` primitives and a single composite transaction.
+- Authority: `/measurement` adapter boundary with `/outcomes` measurement semantics
+- Important review lesson: raw provider payloads remain confined to the owning adapter; normalization is fail-closed and deterministic; secrets are composition-time inputs only; persistence/idempotency/audit remain in the `/outcomes` authority and material coupled operations use one authoritative transaction.
 
 ### Previous completed milestones
 
-NET-W001 through NET-W020 are complete and merged. They established the protocol foundation, identity, persistence, evidence, measurement, reputation, economic ledger, risk/disputes, campaigns, helpful contributions, creator network, inventory/placements, and cross-promotion clearing.
+NET-W001 through NET-W022 are complete and merged.
 
-Known merge checkpoints that are particularly important for design lineage:
+Important lineage checkpoints:
 
-- NET-W003: real PostgreSQL/Redis adapters and composition-root provider selection
-- NET-W004: workflow authority and lifecycle machinery
-- NET-W005: evidence/attestation boundary and fail-closed production signing
-- NET-W006: normalized outcome/measurement authority
-- NET-W007: deterministic reputation with org-independent policy-lineage serialization
-- NET-W008: economic ledger and credit/cash primitives
-- NET-W009/010: risk/dispute authority and stake/challenge controls
-- NET-W014: contribution settlement/reputation integration
-- NET-W017: UGC lifecycle/rights with single-transaction coupled commands and recoverable batch journal
-- NET-W018: publication verification moved to a sanctioned workflow transition so generic workflow callers cannot bypass disclosure
-- NET-W019: inventory/placement settlement-readiness derivation
+- NET-W004: `/workflows` lifecycle authority
+- NET-W005: `/evidence` provenance/truth authority
+- NET-W006: `/outcomes` normalized measurement authority
+- NET-W007: deterministic multidimensional reputation
+- NET-W008: economic ledger / credits / cash / settlement primitives
+- NET-W009/010: risk/dispute authority
+- NET-W011: campaign policy authority
+- NET-W014: settlement/reputation integration
+- NET-W015/016: creator identity and matching
+- NET-W017: UGC lifecycle/rights and atomic composites
+- NET-W018: sanctioned publication verification / disclosure gate
+- NET-W019: inventory/placements and derived settlement-readiness
 - NET-W020: cross-promotion clearing with one authoritative economic transaction
+- NET-W021: campaign matching/optimization; selection only; AI advisory bounded after hard eligibility
+- NET-W022: attribution/privacy adapter boundary; `/outcomes` remains semantic measurement authority
 
 ## Next implementation target
 
-**NET-W021 — Campaign matching and optimization**
+**NET-W023 — OpenRTB and supply-chain adapters**
 
-Canonical backlog: `spec/work-items.md` → Phase 6 → NET-W021.
+- GitHub issue: #46
+- Status: READY_FOR_IMPLEMENTATION
+- Branch prepared: `feat/net-w023-openrtb-supply-chain-adapters`
+- Requirements: ADAPTER-001..002
+- Dependencies: NET-W019 and NET-W022 — VERIFIED/MERGED
+- Work order: `spec/work-orders/NET-W023.md`
+- Evidence document: `docs/net-w023-openrtb-supply-chain.md`
 
-Expected GitHub tracking issue: use the canonical NET-W021 issue if it exists; otherwise create it from the frozen backlog and mark it `READY_FOR_IMPLEMENTATION` only after dependency/readiness checks pass.
+Definition of done: existing external ad supply can connect through provider-specific adapters while OpenCon inventory, campaign, measurement, evidence, risk and settlement semantics remain authoritative and cannot be bypassed.
 
-Dependencies: NET-W006, NET-W007, NET-W009, NET-W019.
-Requirements: CAMP-001..003, AI-002..003.
-Definition of done: matching honors hard constraints first, then ranks eligible options using evidence-backed performance.
+## W023 architecture checklist
 
-## W021 architecture checklist
-
-Before implementation, verify these facts from the repository rather than relying on chat:
-
-1. `/campaigns` owns campaign policy/configuration.
-2. `/inventory` owns supply and placement semantics.
-3. `/creators` owns creator profiles and matching attributes.
-4. `/reputation` owns reputation state.
-5. `/outcomes` + `/evidence` own normalized measurement/truth.
-6. `/disputes` owns risk/control decisions.
-7. `/workflows` owns lifecycle state.
-8. `/settlement` owns economic state and mutations.
-9. `/llm` is provider-neutral; concrete providers stay behind `/adapters`.
-10. Matching/optimization may orchestrate these authorities but must not become a second authority for any of them.
-11. Hard eligibility precedes optimization.
-12. AI can advise ranking only after eligibility and cannot override policy, rights, tenancy, risk, or settlement-readiness.
-13. Material mutation requires established idempotency, transaction, audit, and trace conventions.
-14. A cross-authority composite with coupled material state must use one authoritative transaction or an explicitly approved recoverable saga.
-15. No seventeenth domain without an Architecture Change Request.
+1. `/adapters` is the sole owner of provider-specific OpenRTB, ads.txt, app-ads.txt, sellers.json and SupplyChain (`schain`) parsing/types.
+2. `/inventory` remains authoritative for registered supply, ownership, placement context, eligibility and settlement-readiness.
+3. `/campaigns` remains authoritative for campaign policy/targeting; external bid-request fields cannot override it.
+4. `/measurement` remains the adapter/measurement boundary and `/outcomes` remains normalized measurement authority.
+5. `/evidence` remains truth/provenance authority for material external attestations.
+6. `/disputes` remains risk/control authority; external assertions cannot self-clear risk.
+7. `/settlement` remains the sole economic authority; OpenRTB bid/request/response data cannot directly create ledger state.
+8. External identifiers must resolve to exactly one authoritative inventory source or fail closed; syntax alone is not authorization.
+9. Raw bid requests are opaque outside the owning adapter and must not be retained by default.
+10. Normalization must be deterministic, privacy-minimized, versioned and provider-neutral.
+11. Any material mutation must use established tenancy, authorization, idempotency, concurrency, transaction and audit conventions.
+12. Coupled material state must use one authoritative transaction or an explicitly approved recoverable saga.
+13. No seventh/eighteenth/etc. domain: no new domain boundary without Architecture Change Request.
+14. Provider SDK/types must not cross from `/adapters` into domain authorities.
 
 ## Review lessons that must persist
 
 ### Authority drift
-
-Generic identifier matching is not sufficient for architecture policing. The authority guard was corrected to use behavioral detection and positive/negative fixtures. Never weaken that guard simply to make an existing source tree pass; update the rule and fixtures together when architecture evolves.
+Generic identifier matching is not sufficient for architecture policing. Preserve behavioral/static authority guards and positive/negative fixtures.
 
 ### Tenant isolation
-
-For ID-based reads, require organization scope through service → port → runtime → HTTP where the entity is tenant-scoped. Cross-tenant IDs should normally resolve as not-found to avoid existence oracles.
+For tenant-scoped reads, organization scope must flow service → port → runtime → HTTP where applicable. Cross-tenant identifiers should normally resolve as not-found rather than existence oracles.
 
 ### Policy lineage
-
-When a policy lineage is single-tenant, serialization must be organization-independent (`{policyId}`) and the authoritative transaction must re-check scope and version. An org-scoped idempotency key alone is not sufficient.
+When policy lineage is tenant-scoped, serialize identity independently of organization scope where required and re-check scope/version inside the authoritative transaction.
 
 ### Publication/disclosure
-
-If a lifecycle edge has a semantic gate owned by another boundary, keep the edge out of the generic workflow resolver and expose it through a sanctioned transition path. Generic workflow authorization must not accidentally bypass the gate.
+Semantic lifecycle gates owned outside generic workflow resolution must use sanctioned transition paths; generic callers must not bypass the gate.
 
 ### Economic atomicity
-
-Do not chain independently committing economic services inside a larger clearing operation. Use their `...WithinTx` variants or an equivalent single settlement-authority transaction boundary. Campaign/economic bookkeeping coupled to the draw belongs in the same transaction when the operation's correctness depends on all-or-nothing behavior.
+Coupled economic mutations must share one authoritative transaction. Use `...WithinTx` primitives; do not chain independently committing economic commands.
 
 ### Audit ordering
-
-Audit publication occurs only after durable transaction commit. The audit buffer is registered with `afterCommit`/`afterRollback` hooks and must never flush/publish before the authoritative commit succeeds.
+Audit publication occurs after durable commit; transactional buffers must not flush before commit succeeds.
 
 ### AI boundaries
-
-AI/model outputs remain advisory. Domain semantics must be able to evaluate hard eligibility without an AI result. Never feed prohibited user/activity fields into an advisory provider simply because they are available upstream.
+AI outputs are advisory only and may not authorize hard eligibility, rights, tenancy, risk, settlement-readiness or lifecycle changes.
 
 ### Secrets
+Provider credentials and signing material resolve only through `SecretProvider`; missing production secrets fail closed. Test/development doubles are never implicit production fallbacks.
 
-Production/staging provider configuration and cryptographic signing material must resolve through `SecretProvider` and fail closed when missing. Development/test doubles must never be an implicit production fallback.
+### Adapter boundary
+Provider-specific protocol vocabulary belongs entirely inside `/adapters`. Domains consume only neutral contracts. Cryptographic validity proves integrity/provenance, not authorization or ownership.
 
 ## Quality gate
 
@@ -116,18 +114,9 @@ Canonical local gate:
 bun run verify
 ```
 
-Expected components include:
-
-- TypeScript typecheck
-- `arch:check`
-- `authority:check`
-- full test suite
-
-When external services are required, run the real PostgreSQL/Redis integration tests as specified by the repository CI/local instructions.
+Expected components include TypeScript typecheck, `arch:check`, `authority:check`, and the full test suite. Run configured real PostgreSQL/Redis integration tests for material work.
 
 ## GitHub workflow state machine
-
-For every work item:
 
 ```text
 READY_FOR_IMPLEMENTATION
@@ -148,22 +137,8 @@ same PR        ↓
    └──→ re-review
 ```
 
-Never merge merely because CI is green. Never create a second implementation PR when remediation is requested.
-
-## Required project-state update after each merge
-
-The next architect/agent must update this document immediately after a merge with:
-
-- merged PR and SHA;
-- next work item/issue/readiness;
-- any new authority or transaction-boundary lessons;
-- verification baseline;
-- links to the new work order/evidence/PR.
-
-## Current verification baseline
-
-The latest completed implementation checkpoint before this documentation branch is NET-W020. Its final remediation verification was green with `bun run verify`, and the PR's GitHub checks were green before merge. The exact current test-count baseline for future work should be taken from the freshly synced `main`, not from this document, because tests may evolve through independent documentation/maintenance changes.
+Never merge merely because CI is green. Never create a second implementation PR for the same work item after CHANGES REQUESTED.
 
 ## Current action
 
-Sync to `origin/main`, confirm NET-W020 merge and repository cleanliness, then resolve NET-W021's GitHub issue/readiness state. Read the W021 work item from the frozen backlog, create its work order, implement only within existing authorities, run the complete quality gate, create one PR, and wait for architect review.
+Implement NET-W023 from issue #46 and `spec/work-orders/NET-W023.md` on `feat/net-w023-openrtb-supply-chain-adapters`. Inspect W019 inventory contracts and W022 adapter conventions first. Keep provider-specific protocol types isolated in `/adapters`; compose normalized facts only at the bootstrap boundary. Add one-to-one acceptance coverage plus architecture, privacy, tenancy, fail-closed, concurrency/idempotency and settlement-bypass regressions. Do not merge until implementation, verification/CI and architect approval are all satisfied.
