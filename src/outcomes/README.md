@@ -46,7 +46,19 @@ establishes outcomes and their uncertainty; it does NOT issue credits,
 settle cash, mutate reputation, price advertising, or create any
 economic authority.
 
+## The NET-W021 additive read (verified performance evidence)
+
+`MeasuredOutcomeService.listVerifiedMeasuredOutcomesBySubject` — the
+canonical "verified performance evidence" read consumed (through the
+composition root's neutral lookup) by the campaign-matching boundary:
+the lifecycle-VERIFIED measured outcomes for a subject within an
+organization scope. Only VERIFIED (finalized) measurements are
+evidence — DRAFT/MEASURING are still maturing and CANCELLED is void;
+the lifecycle semantics and the transition table stay in this
+authority (the repository gained a read-only `listBySubject`).
+
 ## Dependencies
+
 
 Core contracts (workflow lifecycle vocabulary, evidence vocabulary,
 measurement vocabulary) + the NEUTRAL measurement port only.

@@ -59,6 +59,21 @@ export function createAuthorityMeasuredOutcomeRepository(
       return rec ? rec.value : null;
     },
 
+    async listBySubject(organizationScopeId, subjectId) {
+      // NET-W021 (additive read): subject-scoped listing. The
+      // collection scan is the shim/authority's read surface (the
+      // same approach as the creator-match run repository listing);
+      // the lifecycle filtering (VERIFIED) belongs to the service.
+      const records = await authority.scan<MeasuredOutcome>(COLLECTION);
+      return records
+        .map((rec) => rec.value)
+        .filter(
+          (m) =>
+            m.organizationScopeId === organizationScopeId &&
+            m.subjectReference.subjectId === subjectId,
+        );
+    },
+
     async findByIdWithinTx(id, tx) {
       const rec = await tx.get<MeasuredOutcome>(COLLECTION, id);
       return rec ? rec.value : null;

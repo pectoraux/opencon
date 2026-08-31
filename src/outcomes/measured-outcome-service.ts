@@ -297,6 +297,23 @@ export function createMeasuredOutcomeService(
   }
 
   const service: MeasuredOutcomeService = {
+    async listVerifiedMeasuredOutcomesBySubject(
+      execution,
+      organizationScopeId,
+      subjectId,
+    ) {
+      // NET-W021 (additive read): the canonical verified-performance
+      // read. Only lifecycle-VERIFIED (finalized) measurements are
+      // evidence — DRAFT/MEASURING are still maturing and CANCELLED
+      // is void. The lifecycle semantics stay in THIS authority.
+      void execution;
+      const measurements = await repository.listBySubject(
+        organizationScopeId,
+        subjectId,
+      );
+      return measurements.filter((m) => m.state === "VERIFIED");
+    },
+
     async createMeasuredOutcome(execution, input) {
       // ---- Validation --------------------------------------------------
       if (!input.organizationScopeId?.trim()) {

@@ -71,3 +71,43 @@ Core contracts only (`core/campaigns.ts`, `core/economics.ts`,
 `core/evidence.ts`, `core/measurement.ts`). Cross-domain access occurs
 exclusively through the declared neutral lookups wired by the
 bootstrap composition root.
+
+## What lives here (NET-W021 — campaign matching and optimization)
+
+Selection, not authority: the campaign is the matching SUBJECT; W019
+inventory items are the candidate SUPPLY (creator supply enters
+through `surfaceKind "creator"` items). The pipeline: hard
+eligibility gates → evidence-backed feature extraction →
+deterministic baseline ranking → bounded AI advisory optimization →
+explainable candidate ordering.
+
+- `matching-engine.ts` — the PURE engine: the hard gates
+  (closed-vocabulary reasons, conjunction, complete traces), the
+  six-signal baseline scoring (VERIFIED-outcome performance,
+  canonical reputation standing/reliability/risk, alignment depth,
+  coverage), the bounded advisory blends (alignment + risk ONLY),
+  the baseline/final orderings and the SHA-256 digest (canonical
+  1-decimal serialization). No I/O, no advisory on the eligibility
+  path.
+- `matching-service.ts` — all I/O: request validation, the campaign
+  subject (read-only, CAMP-002 fail-closed: ACTIVE + pinned in-scope
+  policy version), the effective-targeting merge, the run's SINGLE
+  deterministic evaluation anchor (derived once per run, passed
+  explicitly to every /inventory rule evaluation, recorded on the
+  decision), candidate enumeration + fact assembly through the NEUTRAL
+  lookups
+  (supply/eligibility over /inventory, reputation over /reputation,
+  safety over /disputes, outcome evidence over /outcomes), the
+  only-eligible advisory consultations, and ONE append-only,
+  idempotent, tenant-scoped run record (`campaign_match_runs`) +
+  its `campaign_match.recorded` audit event — the ONLY writes. The
+  persisted per-candidate `advisory` blocks are each candidate's OWN
+  assessments (resolved by item id, never a top-candidate projection);
+  the run-level `advisory` block is a uniform-identity summary.
+- `authority-match-run-repository.ts` — the run-record collection
+  over the `PostgresAuthority` contract.
+
+The optimizer mutates NO campaign, inventory, workflow, settlement,
+reputation, risk or outcome state; placement EXECUTION remains the
+W019 command's authority. See spec/work-orders/NET-W021.md and
+docs/net-w021-campaign-matching-optimization.md.

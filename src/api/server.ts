@@ -2609,6 +2609,135 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // ------------------------------------------------------------------
+    // NET-W021 — Campaign matching and optimization routes (the
+    // creators/matching precedent). Selection, not authority: the
+    // guarded run command writes ONLY the append-only run record +
+    // its audit event.
+    // ------------------------------------------------------------------
+
+    // POST /api/campaigns/matching — run a campaign match (protected;
+    // guard action campaigns.matching.run).
+    if (path === "/api/campaigns/matching" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "campaigns.matching.run", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const targeting = obj.targeting as Record<string, unknown> | undefined | null;
+      const advisory = obj.advisory as Record<string, unknown> | undefined | null;
+      const advisoryMatching = advisory?.matching as Record<string, unknown> | undefined | null;
+      const advisoryRisk = advisory?.risk as Record<string, unknown> | undefined | null;
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.runCampaignMatch(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          campaignId: strField(obj, "campaignId"),
+          ...(obj.policyVersion !== undefined && obj.policyVersion !== null
+            ? { policyVersion: obj.policyVersion }
+            : {}),
+          ...(targeting !== null && targeting !== undefined
+            ? {
+                targeting: {
+                  ...(targeting.requiredFormats !== undefined
+                    ? { requiredFormats: targeting.requiredFormats }
+                    : {}),
+                  ...(targeting.requiredSurfaceKinds !== undefined
+                    ? { requiredSurfaceKinds: targeting.requiredSurfaceKinds }
+                    : {}),
+                  ...(targeting.targetTerritories !== undefined
+                    ? { targetTerritories: targeting.targetTerritories }
+                    : {}),
+                  ...(targeting.requiredLanguages !== undefined
+                    ? { requiredLanguages: targeting.requiredLanguages }
+                    : {}),
+                },
+              }
+            : {}),
+          ...(obj.candidateInventoryItemIds !== undefined
+            ? { candidateInventoryItemIds: obj.candidateInventoryItemIds }
+            : {}),
+          ...(obj.weights !== undefined && obj.weights !== null
+            ? { weights: obj.weights }
+            : {}),
+          ...(advisory !== null && advisory !== undefined
+            ? {
+                advisory: {
+                  ...(advisoryMatching !== null && advisoryMatching !== undefined
+                    ? {
+                        matching: {
+                          ...(advisoryMatching.enabled !== undefined
+                            ? { enabled: advisoryMatching.enabled }
+                            : {}),
+                          ...(advisoryMatching.maxWeight !== undefined
+                            ? { maxWeight: advisoryMatching.maxWeight }
+                            : {}),
+                        },
+                      }
+                    : {}),
+                  ...(advisoryRisk !== null && advisoryRisk !== undefined
+                    ? {
+                        risk: {
+                          ...(advisoryRisk.enabled !== undefined
+                            ? { enabled: advisoryRisk.enabled }
+                            : {}),
+                          ...(advisoryRisk.maxWeight !== undefined
+                            ? { maxWeight: advisoryRisk.maxWeight }
+                            : {}),
+                        },
+                      }
+                    : {}),
+                },
+              }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/campaigns/matching — an org's campaign match runs,
+    // optionally narrowed by campaign (public; tenant-scoped).
+    if (path === "/api/campaigns/matching" && method === "GET" && opts.commands) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const campaignId = url.searchParams.get("campaignId") ?? undefined;
+      const views = await opts.commands.listCampaignMatchRuns(
+        ctx,
+        organizationScopeId,
+        campaignId,
+      );
+      await send(res, 200, { organizationScopeId, runs: views });
+      return true;
+    }
+
+    // GET /api/campaigns/matching/:id — one campaign match run
+    // (public; tenant-scoped; a cross-scope run id is not found).
+    if (
+      path.startsWith("/api/campaigns/matching/") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/campaigns/matching/".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      // A cross-scope or nonexistent run id throws NotFoundError —
+      // the global handler maps the not_found classification to 404.
+      const view = await opts.commands.getCampaignMatchRun(
+        ctx,
+        organizationScopeId,
+        id,
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
     // GET /api/campaigns/:id/policies — the immutable policy versions
     // (public).
     if (
@@ -2871,6 +3000,7 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       await send(res, 200, view);
       return true;
     }
+
 
     // ------------------------------------------------------------------
     // NET-W017 — UGC workflow and rights (creator engagements). The
