@@ -82,11 +82,11 @@ Composition-root orchestration is allowed, but an orchestration function must no
 - **NET-W020 — Cross-promotion and clearing** — **COMPLETE**. Clearing orchestration established inside `/settlement`; the economic draw, clearing record, campaign bookkeeping and audit lineage share one authoritative transaction.
 - **NET-W021 — Campaign matching and optimization** — **COMPLETE**. Matching remains selection-not-authority; hard eligibility precedes deterministic ranking and bounded AI advisory.
 - **NET-W022 — Attribution and privacy measurement adapters** — **COMPLETE**. Browser/platform and iOS attribution facts normalize through `/measurement`; `/outcomes` remains measurement authority; provider secrets/raw payloads remain isolated.
-- **NET-W023 — OpenRTB and supply-chain adapters** — **CURRENT IMPLEMENTATION TARGET**. Connect existing ad supply through `/adapters` without bypassing inventory, campaign, measurement, evidence, risk or settlement semantics.
+- **NET-W023 — OpenRTB and supply-chain adapters** — **COMPLETE**. All provider-specific OpenRTB/ads.txt/app-ads.txt/sellers.json/schain parsing lives in `/adapters`; supply-chain `verified` requires authenticated (HMAC trust channel via `SecretProvider`) + fresh + consistent evidence; the delivery-notice material path reuses the W022 measurement ingestion composite.
 
 ### Phase 7 — Demand economy
 
-- **NET-W024 — Consumer Demand Pools** — **PLANNED**.
+- **NET-W024 — Consumer Demand Pools** — **CURRENT IMPLEMENTATION TARGET**. Aggregate privacy-preserving consumer demand commitments and expose qualified aggregate demand to competing suppliers without exposing individual commitments or creating a parallel economic authority.
 - **NET-W025 — Business procurement pools** — **PLANNED**.
 - **NET-W026 — Supplier offers and competitive selection** — **PLANNED**.
 - **NET-W027 — Verified savings and counterfactuals** — **PLANNED**.
@@ -122,49 +122,48 @@ W028/W033 → W036
 
 The precise dependency and readiness rules remain authoritative in `spec/dependency-graph.md` and `spec/work-items.md`.
 
-## W023 implementation contract
+## W024 implementation contract
 
 ### Authority model
 
 ```text
-external OpenRTB / supply-chain messages
+consumer demand commitments (tenant-scoped, consented)
         ↓
-provider-specific parsing + validation in `/adapters`
+/demand owns pools + commitments + versioned neutral category/attribute vocabulary
         ↓
-provider-neutral request / authorization facts
+privacy-preserving aggregation (deterministic derivation, frozen privacy floor)
         ↓
-bootstrap composition root ONLY
+qualified aggregate demand views (derived, never stored, never caller-asserted)
         ↓
-/inventory + /campaigns + /measurement + /evidence + /disputes
+composition root ONLY (neutral membership reads over /organizations)
         ↓
-/settlement only through existing approved authority APIs
+/settlement stays the sole economic authority (zero demand-side economic surface)
 ```
 
 ### Inputs
 
-- OpenRTB request/response structures required by the current advertising surface;
-- seller/publisher/app authorization facts from ads.txt, app-ads.txt, sellers.json and `schain`-style supply-chain inputs;
-- registered `/inventory` supply and placement references;
-- existing campaign targeting/policy;
-- W022 neutral measurement contracts where measurement facts are relevant;
-- existing evidence, risk and settlement interfaces where an approved material operation requires them.
+- consumer demand commitments: bounded provider-neutral category + attribute vocabulary (region, quantity, budget band) with explicit consent;
+- tenant-scoped pool records with explicit, versioned qualification policy;
+- organization membership facts resolved read-only through the neutral lookup (server-enforced authorization/consent);
+- existing identity/participant contracts through neutral reads only;
+- nothing else: no activity, spend, wealth, reputation or economic-source assertion may influence qualification.
 
 ### Required behavior
 
-1. Provider-specific protocol fields, SDK types and transport details are confined to `/adapters`.
-2. Normalized contracts are provider-neutral, explicitly versioned and deterministically serializable where reproducibility matters.
-3. Critical OpenRTB fields, supported versions, cardinality limits and safety-sensitive values fail closed on invalid input.
-4. Supply-chain records normalize into bounded provenance/authorization facts with source, time/version where available and verification state.
-5. External seller/publisher/app identifiers resolve to exactly one authoritative inventory source or fail closed; the adapter never creates ownership.
-6. Unverified, ambiguous or stale supply-chain facts cannot directly authorize campaigns, create placement eligibility, clear risk, create evidence truth or make supply settlement-ready.
-7. Raw requests are not persisted by default; normalized output contains only approved neutral fields; credentials and secrets never appear in records, logs, audit or errors.
-8. Any material operation preserves tenancy, authorization, idempotency, concurrency and transactional audit lineage.
-9. Coupled material mutations use one authoritative transaction or an explicitly approved recoverable saga.
-10. No new domain boundary and no alternate economic/workflow/risk/measurement authority.
+1. Pools and commitments are first-class, tenant-scoped, durable records with explicit provenance and server-written consent grants.
+2. Pool membership requires server-side authorization (guard policy + active organization membership) and correct tenant scope; client claims never fabricate either.
+3. Aggregate demand is derived from authoritative commitment records at evaluation time; no caller-provided aggregate is trusted; nothing aggregate is stored as asserted truth.
+4. Individual commitments are private: supplier-facing outputs are counts/ranges/bounded distributions only, emitted only above the frozen privacy floor, with below-floor groups suppressed (never named).
+5. Qualification is deterministic and reproducible: one explicit evaluation anchor, canonical digest over the aggregate facts, fixed orderings.
+6. Threshold policy is explicit and versioned and cannot be caller-asserted at evaluation; the privacy floor is a frozen constant no policy can lower.
+7. Pool closure and commitment withdrawal are one-way field mutations (no local status machinery; `/workflows` untouched).
+8. Cross-tenant references fail closed as not-found with no existence oracle.
+9. Material mutations are idempotent (composite keys), concurrency-safe (per-pool locking), and atomically audited on ONE authoritative transaction; failed commits leave no partial pool state.
+10. No economic mutation surface exists in `/demand`: no ledger, credits, cash, stakes, rewards; no new domain boundary; no procurement/supplier-offer/selection/savings/benefit semantics (W025–W028).
 
 ### Evidence gate
 
-W023 is mergeable only after implementation, acceptance coverage, mutation checks, `bun run verify`, configured real PostgreSQL/Redis integration, exactly one implementation PR, and architect approval are all complete.
+W024 is mergeable only after implementation, acceptance coverage (privacy, authorization, aggregation, tenancy, idempotency, concurrency, atomicity), mutation checks for privacy/minimization, consent/authorization and threshold bypasses, `bun run verify`, configured real PostgreSQL/Redis integration, exactly one implementation PR, and architect approval are all complete.
 
 ## Work-item operating procedure
 
