@@ -19,6 +19,7 @@ import {
   registerExternalSupply,
   evaluateRequest,
   freshKey,
+  signSellerAuthorization,
   supplyActorCtx,
   PUBLISHER_DOMAIN,
   EVALUATED_AT,
@@ -179,14 +180,16 @@ describe("NET-W023-AC-04 exact-one inventory resolution", () => {
       }),
       sellerAuthorizations: [
         // app-ads.txt bound to the app bundle (the publisher surface).
-        {
+        // PR #47 remediation: signed with the harness trust key —
+        // only authenticated evidence can verify a chain.
+        signSellerAuthorization({
           providerId: SUPPLY_PROVIDER_ID,
           sourceKind: "app-ads.txt",
           content: "exchange-one.example, pub-seller-1, DIRECT",
           sourceIdentity: "com.example.app",
           observedAt: "2026-09-01T11:00:00.000Z",
-        },
-        {
+        }),
+        signSellerAuthorization({
           providerId: SUPPLY_PROVIDER_ID,
           sourceKind: "sellers.json",
           content: JSON.stringify({
@@ -201,7 +204,7 @@ describe("NET-W023-AC-04 exact-one inventory resolution", () => {
           }),
           sourceIdentity: "exchange-one.example",
           observedAt: "2026-09-01T11:00:00.000Z",
-        },
+        }),
       ],
       evaluatedAt: EVALUATED_AT,
     });

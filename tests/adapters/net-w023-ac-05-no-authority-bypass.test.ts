@@ -20,6 +20,7 @@ import {
   evaluateRequest,
   publisherAdsTxtContent,
   firstExchangeSellersJson,
+  signSellerAuthorization,
   supplyActorCtx,
   freshKey,
   PUBLISHER_DOMAIN,
@@ -120,25 +121,26 @@ describe("NET-W023-AC-05 no authority bypass", () => {
     expect(stale.supplyChain.status).toBe("stale");
     expect(stale.supplyChain.authorizations).toHaveLength(2);
 
-    // ambiguous: two conflicting ads.txt observations for the same
-    // publisher surface (distinct digests).
+    // ambiguous: two conflicting SIGNED ads.txt observations for the
+    // same publisher surface (distinct digests — trusted evidence in
+    // genuine conflict).
     const ambiguous = await evaluateRequest(harness, {
       request: rawBidRequest(),
       sellerAuthorizations: [
-        {
+        signSellerAuthorization({
           providerId: SUPPLY_PROVIDER_ID,
           sourceKind: "ads.txt",
           content: publisherAdsTxtContent(),
           sourceIdentity: PUBLISHER_DOMAIN,
           observedAt: OBSERVED_AT,
-        },
-        {
+        }),
+        signSellerAuthorization({
           providerId: SUPPLY_PROVIDER_ID,
           sourceKind: "ads.txt",
           content: publisherAdsTxtContent({ sellerId: "another-seller" }),
           sourceIdentity: PUBLISHER_DOMAIN,
           observedAt: OBSERVED_AT,
-        },
+        }),
         verifyingAuthorizations()[1]!,
       ],
       evaluatedAt: EVALUATED_AT,
@@ -306,24 +308,25 @@ describe("NET-W023-AC-05 no authority bypass", () => {
     harness = await createNetW023SupplyHarness();
     await registerExternalSupply(harness);
     // Missing evidence dominates conflicting evidence (deterministic
-    // precedence: incomplete > ambiguous > stale > mismatched).
+    // precedence: incomplete > unauthenticated > ambiguous > stale >
+    // mismatched).
     const both = await evaluateRequest(harness, {
       request: rawBidRequest(),
       sellerAuthorizations: [
-        {
+        signSellerAuthorization({
           providerId: SUPPLY_PROVIDER_ID,
           sourceKind: "ads.txt",
           content: publisherAdsTxtContent(),
           sourceIdentity: PUBLISHER_DOMAIN,
           observedAt: OBSERVED_AT,
-        },
-        {
+        }),
+        signSellerAuthorization({
           providerId: SUPPLY_PROVIDER_ID,
           sourceKind: "ads.txt",
           content: publisherAdsTxtContent({ sellerId: "conflicting" }),
           sourceIdentity: PUBLISHER_DOMAIN,
           observedAt: OBSERVED_AT,
-        },
+        }),
         // NOTE: the intermediate sellers.json is MISSING → incomplete
         // takes precedence over the publisher-side ambiguity.
       ],
@@ -332,5 +335,135 @@ describe("NET-W023-AC-05 no authority bypass", () => {
     expect(both.rejectionReason).toBe("supply_chain_incomplete");
     void firstExchangeSellersJson;
     void freshKey;
+  });
+
+  // ---------------------------------------------------------------------
+  // PR #47 REMEDIATION REGRESSIONS (architect CHANGES REQUESTED).
+  //
+  // Blocking finding 1: supply-chain verification was only
+  // consistency checking of CALLER-SUPPLIED authorization files —
+  // fabricated ads.txt/app-ads.txt/sellers.json content could produce
+  // `verified`. Blocking finding 2: `observedAt` was optional, yet
+  // missing freshness data could still lead to `verified`. These
+  // regressions pin both gates: only AUTHENTICATED + FRESH +
+  // CONSISTENT evidence can produce `verified`.
+  // ---------------------------------------------------------------------
+
+  test("REMEDIATION (finding 1): fabricated (unauthenticated) authorization files can NEVER produce verified — no envelope", async () => {
+    harness = await createNetW023SupplyHarness();
+    await registerExternalSupply(harness);
+    // Grammar-VALID content — a perfectly consistent authorization
+    // set — submitted with NO trust envelope: fabricated caller
+    // content (the pre-remediation attack). It must NOT verify.
+    const fabricated = await evaluateRequest(harness, {
+      request: rawBidRequest(),
+      sellerAuthorizations: verifyingAuthorizations({
+        integrityMode: "unsigned",
+      }),
+      evaluatedAt: EVALUATED_AT,
+    });
+    expect(fabricated.admitted).toBe(false);
+    expect(fabricated.rejectionReason).toBe("supply_chain_unauthenticated");
+    expect(fabricated.supplyChain.status).toBe("unauthenticated");
+    // The facts REMAIN FACTS (§3.4): the untrusted observations are
+    // still recorded in the evaluation — they simply cannot govern.
+    expect(fabricated.supplyChain.authorizations).toHaveLength(2);
+  });
+
+  test("REMEDIATION (finding 1): a TAMPERED signature (envelope does not match the content) can NEVER produce verified", async () => {
+    harness = await createNetW023SupplyHarness();
+    await registerExternalSupply(harness);
+    const tampered = await evaluateRequest(harness, {
+      request: rawBidRequest(),
+      sellerAuthorizations: verifyingAuthorizations({
+        integrityMode: "tampered",
+      }),
+      evaluatedAt: EVALUATED_AT,
+    });
+    expect(tampered.admitted).toBe(false);
+    expect(tampered.rejectionReason).toBe("supply_chain_unauthenticated");
+    expect(tampered.supplyChain.status).toBe("unauthenticated");
+  });
+
+  test("REMEDIATION (finding 1): a correctly-computed envelope signed with the WRONG key can NEVER produce verified", async () => {
+    harness = await createNetW023SupplyHarness();
+    await registerExternalSupply(harness);
+    const wrongKey = await evaluateRequest(harness, {
+      request: rawBidRequest(),
+      sellerAuthorizations: verifyingAuthorizations({
+        integrityMode: "wrongKey",
+      }),
+      evaluatedAt: EVALUATED_AT,
+    });
+    expect(wrongKey.admitted).toBe(false);
+    expect(wrongKey.rejectionReason).toBe("supply_chain_unauthenticated");
+    expect(wrongKey.supplyChain.status).toBe("unauthenticated");
+  });
+
+  test("REMEDIATION (finding 2): a SIGNED submission with MISSING observedAt can NEVER produce verified (missing freshness = stale)", async () => {
+    harness = await createNetW023SupplyHarness();
+    await registerExternalSupply(harness);
+    // Valid trust envelopes over content WITHOUT any observation
+    // timestamp — the signature honestly attests the ABSENCE of
+    // freshness. The freshness gate must treat it as NOT fresh.
+    const noFreshness = await evaluateRequest(harness, {
+      request: rawBidRequest(),
+      sellerAuthorizations: verifyingAuthorizations({
+        omitObservedAt: true,
+      }),
+      evaluatedAt: EVALUATED_AT,
+    });
+    expect(noFreshness.admitted).toBe(false);
+    expect(noFreshness.rejectionReason).toBe("supply_chain_stale");
+    expect(noFreshness.supplyChain.status).toBe("stale");
+    // The freshness-less facts remain recorded facts.
+    expect(noFreshness.supplyChain.authorizations).toHaveLength(2);
+    expect(noFreshness.supplyChain.authorizations[0]!.observedAt).toBeNull();
+  });
+
+  test("REMEDIATION (findings 1+2 combined): authenticated+fresh publisher file + unauthenticated hop file → unauthenticated, never verified", async () => {
+    harness = await createNetW023SupplyHarness();
+    await registerExternalSupply(harness);
+    const mixed = await evaluateRequest(harness, {
+      request: rawBidRequest(),
+      sellerAuthorizations: [
+        verifyingAuthorizations()[0]!,
+        // The intermediate hop evidence is fabricated (no envelope).
+        verifyingAuthorizations({ integrityMode: "unsigned" })[1]!,
+      ],
+      evaluatedAt: EVALUATED_AT,
+    });
+    expect(mixed.admitted).toBe(false);
+    expect(mixed.rejectionReason).toBe("supply_chain_unauthenticated");
+    expect(mixed.supplyChain.status).toBe("unauthenticated");
+  });
+
+  test("REMEDIATION (default runtime): WITHOUT a configured trust channel even correctly-signed facts can NEVER produce verified (fail closed)", async () => {
+    // The default runtime has NO SELLER_AUTHORIZATION_TRUST_KEY: the
+    // trust channel is unconfigured, so nothing can authenticate.
+    harness = await createNetW023SupplyHarness({
+      sellerAuthorizationTrustKey: null,
+    });
+    await registerExternalSupply(harness);
+    expect(harness.runtime.openRtbSellerAuthorizationTrust.configured).toBe(false);
+    const unconfigured = await evaluateRequest(harness, {
+      request: rawBidRequest(),
+      sellerAuthorizations: verifyingAuthorizations(),
+      evaluatedAt: EVALUATED_AT,
+    });
+    expect(unconfigured.admitted).toBe(false);
+    expect(unconfigured.rejectionReason).toBe("supply_chain_unauthenticated");
+    expect(unconfigured.supplyChain.status).toBe("unauthenticated");
+    // And the evaluation still writes NOTHING (the pure-derivation
+    // guarantee holds under the unauthenticated path too).
+    const auditCount = await harness.runtime.auditWriter.count();
+    expect(auditCount).toBeGreaterThan(0); // harness setup writes
+    const before = await harness.runtime.auditWriter.count();
+    await evaluateRequest(harness, {
+      request: rawBidRequest({ set: { id: "w023-unconfigured-2" } }),
+      sellerAuthorizations: verifyingAuthorizations(),
+      evaluatedAt: EVALUATED_AT,
+    });
+    expect(await harness.runtime.auditWriter.count()).toBe(before);
   });
 });

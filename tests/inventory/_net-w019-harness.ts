@@ -28,6 +28,7 @@ import {
   creatorCtx as w017CreatorCtx,
   operatorCtx as w017OperatorCtx,
   personCtx as w017PersonCtx,
+  type NetW008HarnessOptions,
   type NetW017Harness,
 } from "../creators/_net-w017-harness.ts";
 import { createExecutionContext } from "../../src/core/execution-context.ts";
@@ -59,8 +60,10 @@ const GUARD_ACTIONS = [
   "inventory.placements.retire",
 ];
 
-export async function createNetW019Harness(): Promise<NetW019Harness> {
-  const w017 = await createNetW017Harness();
+export async function createNetW019Harness(
+  opts: NetW008HarnessOptions = {},
+): Promise<NetW019Harness> {
+  const w017 = await createNetW017Harness(opts);
   const runtime = w017.runtime;
   const bootstrapCtx = w017.bootstrapCtx;
 

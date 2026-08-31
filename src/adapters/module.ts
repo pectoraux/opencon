@@ -7,8 +7,10 @@ import { defineBoundaryModule } from "../core/domain-module.ts";
  * supply-chain adapter surface: neutral protocol contracts (port),
  * the provider registry/ingress + the reference OpenRTB adapter
  * (adapter tier), fail-closed normalization with privacy redaction,
- * and the neutral read-only inventory lookup implemented at the
- * composition root.
+ * the seller-authorization trust envelope (PR #47 remediation:
+ * verification = authenticated + fresh + consistent — fabricated
+ * caller content never produces `verified`), and the neutral
+ * read-only inventory lookup implemented at the composition root.
  */
 export const adaptersModule = defineBoundaryModule({
   name: "adapters",

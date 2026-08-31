@@ -157,7 +157,9 @@ export function isOpenRtbRequestRejectionReason(
  * (not thrown): a rejected evaluation is a deterministic derivation
  * outcome — like the W019 settlement-readiness checks — never an
  * authority mutation. Supply-side reasons only: campaign matching
- * stays NET-W021, settlement stays /settlement.
+ * stays NET-W021, settlement stays /settlement. PR #47 remediation:
+ * `supply_chain_unauthenticated` — the authorization evidence is
+ * grammar-valid but not authenticated against the trust channel.
  */
 export const EXTERNAL_ADMISSION_REJECTION_REASONS = [
   "supply_not_found",
@@ -166,6 +168,7 @@ export const EXTERNAL_ADMISSION_REJECTION_REASONS = [
   "supply_format_mismatch",
   "supply_chain_absent",
   "supply_chain_incomplete",
+  "supply_chain_unauthenticated",
   "supply_chain_mismatched",
   "supply_chain_stale",
   "supply_chain_ambiguous",
@@ -179,11 +182,24 @@ export function isExternalAdmissionRejectionReason(
   return (EXTERNAL_ADMISSION_REJECTION_REASONS as readonly string[]).includes(value);
 }
 
-/** The closed supply-chain verification statuses (§3.3). */
+/**
+ * The closed supply-chain verification statuses (§3.3).
+ *
+ * PR #47 remediation (architect review): `verified` means the
+ * authorization evidence was AUTHENTICATED against the configured
+ * seller-authorization trust channel (HMAC integrity envelope over
+ * the exact file content + provenance), is FRESH (a non-null
+ * `observedAt` within the staleness bound) and is CONSISTENT with
+ * the chain. Grammar-valid but UNAUTHENTICATED caller-supplied
+ * content — fabricated ads.txt/app-ads.txt/sellers.json — can never
+ * produce `verified`: it caps at `unauthenticated` (the facts remain
+ * facts, §3.4, but are never promoted to authorization).
+ */
 export const SUPPLY_CHAIN_VERIFICATION_STATUSES = [
   "verified",
   "absent",
   "incomplete",
+  "unauthenticated",
   "mismatched",
   "stale",
   "ambiguous",
@@ -195,8 +211,22 @@ export type SupplyChainVerificationStatus =
  * How old submitted seller-authorization facts may be before the
  * verification evaluation reports `stale` (the facts may remain facts
  * — they simply cannot support admission; §3.4).
+ *
+ * PR #47 remediation (architect review): freshness is now REQUIRED —
+ * facts whose `observedAt` is MISSING (null) or older than this bound
+ * can never support `verified` (missing freshness data is treated as
+ * NOT fresh, fail closed).
  */
 export const SUPPLY_CHAIN_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * The only supported seller-authorization integrity algorithm (the
+ * PR #47 remediation trust envelope — the W022 report-integrity
+ * precedent: HMAC-SHA256, provider-neutral, no vendor SDK). The
+ * verification key resolves ONLY through the SecretProvider at
+ * composition time (`SELLER_AUTHORIZATION_TRUST_KEY`).
+ */
+export const SELLER_AUTHORIZATION_INTEGRITY_ALGORITHM = "hmac-sha256" as const;
 
 // ---------------------------------------------------------------------------
 // NET-W023 neutral protocol facts (bounded, versioned — AC-01)
@@ -309,8 +339,30 @@ export interface SellerAuthorizationFacts {
 }
 
 // ---------------------------------------------------------------------------
-// NET-W023 raw submissions (opaque payloads)
+// NET-W023 raw submissions (opaque payloads) + the trust envelope
 // ---------------------------------------------------------------------------
+
+/**
+ * The integrity envelope a TRUSTED supply-chain collector attaches to
+ * a seller-authorization submission (PR #47 remediation — the W022
+ * report-integrity precedent). The signature is HMAC-SHA256 over the
+ * canonical serialization of the submission facts it attests
+ * (`sourceKind`, `sourceIdentity`, the exact file `content`, and
+ * `observedAt` — the ABSENCE of freshness is attested as null), so
+ * the envelope binds the exact authorization content + provenance the
+ * trust channel observed. The verification key resolves ONLY through
+ * the SecretProvider at composition time; the envelope NEVER carries
+ * the key, and neither the signature nor the file content is ever
+ * logged, persisted, or echoed into audit/error payloads (PRIV-002).
+ */
+export interface SellerAuthorizationIntegrityBlock {
+  /** MUST equal "hmac-sha256" (the closed algorithm vocabulary). */
+  readonly algorithm: string;
+  /** The trusted collector's HMAC signature over the canonical submission facts. */
+  readonly signature: string;
+  /** When the collector signed (ISO-8601 provenance fact). */
+  readonly signedAt: string;
+}
 
 /**
  * A raw OpenRTB bid-request submission. `payload` is the vendor-shaped
@@ -326,8 +378,17 @@ export interface RawOpenRtbRequestSubmission {
  * A raw seller-authorization file submission: the TEXT content of an
  * ads.txt / app-ads.txt file or the JSON content of a sellers.json
  * file, plus the identity whose authorization surface the file is and
- * the observation time (staleness evaluation input). Opaque outside
+ * the observation time (the staleness evaluation input). Opaque outside
  * the owning adapter.
+ *
+ * PR #47 remediation (architect review): `integrity` is the OPTIONAL
+ * trust envelope. Submissions WITHOUT a valid envelope still normalize
+ * (their facts remain facts, §3.4) but can NEVER support a `verified`
+ * supply chain — grammar-valid fabricated caller content caps at the
+ * `unauthenticated` verification status. Freshness is likewise
+ * REQUIRED: a submission whose `observedAt` is missing may carry a
+ * valid envelope (the signature attests the absence) but its facts
+ * can never support `verified` either (`stale`).
  */
 export interface RawSellerAuthorizationSubmission {
   readonly providerId: string;
@@ -335,6 +396,7 @@ export interface RawSellerAuthorizationSubmission {
   readonly content: string;
   readonly sourceIdentity: string;
   readonly observedAt?: string;
+  readonly integrity?: SellerAuthorizationIntegrityBlock;
 }
 
 // ---------------------------------------------------------------------------

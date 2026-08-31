@@ -61,10 +61,19 @@ export interface NetW008Harness {
  * input the composition root assembles (e.g. that it carries no
  * mention-derived feature — HELP-002). Omitted → the deterministic
  * ECHO reference provider.
+ *
+ * NET-W023 PR #47 remediation: `adapters.sellerAuthorizationTrustKey`
+ * threads the seller-authorization trust channel key into
+ * `createRuntime` (the supply-chain verification trust envelope).
+ * Omitted → the trust channel is NOT configured (fail closed —
+ * no chain can be `verified`).
  */
 export interface NetW008HarnessOptions {
   readonly llm?: {
     readonly providers?: readonly (LlmPort & ProviderAdapter)[];
+  };
+  readonly adapters?: {
+    readonly sellerAuthorizationTrustKey?: string;
   };
 }
 
@@ -77,6 +86,13 @@ export async function createNetW008Harness(
     port: 0,
     ...(opts.llm?.providers
       ? { llm: { providers: opts.llm.providers } }
+      : {}),
+    ...(opts.adapters?.sellerAuthorizationTrustKey !== undefined
+      ? {
+          adapters: {
+            sellerAuthorizationTrustKey: opts.adapters.sellerAuthorizationTrustKey,
+          },
+        }
       : {}),
   });
   await runtime.initialize();

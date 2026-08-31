@@ -24,6 +24,7 @@ import {
   OPENRTB_REQUEST_REJECTION_REASONS,
   EXTERNAL_ADMISSION_REJECTION_REASONS,
   SUPPLY_CHAIN_VERIFICATION_STATUSES,
+  SELLER_AUTHORIZATION_INTEGRITY_ALGORITHM,
   SELLER_RELATIONSHIP_KINDS,
   SELLER_AUTHORIZATION_SOURCE_KINDS,
   OPENRTB_SUPPORTED_VERSIONS,
@@ -48,6 +49,7 @@ const W023_FILES = [
   "src/adapters/openrtb/canonical-json.ts",
   "src/adapters/openrtb/vendor-request.ts",
   "src/adapters/openrtb/supply-chain-files.ts",
+  "src/adapters/openrtb/authorization-integrity.ts",
   "src/adapters/openrtb/reference-adapter.ts",
   "src/measurement/providers/openrtb-delivery-adapter.ts",
 ];
@@ -122,6 +124,7 @@ describe("NET-W023-AC-08 architecture / out-of-scope", () => {
       "supply_format_mismatch",
       "supply_chain_absent",
       "supply_chain_incomplete",
+      "supply_chain_unauthenticated",
       "supply_chain_mismatched",
       "supply_chain_stale",
       "supply_chain_ambiguous",
@@ -130,6 +133,7 @@ describe("NET-W023-AC-08 architecture / out-of-scope", () => {
       "verified",
       "absent",
       "incomplete",
+      "unauthenticated",
       "mismatched",
       "stale",
       "ambiguous",
@@ -147,6 +151,8 @@ describe("NET-W023-AC-08 architecture / out-of-scope", () => {
       "sellers.json",
     ]);
     expect([...OPENRTB_SUPPORTED_VERSIONS]).toEqual(["2.5", "2.6"]);
+    // PR #47 remediation: the trust-envelope algorithm vocabulary.
+    expect(SELLER_AUTHORIZATION_INTEGRITY_ALGORITHM).toBe("hmac-sha256");
     // The FROZEN vocabularies are unchanged.
     expect([...ATTRIBUTION_MODES]).toEqual([
       "deterministic",
@@ -285,6 +291,11 @@ describe("NET-W023-AC-08 architecture / out-of-scope", () => {
     // The delivery-notice secret resolves ONLY through the
     // SecretProvider (auto-wire iff present).
     expect(runtime).toContain("MEASUREMENT_OPENRTB_DELIVERY_SECRET_KEY");
+    // PR #47 remediation: the seller-authorization trust channel key
+    // resolves ONLY through the SecretProvider (or the explicit
+    // composition override) and injects into the ingress.
+    expect(runtime).toContain("SELLER_AUTHORIZATION_TRUST_SECRET_KEY");
+    expect(runtime).toContain("sellerAuthorizationTrustKey");
     // The neutral port is the only adapters surface the API sees.
     const apiPort = await readFile(join(REPO, "src/api/port.ts"), "utf8");
     expect(apiPort).toContain("adapters/port.ts");
@@ -320,9 +331,12 @@ describe("NET-W023-AC-08 architecture / out-of-scope", () => {
     }
     const schema = await readFile(join(REPO, "src/config/schema.ts"), "utf8");
     expect(SECRET_VALUE_PATTERN.test(schema)).toBe(false);
-    // The .env.example documents the new secret NAME only (no value).
+    // The .env.example documents the new secret NAMES only (no values).
     const envExample = await readFile(join(REPO, ".env.example"), "utf8");
     expect(envExample).toContain("MEASUREMENT_OPENRTB_DELIVERY_KEY=");
     expect(envExample).not.toMatch(/MEASUREMENT_OPENRTB_DELIVERY_KEY=\S+/);
+    // PR #47 remediation: the trust-channel secret name only.
+    expect(envExample).toContain("SELLER_AUTHORIZATION_TRUST_KEY=");
+    expect(envExample).not.toMatch(/SELLER_AUTHORIZATION_TRUST_KEY=\S+/);
   });
 });

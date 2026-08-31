@@ -1,6 +1,6 @@
 # NET-W023 — OpenRTB and supply-chain adapters
 
-**Status:** IMPLEMENTED (implementation branch `feat/net-w023-openrtb-supply-chain-adapters`)
+**Status:** IMPLEMENTED + PR #47 REMEDIATED (architect review CHANGES REQUESTED — same branch/PR, same discipline as prior NET remediations)
 **GitHub issue:** #46
 **Work order:** `spec/work-orders/NET-W023.md`
 **Architecture:** v1.0 FROZEN
@@ -107,14 +107,14 @@ lifecycle. W023 introduces NO second authority in any of these areas.
 
 | AC | Required evidence | Status |
 |---|---|---|
-| AC-01 provider-neutral OpenRTB contract | contract/version pinning + vendor-field containment (exact neutral key set; device/user/regs/ext redacted by name) + registry identity rules + default runtime echo-only + secret auto-wire + provider override | SATISFIED — `tests/adapters/net-w023-ac-01-neutral-contract.test.ts` (6 tests) |
+| AC-01 provider-neutral OpenRTB contract | contract/version pinning + vendor-field containment (exact neutral key set; device/user/regs/ext redacted by name) + registry identity rules + default runtime echo-only + secret auto-wire + provider override + trust-channel wiring (secret/override/absent) + integrity-algorithm pin | SATISFIED — `tests/adapters/net-w023-ac-01-neutral-contract.test.ts` (7 tests) |
 | AC-02 fail-closed OpenRTB validation | every closed rejection reason exercised (malformed/unsupported version/missing id/missing+invalid supply identity/cardinality/payload size/unsafe critical values/ambiguous chain) + error contexts clean + inventory unchanged on rejection + unknown provider + spoofed identity | SATISFIED — `tests/adapters/net-w023-ac-02-fail-closed-validation.test.ts` (12 tests) |
 | AC-03 supply-chain normalization | ads.txt/app-ads.txt/sellers.json fixtures; unified representation with provenance + version; DIRECT/RESELLER + PUBLISHER/INTERMEDIARY/BOTH mappings; line-order independence (record-set semantics); digest recomputation; duplicate dedupe; embedded schain normalization | SATISFIED — `tests/adapters/net-w023-ac-03-supply-chain-normalization.test.ts` (7 tests) |
-| AC-04 exact-one inventory resolution | golden path admitted (verified chain); zero matches → supply_not_found (nothing registered); multiple → ambiguous_supply; cross-tenant invisible (not-found, no existence oracle); retired → supply_retired; format mismatch; app bundle identity; no placement/verification fabrication | SATISFIED — `tests/adapters/net-w023-ac-04-exact-one-inventory.test.ts` (8 tests) |
-| AC-05 no authority bypass | full status matrix (absent/incomplete/mismatched/stale/ambiguous → NOT admitted; verified → admitted); admitted evaluation writes NOTHING (audit delta 0, inventory/placements/verification unchanged); settlement readiness re-derived unchanged; no evidence records; no ledger postings; deterministic precedence | SATISFIED — `tests/adapters/net-w023-ac-05-no-authority-bypass.test.ts` (7 tests) |
-| AC-06 determinism/privacy | identical-input determinism; field-order independence (canonical digest); evaluation determinism under the explicit anchor; raw payload markers absent from evaluation/logs/audit; redaction names-only bounded at 24; notice path: no raw content or secret in views/observations/logs/audit/errors; tampered notice fails closed; file content never crosses | SATISFIED — `tests/adapters/net-w023-ac-06-determinism-privacy.test.ts` (8 tests) |
-| AC-07 tenancy/idempotency/atomicity | the material path through the W022 composite: one atomic audit event with provider metadata + idempotency/transaction lineage; exactly-once + replay; per-org key namespace; 4-way concurrency (exactly one created); HTTP guard 403/200/400 + classified rejection; the evaluation command mutates nothing (audit delta 0) | SATISFIED — `tests/adapters/net-w023-ac-07-tenancy-idempotency.test.ts` (6 tests) |
-| AC-08 architecture regression | frozen specs pinned (no 17th domain); architecture + authority scans 281 files / 0 violations; new vocabularies pinned + frozen vocabularies unchanged; no mutation vocabulary or domain imports in the adapter tier; provider-vocabulary containment across ALL domain dirs + api transport; domain files untouched; composition-root wiring pins; file list; secret scan | SATISFIED — `tests/regression/net-w023-ac-08-architecture-out-of-scope.test.ts` (10 tests) |
+| AC-04 exact-one inventory resolution | golden path admitted (verified chain, signed evidence); zero matches → supply_not_found (nothing registered); multiple → ambiguous_supply; cross-tenant invisible (not-found, no existence oracle); retired → supply_retired; format mismatch; app bundle identity; no placement/verification fabrication | SATISFIED — `tests/adapters/net-w023-ac-04-exact-one-inventory.test.ts` (8 tests) |
+| AC-05 no authority bypass | full status matrix (absent/incomplete/unauthenticated/mismatched/stale/ambiguous → NOT admitted; verified → admitted); admitted evaluation writes NOTHING (audit delta 0, inventory/placements/verification unchanged); settlement readiness re-derived unchanged; no evidence records; no ledger postings; deterministic precedence + the PR #47 remediation regressions (see below) | SATISFIED — `tests/adapters/net-w023-ac-05-no-authority-bypass.test.ts` (13 tests) |
+| AC-06 determinism/privacy | identical-input determinism; field-order independence (canonical digest); evaluation determinism under the explicit anchor; raw payload markers absent from evaluation/logs/audit; redaction names-only bounded at 24; notice path: no raw content or secret in views/observations/logs/audit/errors; tampered notice fails closed; file content never crosses; the trust envelope CONSUMED at the boundary (signature + trust secret never in evaluation/logs/audit; unsigned facts byte-identical) | SATISFIED — `tests/adapters/net-w023-ac-06-determinism-privacy.test.ts` (9 tests) |
+| AC-07 tenancy/idempotency/atomicity | the material path through the W022 composite: one atomic audit event with provider metadata + idempotency/transaction lineage; exactly-once + replay; per-org key namespace; 4-way concurrency (exactly one created); HTTP guard 403/200/400 + classified rejection + the remediation transport semantics (unverified envelope = 200 decision; malformed envelope = 400) | SATISFIED — `tests/adapters/net-w023-ac-07-tenancy-idempotency.test.ts` (6 tests) |
+| AC-08 architecture regression | frozen specs pinned (no 17th domain); architecture + authority scans 281 files / 0 violations; new vocabularies pinned (incl. `unauthenticated` + `supply_chain_unauthenticated` + the integrity algorithm) + frozen vocabularies unchanged; no mutation vocabulary or domain imports in the adapter tier; provider-vocabulary containment across ALL domain dirs + api transport; domain files untouched; composition-root wiring pins (incl. the trust-channel secret); file list; secret scan | SATISFIED — `tests/regression/net-w023-ac-08-architecture-out-of-scope.test.ts` (10 tests) |
 
 ## Mutation evidence
 
@@ -140,6 +140,104 @@ re-verified green:
 7. **idempotency bypass** — the measurement composite's idempotency
    key randomized (each submission a new key) → AC-07 failed. CAUGHT.
 
+## PR #47 remediation record (architect review: CHANGES REQUESTED)
+
+The architect review of PR #47 returned **CHANGES REQUESTED** with two
+blocking findings (GitHub rejected the formal REQUEST_CHANGES submission
+only because reviewer and author share the account; the decision is
+recorded in the review thread and here):
+
+1. **Blocking — authenticity:** supply-chain “verification” was only
+   consistency checking of CALLER-SUPPLIED authorization files; nothing
+   established that the files were authoritative/authenticated, so
+   fabricated ads.txt/app-ads.txt/sellers.json content could produce
+   `verified`.
+2. **Blocking — freshness:** `observedAt` was optional, yet missing
+   freshness data could still lead to `verified`.
+3. Regressions AND mutation checks were required for both cases.
+
+### Remediation design (the W022 decision-of-record pattern)
+
+`verified` now means **AUTHENTICATED + FRESH + CONSISTENT**:
+
+- **Authenticated (finding 1):** every seller-authorization submission
+  may carry a trust envelope (`integrity: { algorithm: "hmac-sha256",
+  signature, signedAt }` — `SellerAuthorizationIntegrityBlock`, neutral
+  port contract). The signature is HMAC-SHA256 over the canonical
+  serialization of the EXACT attested submission facts (sourceKind,
+  sourceIdentity, raw file content, observedAt — absence attested as
+  null), computed/verified by the new adapter-tier module
+  `src/adapters/openrtb/authorization-integrity.ts` (the W022
+  report-integrity precedent: same primitive, same secret-driven
+  wiring rule, timing-safe comparison). The trust key
+  (`SELLER_AUTHORIZATION_TRUST_KEY`, classified secret) resolves ONLY
+  through the SecretProvider at composition time (or the explicit
+  `opts.adapters.sellerAuthorizationTrustKey` override) and injects
+  into the ingress boundary. Unauthenticated submissions still
+  normalize — their facts remain facts (§3.4) — but can never govern a
+  required authorization source: the new closed status
+  `unauthenticated` (admission reason `supply_chain_unauthenticated`)
+  caps the chain, with deterministic precedence incomplete >
+  unauthenticated > ambiguous > stale > mismatched. Grammar-valid
+  FABRICATED content therefore produces `unauthenticated`, never
+  `verified`. No secret configured → nothing can authenticate → no
+  chain can ever be `verified` (fail-closed default, the W022
+  no-secret rule).
+- **Fresh (finding 2):** the governing (authenticated) facts must
+  carry a non-null `observedAt` within the 48h staleness bound.
+  MISSING freshness data is treated as NOT fresh → `stale` → never
+  `verified`. (The envelope can honestly attest content WITHOUT
+  freshness — it signs observedAt-as-null — and the freshness gate
+  still rejects it, so the two gates are independently observable and
+  independently mutable.)
+- **Consistent:** the existing chain-vs-authorization checks operate
+  on the governing authenticated facts only; conflicting AUTHENTICATED
+  observations (distinct digests) remain `ambiguous`; an unauthorized
+  seller remains `mismatched`.
+- **Privacy preserved:** the envelope is consumed at the ingress
+  boundary and never retained — the signature, the trust secret and
+  the raw file content never appear in normalized facts, evaluation
+  views, logs, audit events or error contexts (PRIV-002; pinned by
+  AC-06). The API transport validates envelope STRUCTURE only (400 on
+  malformed shape); an envelope that fails CRYPTOGRAPHIC verification
+  is a derived decision (200 + `supply_chain_unauthenticated`), never
+  a transport error.
+
+### Remediation regressions (AC-05, 6 new tests; + AC-01/06/07/08 pins)
+
+1. fabricated (grammar-valid, NO envelope) → `unauthenticated`, NOT
+   admitted, facts still recorded;
+2. tampered signature → `unauthenticated`;
+3. wrong-key signature → `unauthenticated`;
+4. signed-but-missing `observedAt` → `stale`, NOT admitted (finding 2);
+5. authenticated publisher file + unauthenticated hop file →
+   `unauthenticated` (never verified, never incomplete);
+6. default runtime WITHOUT the trust secret → even correctly signed
+   facts → `unauthenticated` (fail closed; still zero mutations).
+
+AC-01 pins the trust-channel wiring (secret present / absent /
+explicit override + the closed algorithm vocabulary); AC-06 pins the
+envelope-consumed privacy guarantees (signatures + trust secret
+absent from evaluation/logs/audit; unsigned facts byte-identical to
+signed facts); AC-07 pins the HTTP transport semantics (unverified
+envelope = 200 decision; malformed envelope = 400); AC-08 pins the
+new vocabulary members + the wiring + the new file + the secret name.
+
+### Remediation mutation checks (3/3 caught + restored green)
+
+- **M1 — authentication gate removed** (every submission trusted):
+  AC-05 failed (5 failures, incl. the fabricated-content regression).
+  CAUGHT.
+- **M2 — mandatory-freshness gate removed** (null `observedAt` can
+  verify): AC-05 failed (the missing-freshness regression). CAUGHT.
+- **M3 — signature comparison disabled** (any well-formed envelope
+  verifies): AC-05 failed (the tampered-signature + wrong-key
+  regressions). CAUGHT.
+
+Each mutation was applied with cp-backup + assert-applied, verified
+ to fail the targeted regressions, then restored and re-verified
+green (the restored suite: 13 pass / 0 fail).
+
 ## Privacy evidence
 
 Raw request payloads are not persisted by default: the evaluation
@@ -154,20 +252,25 @@ Redaction summaries contain field names only, bounded at 24.
 
 From the implementation branch (all numbers from `bun run verify`):
 
-- `bun run verify`: **1501 pass / 15 skip / 0 fail, 16022 expect(),
-  1516 tests / 190 files** (post-W022 baseline: 1437 pass / 1452
-  tests / 182 files — +64 tests / +8 files)
+- `bun run verify` (post-remediation): **1509 pass / 15 skip / 0 fail,
+  16083 expect(), 1524 tests / 190 files** (pre-remediation baseline:
+  1501 pass / 16022 expect() / 1516 tests — +8 tests / +61 expect();
+  post-W022 baseline: 1437 pass / 1452 tests / 182 files)
 - `arch:check`: **281 files scanned, 0 violations**
 - `authority:check`: **281 files scanned, 0 violations**
 - real PostgreSQL/Redis integration: the configured integration
   suites remain in their harness-scoped skip state identical to the
   W022 baseline (CI runs them against real services; the material
   path reuses the W022 transactional composite already covered there)
-- mutation checks: **8/8 caught and restored green** (see above)
+- mutation checks: **8/8 original + 3/3 remediation directions caught
+  and restored green** (see above)
 - secret scan: clean (test-only literals confined to test files;
-  `.env.example` documents the secret NAME only)
-- implementation PR: the single canonical PR closing #46
-- architect review: PENDING (do not merge on green CI alone)
+  `.env.example` documents the secret NAMES only)
+- implementation PR: #47 — the single canonical PR closing #46
+  (remediation delivered on the SAME branch/PR per the remediation
+  discipline; PR #47 remains UNMERGED pending re-review)
+- architect review: CHANGES REQUESTED (round 1) → remediated →
+  re-review PENDING (do not merge on green CI alone)
 - merge SHA: PENDING
 
 ## Completion rule

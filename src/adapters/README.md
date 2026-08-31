@@ -39,8 +39,16 @@ second authority:
    admission evaluation: exact-one inventory resolution through the
    NEUTRAL read-only lookup (zero/multiple/cross-tenant matches fail
    closed), availability + format checks, and supply-chain
-   verification (ads.txt + sellers.json cross-checks with staleness,
-   ambiguity and completeness rules). The evaluation is a PURE
+   verification. PR #47 remediation: verification means
+   AUTHENTICATED + FRESH + CONSISTENT — seller-authorization
+   submissions are authenticated against the
+   SELLER_AUTHORIZATION_TRUST_KEY trust channel (HMAC-SHA256
+   envelope over the exact content + provenance; unauthenticated
+   caller content caps at `unauthenticated`, never `verified`),
+   freshness is REQUIRED (missing observedAt = stale, never
+   `verified`), and the chain cross-checks (ads.txt + sellers.json,
+   staleness, ambiguity and completeness rules) run over the
+   authenticated governing facts only. The evaluation is a PURE
    derivation — no mutation, no authority.
 3. The bootstrap composition root is the only join to the domain
    authorities (`runtime.ts`: the lookup over `/inventory` reads; the

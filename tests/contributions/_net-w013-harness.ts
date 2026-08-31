@@ -30,6 +30,7 @@ import {
   type NetW008HarnessOptions,
   type NetW012Harness,
 } from "./_net-w012-harness.ts";
+export type { NetW008HarnessOptions };
 import { createExecutionContext } from "../../src/core/execution-context.ts";
 import type { ExecutionContext } from "../../src/core/execution-context.ts";
 import type {

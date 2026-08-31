@@ -31,6 +31,7 @@ import {
   OPENRTB_SUPPORTED_VERSIONS,
   OPENRTB_MAX_IMPRESSIONS,
   OPENRTB_MAX_SCHAIN_NODES,
+  SELLER_AUTHORIZATION_INTEGRITY_ALGORITHM,
   SELLER_RELATIONSHIP_KINDS,
   SUPPLY_CHAIN_MAX_AGE_MS,
 } from "../../src/adapters/port.ts";
@@ -66,6 +67,9 @@ describe("NET-W023-AC-01 the provider-neutral contract", () => {
       "both",
     ]);
     expect(SUPPLY_CHAIN_MAX_AGE_MS).toBe(48 * 60 * 60 * 1000);
+    // PR #47 remediation: the trust-envelope algorithm is pinned (the
+    // closed integrity vocabulary — HMAC-SHA256, no vendor SDK).
+    expect(SELLER_AUTHORIZATION_INTEGRITY_ALGORITHM).toBe("hmac-sha256");
     // The frozen W022 vocabulary is unchanged (cross-boundary pin).
     expect(MEASUREMENT_REPORT_REJECTION_REASONS).toHaveLength(7);
   });
@@ -190,6 +194,56 @@ describe("NET-W023-AC-01 the provider-neutral contract", () => {
       expect(bare.measurementProviders.map((p) => p.info.provider)).toEqual(["echo"]);
     } finally {
       await bare.shutdown();
+    }
+  });
+
+  test("PR #47 remediation: the seller-authorization trust channel wires ONLY with its secret (SecretProvider boundary)", async () => {
+    // The secret present → the trust channel is configured.
+    const withSecret = createRuntime({
+      forceEnv: "test",
+      env: {
+        APP_ENV: "test",
+        LOG_LEVEL: "fatal",
+        SELLER_AUTHORIZATION_TRUST_KEY: "test-only-trust-secret",
+      },
+      port: 0,
+    });
+    await withSecret.initialize();
+    try {
+      expect(withSecret.openRtbSellerAuthorizationTrust).toEqual({
+        configured: true,
+        algorithm: "hmac-sha256",
+      });
+    } finally {
+      await withSecret.shutdown();
+    }
+    // No secret → the trust channel is NOT configured: nothing can
+    // authenticate and no chain can be `verified` (fail closed — the
+    // default-runtime remediation semantics).
+    const bare = createRuntime({
+      forceEnv: "test",
+      env: { APP_ENV: "test", LOG_LEVEL: "fatal" },
+      port: 0,
+    });
+    await bare.initialize();
+    try {
+      expect(bare.openRtbSellerAuthorizationTrust.configured).toBe(false);
+    } finally {
+      await bare.shutdown();
+    }
+    // And an explicit composition override configures it without the
+    // secret (test/operator wiring).
+    const overridden = createRuntime({
+      forceEnv: "test",
+      env: { APP_ENV: "test", LOG_LEVEL: "fatal" },
+      port: 0,
+      adapters: { sellerAuthorizationTrustKey: "operator-channel-key" },
+    });
+    await overridden.initialize();
+    try {
+      expect(overridden.openRtbSellerAuthorizationTrust.configured).toBe(true);
+    } finally {
+      await overridden.shutdown();
     }
   });
 

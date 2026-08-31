@@ -233,6 +233,16 @@ export const MEASUREMENT_IOS_ATTRIBUTION_SECRET_KEY =
 /** NET-W023 secret key name (the delivery-notice HMAC verification key). */
 export const MEASUREMENT_OPENRTB_DELIVERY_SECRET_KEY =
   "MEASUREMENT_OPENRTB_DELIVERY_KEY" as const;
+/**
+ * NET-W023 PR #47 remediation secret key name: the seller-authorization
+ * trust channel HMAC key (supply-chain verification). Resolved ONLY
+ * through the SecretProvider at composition time; present → the
+ * ingress authenticates trust envelopes; absent → NO chain can be
+ * `verified` (fail closed). NEVER logged, persisted, or echoed into
+ * audit/error payloads (PRIV-002).
+ */
+export const SELLER_AUTHORIZATION_TRUST_SECRET_KEY =
+  "SELLER_AUTHORIZATION_TRUST_KEY" as const;
 // NET-W007 reputation boundary: the multidimensional reputation engine
 // — evidence-backed inputs (basis DERIVED from upstream records
 // through neutral lookups), immutable versioned deterministic scoring
@@ -568,6 +578,21 @@ export interface Runtime {
    * facts through the W022 ingestion composite).
    */
   readonly openRtbIngress: OpenRtbIngressService;
+  /**
+   * NET-W023 PR #47 remediation: whether the seller-authorization
+   * trust channel is configured (the SELLER_AUTHORIZATION_TRUST_KEY
+   * secret, resolved ONLY through the SecretProvider at composition
+   * time — or the explicit composition override). When NOT
+   * configured, no seller-authorization submission can be
+   * authenticated and no supply chain can be `verified` (fail
+   * closed — the admission evaluation reports
+   * `supply_chain_unauthenticated`). Diagnostics only: the secret
+   * value is NEVER exposed here.
+   */
+  readonly openRtbSellerAuthorizationTrust: {
+    readonly configured: boolean;
+    readonly algorithm: "hmac-sha256";
+  };
   // NET-W007 domain services (exposed for integration/security tests).
   readonly reputationPolicyService: ReputationPolicyService;
   readonly reputationInputService: ReputationInputService;
@@ -662,6 +687,16 @@ export interface CreateRuntimeOptions {
    */
   readonly adapters?: {
     readonly openRtbProviders?: readonly OpenRtbProviderAdapter[];
+    /**
+     * NET-W023 PR #47 remediation: explicitly configured
+     * seller-authorization trust key (HMAC-SHA256) for the OpenRTB
+     * ingress (test wiring or an operator-provided channel key). When
+     * omitted, the key resolves through the SecretProvider
+     * (SELLER_AUTHORIZATION_TRUST_KEY); when neither is present the
+     * trust channel is NOT configured and no supply chain can be
+     * `verified` (fail closed).
+     */
+    readonly sellerAuthorizationTrustKey?: string;
   };
   /**
    * NET-W013: explicitly configured LLM provider adapters (test
@@ -2563,10 +2598,29 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       }));
     },
   };
+  // PR #47 remediation: the seller-authorization trust channel key.
+  // Resolution order: the explicit composition override (test
+  // wiring / operator-provided channel key) FIRST, then the
+  // SELLER_AUTHORIZATION_TRUST_KEY secret through the SecretProvider
+  // — the SAME wiring rule as the measurement attribution adapters.
+  // Neither present → the trust channel is NOT configured: no
+  // seller-authorization submission can be authenticated and no
+  // supply chain can be `verified` (fail closed; the W022
+  // no-secret rule). The value NEVER crosses into logs, audit, or
+  // domain modules (PRIV-002).
+  const sellerAuthorizationTrustKey =
+    opts.adapters?.sellerAuthorizationTrustKey !== undefined
+      ? opts.adapters.sellerAuthorizationTrustKey
+      : secretProvider.hasSecret(SELLER_AUTHORIZATION_TRUST_SECRET_KEY)
+        ? secretProvider.getSecretSync(SELLER_AUTHORIZATION_TRUST_SECRET_KEY)
+        : undefined;
   const openRtbIngress = createOpenRtbIngressService({
     registry: openRtbProviderRegistry,
     inventoryLookup: externalInventoryLookup,
     logger: logger.forModule("adapters"),
+    ...(sellerAuthorizationTrustKey !== undefined
+      ? { sellerAuthorizationTrustKey }
+      : {}),
   });
 
   // ------------------------------------------------------------------
@@ -8693,6 +8747,10 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     measurementIngestion,
     openRtbProviders,
     openRtbIngress,
+    openRtbSellerAuthorizationTrust: {
+      configured: sellerAuthorizationTrustKey !== undefined,
+      algorithm: "hmac-sha256",
+    },
     // NET-W007 domain services.
     reputationPolicyService,
     reputationInputService,

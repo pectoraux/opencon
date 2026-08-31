@@ -33,6 +33,8 @@ import {
   OpenRtbReferenceAdapter,
   OPENRTB_REFERENCE_PROVIDER_ID,
 } from "../../src/adapters/openrtb/reference-adapter.ts";
+import { buildSellerAuthorizationIntegrity } from "../../src/adapters/openrtb/authorization-integrity.ts";
+import type { SellerAuthorizationIntegrityBlock } from "../../src/adapters/port.ts";
 import {
   OpenRtbDeliveryNoticeAdapter,
   OPENRTB_DELIVERY_PROVIDER_ID,
@@ -45,6 +47,18 @@ import type {
 
 /** TEST-ONLY verification secret (a literal, never a real credential). */
 export const OPENRTB_DELIVERY_TEST_SECRET = "test-openrtb-delivery-secret-v1";
+
+/**
+ * TEST-ONLY seller-authorization trust channel key (PR #47
+ * remediation; a literal, never a real credential). The supply
+ * harness wires this as the runtime trust key so signed fixtures
+ * authenticate; the wrong-key fixtures sign with a DIFFERENT literal
+ * to exercise the authentication gate.
+ */
+export const SELLER_AUTH_TRUST_TEST_SECRET = "test-seller-auth-trust-secret-v1";
+
+/** A DIFFERENT test key (the untrusted signer — wrong-key fixtures). */
+export const SELLER_AUTH_TRUST_WRONG_KEY = "test-seller-auth-trust-WRONG-key";
 
 /** The provider id the supply harness registers inventory under. */
 export const SUPPLY_PROVIDER_ID = OPENRTB_REFERENCE_PROVIDER_ID;
@@ -85,8 +99,29 @@ export interface NetW023SupplyHarness {
   teardown(): Promise<void>;
 }
 
-export async function createNetW023SupplyHarness(): Promise<NetW023SupplyHarness> {
-  const w019 = await createNetW019Harness();
+export interface NetW023SupplyHarnessOptions {
+  /**
+   * The seller-authorization trust channel key the runtime wires
+   * (PR #47 remediation). DEFAULT: the TEST secret — signed fixtures
+   * authenticate. Pass `null` to run UNCONFIGURED (fail closed:
+   * even correctly signed facts are `unauthenticated` — the
+   * default-runtime remediation regression).
+   */
+  readonly sellerAuthorizationTrustKey?: string | null;
+}
+
+export async function createNetW023SupplyHarness(
+  opts: NetW023SupplyHarnessOptions = {},
+): Promise<NetW023SupplyHarness> {
+  const trustKey =
+    opts.sellerAuthorizationTrustKey === null
+      ? undefined
+      : (opts.sellerAuthorizationTrustKey ?? SELLER_AUTH_TRUST_TEST_SECRET);
+  const w019 = await createNetW019Harness(
+    trustKey !== undefined
+      ? { adapters: { sellerAuthorizationTrustKey: trustKey } }
+      : {},
+  );
   const runtime = w019.runtime;
   // Seed the guard policy for the evaluation command (the harness
   // pattern: ALLOW for everyone on the harness organization).
@@ -117,6 +152,100 @@ export async function createNetW023SupplyHarness(): Promise<NetW023SupplyHarness
       await w019.teardown();
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// The seller-authorization trust-envelope fixtures (PR #47 remediation)
+// ---------------------------------------------------------------------------
+
+/** The canonical signing timestamp for the trust-envelope fixtures. */
+export const SIGNED_AT = "2026-09-01T11:30:00.000Z";
+
+/**
+ * Sign ONE seller-authorization submission with a trust key (the
+ * trusted collector side of the boundary). Returns the submission
+ * with its integrity envelope attached.
+ */
+export function signSellerAuthorization<
+  T extends {
+    readonly providerId: string;
+    readonly sourceKind: "ads.txt" | "app-ads.txt" | "sellers.json";
+    readonly content: string;
+    readonly sourceIdentity: string;
+    readonly observedAt?: string;
+  },
+>(
+  submission: T,
+  trustKey: string = SELLER_AUTH_TRUST_TEST_SECRET,
+): T & { integrity: SellerAuthorizationIntegrityBlock } {
+  const { integrity: _existing, ...rest } = submission as T & {
+    integrity?: SellerAuthorizationIntegrityBlock;
+  };
+  void _existing;
+  const body = rest as T;
+  return {
+    ...body,
+    integrity: buildSellerAuthorizationIntegrity(
+      {
+        sourceKind: body.sourceKind,
+        sourceIdentity: body.sourceIdentity,
+        content: body.content,
+        ...(body.observedAt !== undefined ? { observedAt: body.observedAt } : {}),
+      },
+      trustKey,
+      SIGNED_AT,
+    ),
+  };
+}
+
+/**
+ * How the `verifyingAuthorizations` fixture bundle authenticates (the
+ * remediation regression knobs):
+ *  - `signed`   — the default: valid envelopes from the trusted key;
+ *  - `unsigned` — no envelope at all (fabricated caller content);
+ *  - `tampered` — a syntactically valid envelope whose signature does
+ *                 NOT match the content (tamper/forge);
+ *  - `wrongKey` — a correctly-computed envelope signed with a
+ *                 DIFFERENT key (an untrusted signer).
+ */
+export type SellerAuthorizationIntegrityMode =
+  | "signed"
+  | "unsigned"
+  | "tampered"
+  | "wrongKey";
+
+/**
+ * Apply an integrity mode to ONE submission-shaped fixture.
+ * `unsigned` returns the body WITHOUT an envelope; `tampered` keeps a
+ * valid-shape envelope but flips its signature; `wrongKey` signs
+ * with the untrusted test key.
+ */
+function applyIntegrityMode<
+  T extends {
+    readonly providerId: string;
+    readonly sourceKind: "ads.txt" | "app-ads.txt" | "sellers.json";
+    readonly content: string;
+    readonly sourceIdentity: string;
+    readonly observedAt?: string;
+  },
+>(submission: T, mode: SellerAuthorizationIntegrityMode): T {
+  switch (mode) {
+    case "unsigned":
+      return submission;
+    case "tampered": {
+      const signed = signSellerAuthorization(submission);
+      // Flip the first hex nibble — a well-formed but WRONG signature
+      // (the envelope must fail content verification).
+      const flipped = signed.integrity.signature.startsWith("0")
+        ? signed.integrity.signature.replace(/^0/, "1")
+        : signed.integrity.signature.replace(/^./, "0");
+      return { ...submission, integrity: { ...signed.integrity, signature: flipped } };
+    }
+    case "wrongKey":
+      return signSellerAuthorization(submission, SELLER_AUTH_TRUST_WRONG_KEY);
+    case "signed":
+      return signSellerAuthorization(submission);
+  }
 }
 
 /** A person's execution context (defaults to the creator). */
@@ -306,33 +435,52 @@ export function firstExchangeSellersJson(options: {
   });
 }
 
-/** A seller-authorization submission bundle that VERIFIES the chain. */
+/**
+ * A seller-authorization submission bundle that VERIFIES the chain.
+ * PR #47 remediation: every fixture is SIGNED with the harness trust
+ * key by default (integrityMode "signed"); the remediation knobs
+ * produce unauthenticated / tampered / wrong-key evidence instead.
+ * `omitObservedAt` drops the observation timestamp (a signed
+ * submission without freshness — the mandatory-freshness gate).
+ */
 export function verifyingAuthorizations(overrides: {
   readonly adsTxtContent?: string;
   readonly sellersJsonContent?: string;
   readonly observedAt?: string;
+  readonly omitObservedAt?: boolean;
+  readonly integrityMode?: SellerAuthorizationIntegrityMode;
 } = {}): {
   readonly providerId: string;
   readonly sourceKind: "ads.txt" | "sellers.json";
   readonly content: string;
   readonly sourceIdentity: string;
-  readonly observedAt: string;
+  readonly observedAt?: string;
+  readonly integrity?: SellerAuthorizationIntegrityBlock;
 }[] {
+  const mode = overrides.integrityMode ?? "signed";
+  const withObservedAt =
+    overrides.observedAt ?? (overrides.omitObservedAt === true ? undefined : OBSERVED_AT);
   return [
-    {
-      providerId: SUPPLY_PROVIDER_ID,
-      sourceKind: "ads.txt",
-      content: overrides.adsTxtContent ?? publisherAdsTxtContent(),
-      sourceIdentity: PUBLISHER_DOMAIN,
-      observedAt: overrides.observedAt ?? OBSERVED_AT,
-    },
-    {
-      providerId: SUPPLY_PROVIDER_ID,
-      sourceKind: "sellers.json",
-      content: overrides.sellersJsonContent ?? firstExchangeSellersJson(),
-      sourceIdentity: FIRST_EXCHANGE,
-      observedAt: overrides.observedAt ?? OBSERVED_AT,
-    },
+    applyIntegrityMode(
+      {
+        providerId: SUPPLY_PROVIDER_ID,
+        sourceKind: "ads.txt",
+        content: overrides.adsTxtContent ?? publisherAdsTxtContent(),
+        sourceIdentity: PUBLISHER_DOMAIN,
+        ...(withObservedAt !== undefined ? { observedAt: withObservedAt } : {}),
+      },
+      mode,
+    ),
+    applyIntegrityMode(
+      {
+        providerId: SUPPLY_PROVIDER_ID,
+        sourceKind: "sellers.json",
+        content: overrides.sellersJsonContent ?? firstExchangeSellersJson(),
+        sourceIdentity: FIRST_EXCHANGE,
+        ...(withObservedAt !== undefined ? { observedAt: withObservedAt } : {}),
+      },
+      mode,
+    ),
   ];
 }
 
@@ -376,6 +524,7 @@ export async function evaluateRequest(
       readonly content: string;
       readonly sourceIdentity: string;
       readonly observedAt?: string;
+      readonly integrity?: SellerAuthorizationIntegrityBlock;
     }[];
     readonly evaluatedAt?: string;
     readonly organizationScopeId?: string;

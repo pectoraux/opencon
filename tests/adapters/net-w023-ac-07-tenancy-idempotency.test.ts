@@ -275,6 +275,59 @@ describe("NET-W023-AC-07 tenancy / idempotency / transaction lineage", () => {
     expect(malformed.status).toBe(400);
     const malformedBody = (await malformed.json()) as Record<string, unknown>;
     expect(malformedBody["error"]).toBe("OPENRTB_REQUEST_REJECTED");
+
+    // PR #47 remediation (HTTP transport): an envelope that does not
+    // verify is a DERIVED decision (200 + `unauthenticated`), never a
+    // transport error — fabricated caller content is a verification
+    // outcome, not a malformed request.
+    const fabricated = await fetch(
+      `http://127.0.0.1:${supplyHarness.runtime.api.port}/api/external-ad-requests`,
+      {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({
+          organizationScopeId: supplyHarness.organizationScopeId,
+          providerId: "openrtb-reference",
+          request: rawBidRequest(),
+          sellerAuthorizations: verifyingAuthorizations({
+            integrityMode: "unsigned",
+          }),
+          evaluatedAt: EVALUATED_AT,
+        }),
+      },
+    );
+    expect(fabricated.status).toBe(200);
+    const fabricatedView = (await fabricated.json()) as Record<string, unknown>;
+    expect(fabricatedView["admitted"]).toBe(false);
+    expect(fabricatedView["rejectionReason"]).toBe("supply_chain_unauthenticated");
+
+    // A MALFORMED integrity block (wrong shape) IS a transport 400
+    // (fail closed at the parse layer — the cryptographic check stays
+    // at the boundary).
+    const malformedIntegrity = await fetch(
+      `http://127.0.0.1:${supplyHarness.runtime.api.port}/api/external-ad-requests`,
+      {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({
+          organizationScopeId: supplyHarness.organizationScopeId,
+          providerId: "openrtb-reference",
+          request: rawBidRequest(),
+          sellerAuthorizations: [
+            {
+              providerId: "openrtb-reference",
+              sourceKind: "ads.txt",
+              content: "exchange-one.example, pub-seller-1, DIRECT",
+              sourceIdentity: "example.com",
+              observedAt: EVALUATED_AT,
+              integrity: { algorithm: "hmac-sha256" },
+            },
+          ],
+          evaluatedAt: EVALUATED_AT,
+        }),
+      },
+    );
+    expect(malformedIntegrity.status).toBe(400);
   });
 
   test("the evaluation command itself performs NO material mutation (read-only derivation)", async () => {

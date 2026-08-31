@@ -23,7 +23,9 @@ import {
   submitNotice,
   publisherAdsTxtContent,
   EVALUATED_AT,
+  OBSERVED_AT,
   OPENRTB_DELIVERY_TEST_SECRET,
+  SELLER_AUTH_TRUST_TEST_SECRET,
   type NetW023SupplyHarness,
   type NetW023NoticeHarness,
 } from "./_net-w023-harness.ts";
@@ -118,6 +120,63 @@ describe("NET-W023-AC-06 determinism and privacy", () => {
     });
     expect({ ...c, evaluatedAt: null }).toEqual({ ...a, evaluatedAt: null });
     expect(c.evaluatedAt).not.toBe(a.evaluatedAt);
+  });
+
+  test("PR #47 remediation privacy: the trust envelope is CONSUMED at the boundary — the signature and the trust secret never appear in the evaluation, logs or audit", async () => {
+    supplyHarness = await createNetW023SupplyHarness();
+    await registerExternalSupply(supplyHarness);
+    const authorizations = verifyingAuthorizations();
+    // Grab the exact signature values from the signed fixtures.
+    const signatures = authorizations
+      .map((entry) => entry.integrity?.signature ?? "")
+      .filter((s) => s.length > 0);
+    expect(signatures).toHaveLength(2);
+    const evaluation = await evaluateRequest(supplyHarness, {
+      request: rawBidRequest(),
+      sellerAuthorizations: authorizations,
+      evaluatedAt: EVALUATED_AT,
+    });
+    expect(evaluation.admitted).toBe(true);
+    // The signatures are NEVER retained in the evaluation output (the
+    // facts carry their own digest; the envelope is consumed by the
+    // authentication gate and dropped).
+    const serialized = JSON.stringify(evaluation);
+    for (const signature of signatures) {
+      expect(serialized).not.toContain(signature);
+    }
+    // The trust secret never appears anywhere either.
+    expect(serialized).not.toContain(SELLER_AUTH_TRUST_TEST_SECRET);
+    const logs = JSON.stringify(supplyHarness.runtime.logSink.entries);
+    expect(logs).not.toContain(SELLER_AUTH_TRUST_TEST_SECRET);
+    for (const signature of signatures) {
+      expect(logs).not.toContain(signature);
+    }
+    const audit = JSON.stringify(
+      await supplyHarness.runtime.auditWriter.query({ limit: 1000 }),
+    );
+    expect(audit).not.toContain(SELLER_AUTH_TRUST_TEST_SECRET);
+    // Determinism holds WITH the envelope: identical signed inputs →
+    // identical evaluations (HMAC is deterministic; facts are a pure
+    // function of content).
+    const again = await evaluateRequest(supplyHarness, {
+      request: rawBidRequest(),
+      sellerAuthorizations: verifyingAuthorizations(),
+      evaluatedAt: EVALUATED_AT,
+    });
+    expect(again).toEqual(evaluation);
+    // The UNSIGNED equivalent (same content) produces IDENTICAL facts
+    // — the envelope never leaks into the normalized representation.
+    const unsigned = await evaluateRequest(supplyHarness, {
+      request: rawBidRequest(),
+      sellerAuthorizations: verifyingAuthorizations({
+        integrityMode: "unsigned",
+        observedAt: OBSERVED_AT,
+      }),
+      evaluatedAt: EVALUATED_AT,
+    });
+    expect(unsigned.supplyChain.authorizations).toEqual(
+      evaluation.supplyChain.authorizations,
+    );
   });
 
   test("raw payloads are NOT retained: no raw request content in the evaluation, logs or audit", async () => {

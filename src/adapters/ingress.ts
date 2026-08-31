@@ -17,12 +17,18 @@
  * root over `/inventory` reads and injected here as the neutral
  * {@link ExternalInventorySupplyLookup}.
  *
- * Fail-closed guarantees (issue #46 architectural constraints):
+ * Fail-closed guarantees (issue #46 architectural constraints;
+ * PR #47 remediation additions in bold):
  *  - unknown provider ids → UnknownOpenRtbProviderError;
  *  - adapter output violating the neutral contract or claiming
  *    another provider's identity → rejected (`malformed_request`);
  *  - zero/multiple/cross-tenant inventory matches → the evaluation
  *    fails closed (`supply_not_found` / `ambiguous_supply`);
+ *  - **UNAUTHENTICATED authorization evidence (fabricated
+ *    ads.txt/app-ads.txt/sellers.json content) → `unauthenticated`,
+ *    never `verified` (the trust-envelope gate; blocking finding 1);**
+ *  - **MISSING freshness data (no observedAt) → `stale`, never
+ *    `verified` (the mandatory-freshness gate; blocking finding 2);**
  *  - unverified/incomplete/mismatched/stale/absent supply chains →
  *    NOT admitted (external assertions never become authorization);
  *  - deterministic: the evaluation is a pure function of the inputs
@@ -32,6 +38,7 @@
 import type { Logger } from "../core/logger.ts";
 import { isInventoryFormat } from "../core/inventory.ts";
 import { INVENTORY_FORMATS } from "../core/inventory.ts";
+import { verifySellerAuthorizationIntegrity } from "./openrtb/authorization-integrity.ts";
 import {
   OpenRtbRequestRejectedError,
   UnknownOpenRtbProviderError,
@@ -67,6 +74,15 @@ export interface OpenRtbIngressServiceDeps {
   readonly registry: OpenRtbProviderRegistry;
   readonly inventoryLookup: ExternalInventorySupplyLookup;
   readonly logger: Logger;
+  /**
+   * The seller-authorization trust key (HMAC-SHA256) resolved ONLY
+   * through the SecretProvider at composition time (PR #47
+   * remediation). When absent, NO seller-authorization submission can
+   * be authenticated and NO supply chain can be `verified` (fail
+   * closed — the W022 no-secret wiring rule). NEVER logged or
+   * persisted (PRIV-002).
+   */
+  readonly sellerAuthorizationTrustKey?: string;
 }
 
 const DIGEST_RE = /^[0-9a-f]{64}$/;
@@ -84,6 +100,7 @@ const CHAIN_STATUS_TO_REASON: Readonly<
 > = {
   absent: "supply_chain_absent",
   incomplete: "supply_chain_incomplete",
+  unauthenticated: "supply_chain_unauthenticated",
   mismatched: "supply_chain_mismatched",
   stale: "supply_chain_stale",
   ambiguous: "supply_chain_ambiguous",
@@ -286,31 +303,59 @@ function assertNeutralSellerFacts(providerId: string, facts: unknown): void {
 // ---------------------------------------------------------------------------
 
 /**
+ * One seller-authorization observation with its authentication
+ * outcome: the normalized facts PLUS whether the submission carried
+ * a trust envelope that verified against the configured
+ * seller-authorization trust channel (PR #47 remediation).
+ */
+export interface AuthenticatedSellerAuthorizationFacts {
+  readonly facts: SellerAuthorizationFacts;
+  readonly authenticated: boolean;
+}
+
+/**
  * Verify the request's supply chain against the submitted
  * seller-authorization facts. PURE and deterministic. Only VERIFIED
- * chains can support admission; unverified, incomplete, stale or
- * ambiguous chains remain FACTS but are never promoted to
- * authorization (§3.4).
+ * chains can support admission; unauthenticated, unverified,
+ * incomplete, stale or ambiguous chains remain FACTS but are never
+ * promoted to authorization (§3.4).
  *
- * Verification model (bounded, deterministic):
+ * Verification model (bounded, deterministic — PR #47 remediation:
+ * AUTHENTICATED + FRESH + CONSISTENT, in that order of authority):
  *  - node 1 (the publisher's direct seller) must be authorized by the
  *    publisher-side ads.txt / app-ads.txt facts whose sourceIdentity
  *    is the request's supply identity (site domain / app bundle);
  *  - every later node must be authorized by the PRECEDING node's
  *    sellers.json (facts whose sourceIdentity is the preceding
  *    node's asi);
- *  - missing required evidence → `incomplete`; conflicting evidence
- *    (multiple distinct digests for the same required source) →
- *    `ambiguous`; evidence older than the staleness bound → `stale`;
- *    an unauthorized seller → `mismatched`.
+ *  - AUTHENTICATION (blocking finding 1): only facts whose
+ *    submission carried a trust envelope that verified against the
+ *    configured trust channel may govern a required source.
+ *    Grammar-valid but UNAUTHENTICATED caller content — fabricated
+ *    ads.txt/app-ads.txt/sellers.json — is recorded as a fact but
+ *    caps the required source (and therefore the chain) at
+ *    `unauthenticated` (never `verified`);
+ *  - FRESHNESS (blocking finding 2): the governing facts must carry
+ *    a non-null `observedAt` within the staleness bound. Missing
+ *    freshness data is treated as NOT fresh → `stale` (never
+ *    `verified`);
+ *  - missing required evidence → `incomplete`; conflicting
+ *    authenticated evidence (multiple distinct digests for the same
+ *    required source) → `ambiguous`; an unauthorized seller →
+ *    `mismatched`.
+ *
+ * Deterministic precedence: incomplete (cannot even collect the
+ * required evidence) > unauthenticated (present but untrusted) >
+ * ambiguous (conflicting trusted evidence) > stale (trusted but not
+ * fresh) > mismatched (trusted, fresh, but inconsistent).
  */
 export function evaluateSupplyChainVerification(options: {
   readonly requestSupplyChain: NormalizedOpenRtbRequest["supplyChain"];
   readonly requestSupplyIdentity: string;
-  readonly authorizations: readonly SellerAuthorizationFacts[];
+  readonly authentications: readonly AuthenticatedSellerAuthorizationFacts[];
   readonly evaluatedAt: string;
 }): SupplyChainVerificationStatus {
-  const { requestSupplyChain, requestSupplyIdentity, authorizations, evaluatedAt } =
+  const { requestSupplyChain, requestSupplyIdentity, authentications, evaluatedAt } =
     options;
   const chain = requestSupplyChain;
   if (chain === null || chain === undefined) return "absent";
@@ -319,38 +364,57 @@ export function evaluateSupplyChainVerification(options: {
   const staleBeforeMs = evaluatedAtMs - SUPPLY_CHAIN_MAX_AGE_MS;
 
   let sawMissing = false;
+  let sawUnauthenticated = false;
   let sawAmbiguous = false;
   let sawStale = false;
   let sawMismatched = false;
 
   /**
-   * The facts that must govern ONE required authorization source
-   * (a publisher surface or an intermediate exchange). Multiple
-   * observations of the IDENTICAL fact set are one source; distinct
-   * digests are conflicting evidence.
+   * The AUTHENTICATED facts that must govern ONE required
+   * authorization source (a publisher surface or an intermediate
+   * exchange). Unauthenticated observations remain facts but never
+   * govern (fabricated content cannot produce `verified`); multiple
+   * authenticated observations of the IDENTICAL fact set are one
+   * source; distinct authenticated digests are conflicting evidence.
    */
-  const requiredFacts = (sourceIdentity: string, kinds: readonly string[]) => {
-    const matching = authorizations.filter(
-      (facts) => kinds.includes(facts.sourceKind) && facts.sourceIdentity === sourceIdentity,
+  const requiredFacts = (
+    sourceIdentity: string,
+    kinds: readonly string[],
+  ): SellerAuthorizationFacts | null => {
+    const matching = authentications.filter(
+      (entry) =>
+        kinds.includes(entry.facts.sourceKind) &&
+        entry.facts.sourceIdentity === sourceIdentity,
     );
     if (matching.length === 0) {
       sawMissing = true;
       return null;
     }
-    const digests = new Set(matching.map((facts) => facts.digest));
+    // AUTHENTICATION GATE: only trust-envelope-verified observations
+    // may govern the required source (PR #47 remediation, blocking
+    // finding 1 — untrusted observations are ignored for trust
+    // decisions and their absence from the governing set is recorded).
+    const authenticated = matching.filter((entry) => entry.authenticated);
+    if (authenticated.length === 0) {
+      sawUnauthenticated = true;
+      return null;
+    }
+    const digests = new Set(authenticated.map((entry) => entry.facts.digest));
     if (digests.size > 1) {
       sawAmbiguous = true;
       return null;
     }
+    const governing = authenticated[0]!.facts;
+    // FRESHNESS GATE (PR #47 remediation, blocking finding 2):
+    // missing freshness data (null observedAt) is NOT fresh — fail
+    // closed exactly like an observation older than the bound.
     if (
-      matching.some(
-        (facts) =>
-          facts.observedAt !== null && Date.parse(facts.observedAt) < staleBeforeMs,
-      )
+      governing.observedAt === null ||
+      Date.parse(governing.observedAt) < staleBeforeMs
     ) {
       sawStale = true;
     }
-    return matching[0]!;
+    return governing;
   };
 
   // Node 1: the publisher-side authorization.
@@ -375,9 +439,11 @@ export function evaluateSupplyChainVerification(options: {
       if (!authorized) sawMismatched = true;
     }
   }
-  // Deterministic precedence: cannot verify at all > conflicting
-  // evidence > stale evidence > unauthorized seller.
+  // Deterministic precedence: cannot even collect the required
+  // evidence > present but untrusted > conflicting trusted evidence >
+  // trusted but not fresh > trusted, fresh, but unauthorized seller.
   if (sawMissing) return "incomplete";
+  if (sawUnauthenticated) return "unauthenticated";
   if (sawAmbiguous) return "ambiguous";
   if (sawStale) return "stale";
   if (sawMismatched) return "mismatched";
@@ -391,7 +457,7 @@ export function evaluateSupplyChainVerification(options: {
 export function createOpenRtbIngressService(
   deps: OpenRtbIngressServiceDeps,
 ): OpenRtbIngressService {
-  const { registry, inventoryLookup, logger } = deps;
+  const { registry, inventoryLookup, logger, sellerAuthorizationTrustKey } = deps;
 
   const routeRequest = (submission: { readonly providerId: string }) => {
     if (!submission || typeof submission !== "object") {
@@ -488,10 +554,27 @@ export function createOpenRtbIngressService(
         providerId: input.providerId,
         payload: input.payload,
       });
+      // PR #47 remediation: authenticate EVERY seller-authorization
+      // submission against the configured trust channel BEFORE its
+      // facts may govern any verification decision. Unauthenticated
+      // submissions still normalize (facts remain facts, §3.4) —
+      // grammar-valid fabricated content can never produce a
+      // `verified` chain (blocking finding 1). The envelope is
+      // consumed HERE and never retained: neither the signature nor
+      // the secret crosses into facts, logs, or the evaluation view
+      // (PRIV-002).
       const authorizations: SellerAuthorizationFacts[] = [];
+      const authentications: AuthenticatedSellerAuthorizationFacts[] = [];
       for (const submission of input.sellerAuthorizations ?? []) {
         const normalizedFacts = await this.normalizeSellerAuthorizationSubmission(submission);
         authorizations.push(normalizedFacts.facts);
+        authentications.push({
+          facts: normalizedFacts.facts,
+          authenticated: verifySellerAuthorizationIntegrity({
+            submission,
+            trustKey: sellerAuthorizationTrustKey,
+          }),
+        });
       }
       const evaluatedAt = input.evaluatedAt ?? new Date().toISOString();
       if (typeof evaluatedAt !== "string" || Number.isNaN(Date.parse(evaluatedAt))) {
@@ -545,11 +628,12 @@ export function createOpenRtbIngressService(
       }
 
       // 5. Supply-chain verification (facts never promote to
-      //    authorization: only a VERIFIED chain supports admission).
+      //    authorization: only an AUTHENTICATED + FRESH + CONSISTENT
+      //    chain supports admission — the PR #47 remediation model).
       const chainStatus = evaluateSupplyChainVerification({
         requestSupplyChain: request.supplyChain,
         requestSupplyIdentity: request.supply.externalId,
-        authorizations,
+        authentications,
         evaluatedAt,
       });
       if (chainStatus !== "verified" && rejectionReason === null) {
@@ -579,6 +663,8 @@ export function createOpenRtbIngressService(
         admitted: evaluation.admitted,
         ...(rejectionReason !== null ? { rejectionReason } : {}),
         supplyChainStatus: chainStatus,
+        authenticatedAuthorizations: authentications.filter((a) => a.authenticated).length,
+        submittedAuthorizations: authentications.length,
       });
       return evaluation;
     },

@@ -34,7 +34,10 @@ import type { ExecutionContext } from "../core/execution-context.ts";
 // NET-W023: the neutral adapters-boundary evaluation contract (the
 // /api tier is infrastructure — it may import NEUTRAL ports only,
 // never the adapter tier; the composition root wires the join).
-import type { ExternalAdRequestEvaluation } from "../adapters/port.ts";
+import type {
+  ExternalAdRequestEvaluation,
+  SellerAuthorizationIntegrityBlock,
+} from "../adapters/port.ts";
 
 /**
  * The ApiPort describes the boundary's readiness. After NET-W002 it is
@@ -445,7 +448,11 @@ export interface ApiMeasurementReportSubmissionView {
  * file text (ads.txt / app-ads.txt / sellers.json) — opaque at the API
  * tier; only the provider's adapter interprets it. `sourceIdentity`
  * declares whose authorization surface the file is; `observedAt` is
- * the observation time (the staleness evaluation input).
+ * the observation time (the staleness evaluation input). `integrity`
+ * is the OPTIONAL trust envelope (PR #47 remediation): submissions
+ * without a valid envelope still normalize but can never support a
+ * `verified` supply chain (grammar-valid fabricated content caps at
+ * `supply_chain_unauthenticated`).
  */
 export interface ApiSellerAuthorizationSubmissionInput {
   readonly providerId: string;
@@ -453,6 +460,7 @@ export interface ApiSellerAuthorizationSubmissionInput {
   readonly content: string;
   readonly sourceIdentity: string;
   readonly observedAt?: string;
+  readonly integrity?: SellerAuthorizationIntegrityBlock;
 }
 
 /**

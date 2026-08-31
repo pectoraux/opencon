@@ -5285,6 +5285,11 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
         content: string;
         sourceIdentity: string;
         observedAt?: string;
+        integrity?: {
+          algorithm: string;
+          signature: string;
+          signedAt: string;
+        };
       }[]
     | undefined {
     const raw = obj.sellerAuthorizations;
@@ -5307,12 +5312,36 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
           'sellerAuthorization sourceKind must be "ads.txt", "app-ads.txt" or "sellers.json"',
         );
       }
+      // PR #47 remediation: the OPTIONAL trust envelope. Structural
+      // validation only at the transport (three non-empty string
+      // fields; malformed → 400 fail closed) — the cryptographic
+      // verification happens at the adapters-boundary ingress, and an
+      // envelope that does not verify is a DERIVED decision fact
+      // (`supply_chain_unauthenticated`), never a transport error.
+      // The signature value is never echoed into error payloads.
+      let integrity:
+        | { algorithm: string; signature: string; signedAt: string }
+        | undefined;
+      if (e.integrity !== undefined && e.integrity !== null) {
+        if (typeof e.integrity !== "object" || Array.isArray(e.integrity)) {
+          throw apiValidationError(
+            'sellerAuthorization integrity must be an object with algorithm, signature and signedAt',
+          );
+        }
+        const i = e.integrity as Record<string, unknown>;
+        integrity = {
+          algorithm: strField(i, "algorithm"),
+          signature: strField(i, "signature"),
+          signedAt: strField(i, "signedAt"),
+        };
+      }
       return {
         providerId: strField(e, "providerId"),
         sourceKind,
         content: strField(e, "content"),
         sourceIdentity: strField(e, "sourceIdentity"),
         ...(typeof e.observedAt === "string" ? { observedAt: e.observedAt } : {}),
+        ...(integrity !== undefined ? { integrity } : {}),
       };
     });
   }

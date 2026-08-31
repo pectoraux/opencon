@@ -21,8 +21,10 @@ import {
   createNetW013Harness,
   createQualifiedContribution,
   key as w013Key,
+  type NetW008HarnessOptions,
   type NetW013Harness,
 } from "../contributions/_net-w013-harness.ts";
+export type { NetW008HarnessOptions };
 import { createExecutionContext } from "../../src/core/execution-context.ts";
 import type { ExecutionContext } from "../../src/core/execution-context.ts";
 import type { ReputationSnapshot } from "../../src/reputation/port.ts";
@@ -75,8 +77,10 @@ const SCORING_RULES = [
   indicatedOnlyCap: 10,
 }));
 
-export async function createNetW015Harness(): Promise<NetW015Harness> {
-  const w013 = await createNetW013Harness();
+export async function createNetW015Harness(
+  opts: NetW008HarnessOptions = {},
+): Promise<NetW015Harness> {
+  const w013 = await createNetW013Harness(opts);
   const runtime = w013.runtime;
   const bootstrapCtx = w013.bootstrapCtx;
 
