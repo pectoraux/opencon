@@ -34,6 +34,7 @@
  * `/outcomes` domain and concrete adapters may import it.
  */
 
+import { OpenConError } from "../core/errors.ts";
 import type { AttributionMode } from "../core/measurement.ts";
 import type {
   ConfidenceEstimate,
@@ -127,6 +128,202 @@ export interface MeasurementProviderAdapter {
   fetchObservations(
     request: ProviderObservationFetchRequest,
   ): Promise<ProviderObservationFetchResult>;
+  /**
+   * NET-W022 (ADAPTER-003..004): normalize ONE raw, provider-shaped
+   * attribution report (a pushed postback / platform report) into the
+   * neutral report shape. OPTIONAL on purpose: adapters that only
+   * serve the pull surface (e.g. the W006 echo reference) may omit
+   * it — the ingestion service then fails CLOSED with the
+   * `unsupported_push_ingestion` rejection (a provider that cannot
+   * normalize pushed reports must never have them accepted).
+   *
+   * Implementations MUST: validate the vendor payload structure
+   * (fail closed on malformed reports), resolve the provider-side
+   * subject mapping (fail closed when ambiguous), enforce
+   * mode-specific consistency, verify report integrity, and REDACT
+   * every field beyond the neutral contract (privacy minimization —
+   * only field NAMES may be reported back in
+   * `redactedFieldNames`, never values). The verification secret is
+   * injected at composition time and NEVER appears in the normalized
+   * report, logs, or error context.
+   */
+  normalizeReport?(
+    submission: RawProviderReportSubmission,
+  ): Promise<AdapterReportNormalization>;
+}
+
+/**
+ * NET-W022: a raw provider report submission (push ingestion). The
+ * `payload` is the vendor-shaped report exactly as the platform
+ * delivered it — OPAQUE at every tier except the adapter that owns
+ * `providerId`. Provider SDK vocabulary must not cross into domain
+ * authorities (issue #44 architectural constraints).
+ */
+export interface RawProviderReportSubmission {
+  /** The registered provider adapter that owns this report shape. */
+  readonly providerId: string;
+  /** The raw vendor report payload (uninterpreted outside the adapter). */
+  readonly payload: unknown;
+}
+
+/**
+ * NET-W022: the result of ONE adapter's normalization of a raw
+ * provider report. `redactedFieldNames` is a privacy-transparency
+ * summary — the NAMES of dropped over-broad/vendor fields (values
+ * NEVER cross the adapter boundary; PRIV-002/PRIV-003 minimization).
+ */
+export interface AdapterReportNormalization {
+  readonly report: ProviderObservationReport;
+  readonly redactedFieldNames: readonly string[];
+}
+
+/** NET-W022: normalization result at the ingestion boundary. */
+export interface MeasurementReportNormalizationResult
+  extends AdapterReportNormalization {
+  /** The adapter version that performed the normalization. */
+  readonly providerVersion: string;
+}
+
+/**
+ * NET-W022: the closed rejection-reason vocabulary for provider
+ * report ingestion (fail closed, stable reasons — the W019
+ * gate-reason pattern):
+ *
+ *  - `malformed_report` — the raw payload violates the vendor shape.
+ *  - `unsupported_attribution_mode` — the report claims an
+ *    attribution mode the adapter does not accept (provider reports
+ *    may claim deterministic/probabilistic attribution as a
+ *    provenance fact; EXPERIMENTAL attribution is protocol-owned via
+ *    /outcomes experiments and can never be claimed by a provider).
+ *  - `invalid_attribution_mode` — mode-specific consistency failed
+ *    (deterministic without a mechanical link; probabilistic WITH a
+ *    mechanical link or WITHOUT a quantified interval).
+ *  - `missing_provenance` — method/method-version/collectedAt absent.
+ *  - `ambiguous_subject_mapping` — the provider-side subject mapping
+ *    resolved to zero or multiple candidates.
+ *  - `unverifiable_integrity` — the report's integrity fields are
+ *    missing, use an unsupported algorithm, cannot be verified with
+ *    the configured provider secret, or do not match the payload.
+ *  - `unsupported_push_ingestion` — the addressed adapter does not
+ *    accept pushed reports at all.
+ */
+export const MEASUREMENT_REPORT_REJECTION_REASONS = [
+  "malformed_report",
+  "unsupported_attribution_mode",
+  "invalid_attribution_mode",
+  "missing_provenance",
+  "ambiguous_subject_mapping",
+  "unverifiable_integrity",
+  "unsupported_push_ingestion",
+] as const;
+
+export type MeasurementReportRejectionReason =
+  (typeof MEASUREMENT_REPORT_REJECTION_REASONS)[number];
+
+export function isMeasurementReportRejectionReason(
+  value: string,
+): value is MeasurementReportRejectionReason {
+  return (
+    MEASUREMENT_REPORT_REJECTION_REASONS as readonly string[]
+  ).includes(value);
+}
+
+/**
+ * NET-W022: the provider registration boundary. The composition root
+ * registers every wired adapter; the ingestion service routes raw
+ * report submissions by provider id. Registration validates adapter
+ * identity (kind "measurement", non-empty provider + version) and
+ * fails on duplicate provider ids — one adapter per provider identity.
+ */
+export interface MeasurementProviderRegistry {
+  /** Register an adapter (composition root only). Fails closed on invalid/duplicate identity. */
+  register(adapter: MeasurementProviderAdapter): void;
+  /** The adapter registered under a provider id (undefined when unknown). */
+  byProviderId(providerId: string): MeasurementProviderAdapter | undefined;
+  /** All registered adapters (iteration order = registration order). */
+  list(): readonly MeasurementProviderAdapter[];
+  /** Aggregate health of every registered adapter. */
+  checkHealth(): Promise<
+    readonly {
+      readonly provider: string;
+      readonly ok: boolean;
+      readonly detail?: string;
+    }[]
+  >;
+}
+
+/**
+ * NET-W022: the provider-neutral ingestion boundary. Routes ONE raw
+ * report submission to the adapter that owns its provider id and
+ * returns the normalized neutral report. This boundary performs NO
+ * mutation — persistence, idempotency and audit live in `/outcomes`
+ * (the measurement-semantics authority), composed by the bootstrap
+ * root. The adapter tier may not import domain modules (tier matrix).
+ */
+export interface MeasurementIngestionService {
+  /**
+   * Normalize one raw submission. Fail closed: unknown provider ids,
+   * adapters without push support, and adapters that produce neutral
+   * reports violating the neutral contract or claiming another
+   * provider's identity are all rejected.
+   */
+  normalizeSubmission(
+    submission: RawProviderReportSubmission,
+  ): Promise<MeasurementReportNormalizationResult>;
+  /** Aggregate health of the registered provider adapters. */
+  checkHealth(): Promise<
+    readonly {
+      readonly provider: string;
+      readonly ok: boolean;
+      readonly detail?: string;
+    }[]
+  >;
+}
+
+/**
+ * NET-W022: raised when a raw report is addressed to a provider id
+ * that is not registered (fail closed — an unknown provider's report
+ * can never enter the measurement layer).
+ */
+export class UnknownMeasurementProviderError extends OpenConError {
+  public constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+  ) {
+    super({
+      code: "UNKNOWN_MEASUREMENT_PROVIDER",
+      classification: "validation",
+      message,
+      retryable: false,
+      context,
+    });
+  }
+}
+
+/**
+ * NET-W022: raised when a raw provider report is rejected fail
+ * closed (stable code MEASUREMENT_REPORT_REJECTED + the closed
+ * {@link MEASUREMENT_REPORT_REJECTION_REASONS} reason vocabulary in
+ * the error context). The context NEVER includes report payload
+ * values or secret material — only the reason, the provider id, and
+ * optionally a field name.
+ */
+export class MeasurementReportRejectedError extends OpenConError {
+  public readonly reason: MeasurementReportRejectionReason;
+  public constructor(
+    reason: MeasurementReportRejectionReason,
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+  ) {
+    super({
+      code: "MEASUREMENT_REPORT_REJECTED",
+      classification: "validation",
+      message,
+      retryable: false,
+      context: { ...context, reason },
+    });
+    this.reason = reason;
+  }
 }
 
 /**

@@ -193,9 +193,26 @@ import type {
 // (browser/platform + iOS attribution) arrive in NET-W022 behind the
 // SAME neutral port.
 import type {
+  MeasurementIngestionService,
   MeasurementProviderAdapter,
 } from "../measurement/port.ts";
 import { echoMeasurementProvider } from "../measurement/providers/echo-measurement-provider.ts";
+// NET-W022: the reference attribution adapters (ADAPTER-003 browser/
+// platform attribution + ADAPTER-004 iOS attribution), the provider
+// registration boundary, and the neutral ingestion service. All are
+// ADAPTER tier: they import core + the neutral port only; the raw
+// vendor shapes never cross into /outcomes (architecture-lock
+// §14.24/§14.25).
+import { BrowserAttributionAdapter } from "../measurement/providers/browser-attribution-adapter.ts";
+import { IOSAttributionAdapter } from "../measurement/providers/ios-attribution-adapter.ts";
+import { createMeasurementProviderRegistry } from "../measurement/registry.ts";
+import { createMeasurementIngestionService } from "../measurement/ingestion.ts";
+
+/** NET-W022 secret key names (resolved ONLY through the SecretProvider). */
+export const MEASUREMENT_BROWSER_ATTRIBUTION_SECRET_KEY =
+  "MEASUREMENT_BROWSER_ATTRIBUTION_KEY" as const;
+export const MEASUREMENT_IOS_ATTRIBUTION_SECRET_KEY =
+  "MEASUREMENT_IOS_ATTRIBUTION_KEY" as const;
 // NET-W007 reputation boundary: the multidimensional reputation engine
 // — evidence-backed inputs (basis DERIVED from upstream records
 // through neutral lookups), immutable versioned deterministic scoring
@@ -510,6 +527,13 @@ export interface Runtime {
   readonly measuredOutcomeService: MeasuredOutcomeService;
   /** The wired provider-neutral measurement adapters (diagnostics). */
   readonly measurementProviders: readonly MeasurementProviderAdapter[];
+  /**
+   * NET-W022: the provider-neutral measurement ingestion boundary —
+   * routes raw provider report submissions to the registered adapter
+   * and returns the normalized neutral report (no mutation; the
+   * persistence composition lives in the apiCommands composite).
+   */
+  readonly measurementIngestion: MeasurementIngestionService;
   // NET-W007 domain services (exposed for integration/security tests).
   readonly reputationPolicyService: ReputationPolicyService;
   readonly reputationInputService: ReputationInputService;
@@ -1082,10 +1106,49 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   // NET-W022 platform attribution adapters later) or the reference
   // ECHO adapter. The outcomes domain consumes only the neutral
   // contract.
+  // NET-W022: when NO explicit providers are configured, the
+  // reference browser/platform + iOS attribution adapters (ADAPTER-
+  // 003..004) are auto-wired IFF their verification secrets are
+  // configured (SecretProvider boundary). Without the secrets the
+  // default wiring stays ECHO-only (the W006 default) and pushed
+  // attribution reports for those providers fail closed.
+  const browserAttributionSecret = secretProvider.hasSecret(
+    MEASUREMENT_BROWSER_ATTRIBUTION_SECRET_KEY,
+  )
+    ? secretProvider.getSecretSync(MEASUREMENT_BROWSER_ATTRIBUTION_SECRET_KEY)
+    : undefined;
+  const iosAttributionSecret = secretProvider.hasSecret(
+    MEASUREMENT_IOS_ATTRIBUTION_SECRET_KEY,
+  )
+    ? secretProvider.getSecretSync(MEASUREMENT_IOS_ATTRIBUTION_SECRET_KEY)
+    : undefined;
   const measurementProviders: readonly MeasurementProviderAdapter[] =
     opts.measurement?.providers?.length
       ? opts.measurement.providers
-      : [echoMeasurementProvider];
+      : [
+          echoMeasurementProvider,
+          ...(browserAttributionSecret !== undefined
+            ? [new BrowserAttributionAdapter({ verificationSecret: browserAttributionSecret })]
+            : []),
+          ...(iosAttributionSecret !== undefined
+            ? [new IOSAttributionAdapter({ verificationSecret: iosAttributionSecret })]
+            : []),
+        ];
+  // NET-W022: the provider registration boundary. Every wired
+  // measurement adapter is registered exactly once (duplicate
+  // provider identity fails closed); the ingestion service routes
+  // raw report submissions by provider id. The measurement tier
+  // performs NO mutation — normalization only; persistence,
+  // idempotency and audit stay in /outcomes, composed by THIS root
+  // (the adapter tier may not import domain modules).
+  const measurementRegistry = createMeasurementProviderRegistry();
+  for (const adapter of measurementProviders) {
+    measurementRegistry.register(adapter);
+  }
+  const measurementIngestion = createMeasurementIngestionService({
+    registry: measurementRegistry,
+    logger: logger.forModule("measurement"),
+  });
   // NET-W013: the provider-neutral LLM adapters (explicit override or
   // the deterministic ECHO reference provider). The FIRST consumer is
   // the generateAdvisoryQualityScore composition-root composite below
@@ -1118,6 +1181,9 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     outcomeClaimLookup,
     evidenceLookup: evidenceRecordLookup,
     providerAdapters: measurementProviders,
+    // NET-W022: push report ingestion (ingestProviderReport) is
+    // exactly-once-per-key through the authority-backed store.
+    idempotency,
     authority: postgresAuthority,
     auditWriter,
     logger: logger.forModule("outcomes"),
@@ -4738,6 +4804,36 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return {
         providerId: result.providerId,
         createdObservations: result.createdObservations.map(toObservationView),
+      };
+    },
+    async submitMeasurementReport(execution, actorPersonId, input) {
+      // NET-W022 composition-root composite (the adapter tier cannot
+      // import /outcomes — the tier matrix forbids it): (1) the
+      // measurement boundary normalizes the raw vendor report (fail
+      // closed), (2) the /outcomes domain validates the neutral report
+      // and persists it exactly-once-per-key with atomic audit. The
+      // observer is the server-resolved authenticated actor.
+      const normalized = await measurementIngestion.normalizeSubmission({
+        providerId: input.providerId,
+        payload: input.report,
+      });
+      const result = await outcomeObservationService.ingestProviderReport(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId,
+          observerId: actorPersonId,
+          subjectReference: input.subjectReference,
+          report: normalized.report,
+          providerAdapterVersion: normalized.providerVersion,
+          idempotencyKey: input.idempotencyKey,
+        },
+      );
+      return {
+        providerId: normalized.report.providerId,
+        providerVersion: normalized.providerVersion,
+        redactedFieldNames: normalized.redactedFieldNames,
+        created: result.created,
+        observation: toObservationView(result.observation),
       };
     },
     async createMeasurementExperiment(execution, actorPersonId, input) {
@@ -8452,6 +8548,7 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     baselineService,
     measuredOutcomeService,
     measurementProviders,
+    measurementIngestion,
     // NET-W007 domain services.
     reputationPolicyService,
     reputationInputService,

@@ -38,6 +38,7 @@ import { randomUUID } from "node:crypto";
 import type { TransactionalAuditWriter } from "../core/audit.ts";
 import type { ExecutionContext } from "../core/execution-context.ts";
 import type { PostgresAuthority } from "../core/postgres-authority.ts";
+import type { IdempotencyStore } from "../core/idempotency.ts";
 import { NotFoundError, OpenConError } from "../core/errors.ts";
 import type { Logger } from "../core/logger.ts";
 import {
@@ -62,6 +63,7 @@ import type {
   OutcomeObservationRepository,
   OutcomeObservationService,
   ProviderIngestionResult,
+  ProviderReportIngestionResult,
 } from "./port.ts";
 import { resolveChain } from "./observation-chains.ts";
 
@@ -80,6 +82,13 @@ export interface OutcomeObservationServiceDeps {
    * consumes only the neutral contract.
    */
   readonly providerAdapters: readonly MeasurementProviderAdapter[];
+  /**
+   * NET-W022: the authority-backed idempotency store — push report
+   * ingestion (ingestProviderReport) is exactly-once-per-key; the
+   * observation + audit record + idempotency record commit in ONE
+   * authoritative transaction.
+   */
+  readonly idempotency: IdempotencyStore;
   readonly authority: PostgresAuthority;
   readonly auditWriter: TransactionalAuditWriter;
   readonly logger: Logger;
@@ -132,6 +141,7 @@ export function createOutcomeObservationService(
     outcomeClaimLookup,
     evidenceLookup,
     providerAdapters,
+    idempotency,
     authority,
     auditWriter,
     logger,
@@ -492,6 +502,118 @@ export function createOutcomeObservationService(
             ? providerAdapters[0]!.info.provider
             : "multi-provider",
         createdObservations: created,
+      };
+      return result;
+    },
+
+    async ingestProviderReport(execution, input) {
+      // ---- NET-W022 push ingestion (ADAPTER-003..004) ---------------
+      // The raw vendor payload was normalized by the provider's
+      // adapter in /measurement BEFORE this call; the domain validates
+      // the neutral report against the SAME W006 rules and persists
+      // exactly-once-per-key. No lifecycle change: the observation is
+      // a measurement INPUT, never a finalized measurement.
+      if (!input.organizationScopeId?.trim()) {
+        throw new OpenConError({
+          code: "MEASUREMENT_VALIDATION",
+          classification: "validation",
+          message: "organizationScopeId is required",
+          context: { field: "organizationScopeId" },
+        });
+      }
+      if (!input.observerId?.trim()) {
+        throw new OpenConError({
+          code: "MEASUREMENT_VALIDATION",
+          classification: "validation",
+          message: "observerId is required",
+          context: { field: "observerId" },
+        });
+      }
+      if (
+        !input.subjectReference?.subjectId?.trim() ||
+        !input.subjectReference?.subjectType?.trim()
+      ) {
+        throw new OpenConError({
+          code: "MEASUREMENT_VALIDATION",
+          classification: "validation",
+          message:
+            "subjectReference.subjectId and subjectReference.subjectType are required",
+          context: { field: "subjectReference" },
+        });
+      }
+      if (typeof input.idempotencyKey !== "string" || !input.idempotencyKey.trim()) {
+        throw new OpenConError({
+          code: "MEASUREMENT_VALIDATION",
+          classification: "validation",
+          message: "idempotencyKey is required (push report ingestion is exactly-once-per-key)",
+          context: { field: "idempotencyKey" },
+        });
+      }
+      if (!input.report || typeof input.report !== "object") {
+        throw new OpenConError({
+          code: "MEASUREMENT_VALIDATION",
+          classification: "validation",
+          message: "report (the normalized neutral provider report) is required",
+          context: { field: "report" },
+        });
+      }
+      const key = `measurement_report:${input.organizationScopeId}:${input.idempotencyKey}`;
+      const applied = await idempotency.applyIdempotent(
+        key,
+        async (ctx) => {
+          // Same validation as the pull path (fail closed — an
+          // adapter cannot inject invalid facts through the push
+          // surface either).
+          const observation = await normalizeProviderReport(
+            ctx.execution,
+            {
+              organizationScopeId: input.organizationScopeId,
+              observerId: input.observerId,
+              subjectReference: input.subjectReference,
+            },
+            input.report,
+            input.report.providerId,
+          );
+          await repository.saveWithinTx(observation, ctx.transaction);
+          const buffer = auditWriter.forTransaction(ctx.transaction);
+          await buffer.append({
+            eventType: OBSERVATION_CREATED,
+            context: ctx.execution,
+            actor: ctx.execution.actor?.id ?? null,
+            subject: observation.id,
+            resourceType: "outcome_observation",
+            resourceId: observation.id,
+            metadata: {
+              ingestedFromProvider: observation.provenance.sourceId,
+              providerVersion: input.providerAdapterVersion,
+              externalSubjectRef: observation.externalSubjectRef,
+              pushedReportIngestion: true,
+              idempotencyRecordId: ctx.recordId,
+              transactionId: ctx.transaction.transactionId,
+              organizationScopeId: observation.organizationScopeId,
+              subjectId: observation.subjectReference.subjectId,
+              subjectType: observation.subjectReference.subjectType,
+              outcomeType: observation.outcomeType,
+              observedValue: observation.observedValue.value,
+              observedUnit: observation.observedValue.unit,
+              confidencePoint: observation.confidence.point,
+              sourceType: observation.provenance.sourceType,
+              method: observation.provenance.method,
+              methodVersion: observation.provenance.methodVersion,
+            },
+          });
+          return observation;
+        },
+        execution,
+      );
+      logger.info("outcome_observation.provider_report_ingested", {
+        observationId: applied.result.id,
+        providerId: applied.result.provenance.sourceId,
+        created: applied.executed,
+      });
+      const result: ProviderReportIngestionResult = {
+        observation: applied.result,
+        created: applied.executed,
       };
       return result;
     },

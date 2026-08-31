@@ -15,6 +15,15 @@ adapters provide facts; `/outcomes` retains semantic authority)
   uncertainty, optional validated links to NET-W005 Outcome Claims and
   Evidence, and append-corrected corrections (corrections are NEW
   records targeting the chain head; branching is rejected).
+- **Provider report ingestion (NET-W022 additive)** — pushed
+  attribution reports (ADAPTER-003..004) arrive PRE-normalized through
+  the neutral `/measurement` adapter boundary; `ingestProviderReport`
+  validates the neutral report against the SAME W006 rules and
+  persists it as a provider-sourced observation exactly-once-per
+  idempotency key (observation + audit + idempotency record in ONE
+  authoritative transaction). The lifecycle/transition matrix is
+  UNCHANGED — provider attribution remains a provenance fact, never
+  protocol truth, and can never manufacture a finalized measurement.
 - **Attribution representation** (OUT-002) — deterministic (mechanical
   link REQUIRED), probabilistic (link FORBIDDEN, method/version +
   quantified interval REQUIRED), experimental (non-invalidated
