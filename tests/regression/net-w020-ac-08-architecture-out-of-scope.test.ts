@@ -249,12 +249,19 @@ describe("NET-W020-AC-08 architecture / out-of-scope", () => {
     // the region end is the apiCommands DEFINITION — the earlier
     // `apiCommands: ApiCommands` match was the Runtime interface
     // declaration, which made the region empty and the pin vacuous.)
+    // NET-W021 refinement (the W016→W017 pin-refinement precedent):
+    // the region end is now the NET-W021 section banner — the W021
+    // matching section that legitimately wires the LlmPort advisory
+    // adapters follows AFTER the clearing block; the clearing surface
+    // region itself still references no LLM machinery.
     const runtime = await readFile(
       join(REPO, "src/bootstrap/runtime.ts"),
       "utf8",
     );
     const w020Start = runtime.indexOf("NET-W020 — Cross-promotion clearing");
-    const w020End = runtime.indexOf("const apiCommands: ApiCommands = {");
+    const w020End = runtime.indexOf(
+      "NET-W021 — Campaign matching and optimization",
+    );
     const w020Region = runtime.slice(w020Start, w020End);
     expect(w020Region.length).toBeGreaterThan(1000);
     expect(w020Region).not.toMatch(/llm|Llm|LLM/);

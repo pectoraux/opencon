@@ -556,3 +556,224 @@ export function campaignEligibilityPolicyReference(
 ): string {
   return `campaign_policy:${campaignId}:${policyVersion}:${specId}`;
 }
+
+// ---------------------------------------------------------------------------
+// NET-W021 — Campaign matching and optimization vocabulary
+// (campaign-to-inventory/creator supply matching; selection, not
+// authority). Mirrors the NET-W016 creator-matching core block
+// (core/creators.ts) with the campaign-side semantics: the campaign
+// is the matching SUBJECT and W019 inventory items are the candidate
+// SUPPLY (creator supply enters through surfaceKind "creator" items —
+// the W019 unified-supply decision; /creators matching stays its own
+// authority and is deliberately NOT a dependency).
+// ---------------------------------------------------------------------------
+
+/**
+ * The six explicit W021 ranking signals. Hard constraints are
+ * enforced FIRST (the gate vocabulary below); ONLY eligible options
+ * are ranked, by these signals with explicit weights. Performance
+ * signals are EVIDENCE-BACKED (VERIFIED measured outcomes + canonical
+ * reputation snapshots) — the advisory AI path may only blend
+ * (bounded) into `alignment` (AI-002) and `risk` (AI-003) and can
+ * never flip a hard gate.
+ */
+export const CAMPAIGN_MATCH_SIGNALS = [
+  "alignment",
+  "performance",
+  "standing",
+  "reliability",
+  "risk",
+  "coverage",
+] as const;
+
+export type CampaignMatchSignal = (typeof CAMPAIGN_MATCH_SIGNALS)[number];
+
+export function isCampaignMatchSignal(
+  value: string,
+): value is CampaignMatchSignal {
+  return (CAMPAIGN_MATCH_SIGNALS as readonly string[]).includes(value);
+}
+
+/**
+ * The closed hard-gate reason vocabulary (NET-W021 §3.1). An
+ * ineligible supply option carries one or more of these reasons —
+ * the complete, machine-readable explanation. Hard restrictions
+ * (tenant boundary, policy scope, supply verification, eligibility
+ * rules, targeting, risk holds) can NEVER be overridden by model
+ * ranking (structural — the gates are evaluated before any advisory
+ * is consulted and the engine has no advisory input on the gate
+ * path).
+ */
+export const CAMPAIGN_MATCH_GATE_REASONS = [
+  "campaign_not_publishable",
+  "policy_version_unresolved",
+  "policy_scope_out_of_tenant",
+  "item_out_of_scope",
+  "item_retired",
+  "supply_not_verified",
+  "eligibility_rules_not_satisfied",
+  "format_not_targeted",
+  "surface_kind_not_targeted",
+  "territory_not_reached",
+  "language_not_supported",
+  "owner_risk_control",
+] as const;
+
+export type CampaignMatchGateReason =
+  (typeof CAMPAIGN_MATCH_GATE_REASONS)[number];
+
+export function isCampaignMatchGateReason(
+  value: string,
+): value is CampaignMatchGateReason {
+  return (CAMPAIGN_MATCH_GATE_REASONS as readonly string[]).includes(value);
+}
+
+/**
+ * The frozen matching-run format lineage (the creator-match format
+ * precedent): pinned on every campaign match-run record so the
+ * contract shape stays reproducible.
+ */
+export const CAMPAIGN_MATCH_FORMAT = "NET-W021:1" as const;
+
+/** Match weights are integers 0–100 summing to EXACTLY this. */
+export const CAMPAIGN_MATCH_WEIGHT_SUM = 100;
+
+/**
+ * The maximum advisory blend into each blendable signal
+ * (advisoryMaxWeight/100 ≤ 0.25 — AI is advisory, never the
+ * eligibility authority, and never dominant in ranking). Applies
+ * independently to the AI-002 matching assessment (alignment) and
+ * the AI-003 risk analysis (risk).
+ */
+export const CAMPAIGN_MATCH_ADVISORY_MAX_BLEND = 0.25;
+
+/** The maximum number of supply candidates a single run may rank. */
+export const CAMPAIGN_MATCH_MAX_CANDIDATES = 200;
+
+/**
+ * Validation error for campaign-match-request violations (NET-W021).
+ */
+export class InvalidCampaignMatchError extends OpenConError {
+  constructor(
+    message: string,
+    context?: Readonly<Record<string, unknown>>,
+  ) {
+    super({
+      code: "CAMPAIGN_MATCH_VALIDATION",
+      classification: "validation",
+      message,
+      context,
+    });
+  }
+}
+
+/**
+ * The canonical default weight profile (integers, sum = 100):
+ * alignment 25, performance 30, standing 15, reliability 10, risk
+ * 10, coverage 10. Evidence-backed performance carries the largest
+ * share (the work item's definition of done). Explicit weights may
+ * override it but must satisfy the same constraints.
+ */
+export const CAMPAIGN_MATCH_DEFAULT_WEIGHTS = Object.freeze({
+  alignment: 25,
+  performance: 30,
+  standing: 15,
+  reliability: 10,
+  risk: 10,
+  coverage: 10,
+} as const);
+
+export interface CampaignMatchWeightsShape {
+  readonly alignment: number;
+  readonly performance: number;
+  readonly standing: number;
+  readonly reliability: number;
+  readonly risk: number;
+  readonly coverage: number;
+}
+
+/**
+ * Validate a weight profile: six integers 0–100 (inclusive), each
+ * signal present, summing to EXACTLY {@link CAMPAIGN_MATCH_WEIGHT_SUM}.
+ * Ranking is by explicit signals — the weights are part of the
+ * reproducible decision record.
+ */
+export function validateCampaignMatchWeights(
+  weights: CampaignMatchWeightsShape,
+): CampaignMatchWeightsShape {
+  const entries: readonly (readonly [
+    keyof CampaignMatchWeightsShape,
+    number,
+  ])[] = [
+    ["alignment", weights.alignment],
+    ["performance", weights.performance],
+    ["standing", weights.standing],
+    ["reliability", weights.reliability],
+    ["risk", weights.risk],
+    ["coverage", weights.coverage],
+  ];
+  let sum = 0;
+  for (const [field, value] of entries) {
+    if (
+      typeof value !== "number" ||
+      !Number.isInteger(value) ||
+      value < 0 ||
+      value > 100
+    ) {
+      throw new InvalidCampaignMatchError(
+        `weights.${field} must be an integer between 0 and 100 (got ${String(value)})`,
+        { field, value },
+      );
+    }
+    sum += value;
+  }
+  if (sum !== CAMPAIGN_MATCH_WEIGHT_SUM) {
+    throw new InvalidCampaignMatchError(
+      `campaign match weights must sum to exactly ${String(CAMPAIGN_MATCH_WEIGHT_SUM)} (got ${String(sum)})`,
+      { sum },
+    );
+  }
+  return weights;
+}
+
+/**
+ * Validate the advisory blend bound: 0 ≤ maxWeight ≤
+ * CAMPAIGN_MATCH_ADVISORY_MAX_BLEND × 100. The advisory is advisory —
+ * its influence on ranking is structurally capped (AI-002 matching
+ * and AI-003 risk analysis are each independently bounded).
+ */
+export function validateCampaignMatchAdvisoryMaxWeight(
+  maxWeight: number,
+): number {
+  const bound = CAMPAIGN_MATCH_ADVISORY_MAX_BLEND * 100;
+  if (
+    typeof maxWeight !== "number" ||
+    !Number.isFinite(maxWeight) ||
+    maxWeight < 0 ||
+    maxWeight > bound
+  ) {
+    throw new InvalidCampaignMatchError(
+      `advisory maxWeight must be between 0 and ${String(bound)} (got ${String(maxWeight)}) — AI-assisted matching/optimization is bounded, never the ranking authority`,
+      { maxWeight, bound },
+    );
+  }
+  return maxWeight;
+}
+
+/**
+ * The frozen surface-kind → standing-dimension mapping: which
+ * canonical reputation dimension supplies the `standing` signal for
+ * a supply option's owner. Creator surfaces use `creator_performance`;
+ * publisher/app surfaces use `inventory_quality` (both are frozen
+ * /reputation dimensions — matching never recomputes a score, it
+ * only resolves the canonical snapshot read-only).
+ */
+export const CAMPAIGN_MATCH_STANDING_DIMENSION_BY_SURFACE = Object.freeze({
+  publisher: "inventory_quality",
+  app: "inventory_quality",
+  creator: "creator_performance",
+} as const) as {
+  readonly publisher: "inventory_quality";
+  readonly app: "inventory_quality";
+  readonly creator: "creator_performance";
+};

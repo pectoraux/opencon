@@ -771,6 +771,15 @@ export interface MeasuredOutcomeRepository {
     execution: ExecutionContext,
   ): Promise<MeasuredOutcome>;
   findById(id: string): Promise<MeasuredOutcome | null>;
+  /**
+   * NET-W021 (additive read): list the measured outcomes for a
+   * subject within an organization scope (any lifecycle state; the
+   * service layer owns which states constitute evidence).
+   */
+  listBySubject(
+    organizationScopeId: string,
+    subjectId: string,
+  ): Promise<readonly MeasuredOutcome[]>;
   findByIdWithinTx(
     id: string,
     tx: AuthorityTransaction,
@@ -793,6 +802,20 @@ export interface MeasuredOutcomeRepository {
 }
 
 export interface MeasuredOutcomeService {
+  /**
+   * NET-W021 (additive read): the lifecycle-VERIFIED measured
+   * outcomes for a subject within an organization scope — the
+   * canonical "verified performance evidence" read (DRAFT,
+   * MEASURING and CANCELLED measurements are NOT evidence). This is
+   * the read the campaign-matching evidence lookup consumes through
+   * the composition root; the lifecycle semantics stay HERE.
+   */
+  listVerifiedMeasuredOutcomesBySubject(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    subjectId: string,
+  ): Promise<readonly MeasuredOutcome[]>;
+
   /**
    * Create a measured outcome (DRAFT). Validates the subject (through
    * the injected lookup), the outcome type, the optional outcome-claim

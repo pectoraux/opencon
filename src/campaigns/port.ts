@@ -73,6 +73,9 @@ import type {
   CampaignEligibilityAttribute,
   CampaignEligibilityOperator,
   CampaignEvidenceRequirementKind,
+  CampaignMatchGateReason,
+  CampaignMatchSignal,
+  CampaignMatchWeightsShape,
   CampaignObjectiveKind,
   CampaignStatus,
 } from "../core/campaigns.ts";
@@ -782,6 +785,406 @@ export interface CampaignService {
 }
 
 // ---------------------------------------------------------------------------
+// NET-W021 — Campaign matching and optimization (selection, not
+// authority). The campaign is the matching SUBJECT; W019 inventory
+// items are the candidate SUPPLY (creator supply enters through
+// surfaceKind "creator" items — the W019 unified-supply decision).
+// Every cross-domain read happens through the NEUTRAL lookups below
+// (the NET-W016 creator-matching precedent, inverted): the
+// campaigns domain performs NO inventory/reputation/risk/outcome
+// I/O of its own.
+// ---------------------------------------------------------------------------
+
+/** The explicit match targeting (merged with campaign-derived requirements). */
+export interface CampaignMatchTargeting {
+  /** Required inventory formats (core InventoryFormat vocabulary). */
+  readonly requiredFormats: readonly string[];
+  /** Required inventory surface kinds (core InventorySurfaceKind vocabulary). */
+  readonly requiredSurfaceKinds: readonly string[];
+  /** Target territories the supply must reach (≥1 overlap when declared). */
+  readonly targetTerritories: readonly string[];
+  /** Required languages the supply must support (≥1 overlap when declared). */
+  readonly requiredLanguages: readonly string[];
+}
+
+/**
+ * The advisory configuration: AI-002 (matching assessment, blends
+ * `alignment`) and AI-003 (fraud/risk analysis, blends `risk`) are
+ * each independently bounded. Disabled by default — a disabled
+ * advisory is pure-deterministic ranking.
+ */
+export interface CampaignMatchAdvisoryConfig {
+  readonly matching: {
+    readonly enabled: boolean;
+    /** Blend cap as a weight percent (0..25 → blend ≤ 0.25). */
+    readonly maxWeight: number;
+  };
+  readonly risk: {
+    readonly enabled: boolean;
+    readonly maxWeight: number;
+  };
+}
+
+/** A neutral (privacy-minimized) advisory fact label/value pair. */
+export interface CampaignMatchNeutralFact {
+  readonly label: string;
+  readonly value: string;
+}
+
+/** One advisory assessment (0–100, provider identity preserved). */
+export interface CampaignMatchAdvisoryAssessment {
+  readonly score: number;
+  readonly provider: string;
+  readonly modelRef: string;
+}
+
+// -- The neutral supply lookup (over the /inventory authority) ------
+
+/**
+ * The provider-neutral supply view the matching service consumes —
+ * a projection of the W019 InventoryItem (the /inventory authority
+ * stays the supply owner; this view carries ONLY the facts matching
+ * needs).
+ */
+export interface CampaignMatchInventoryItemView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly ownerPersonId: string;
+  readonly surfaceKind: string;
+  readonly format: string;
+  readonly territories: readonly string[];
+  readonly languages: readonly string[];
+  readonly verificationEvidenceReference: string | null;
+  readonly retiredAt: string | null;
+}
+
+/**
+ * The policy-eligibility evaluation over a supply option's declared
+ * attributes, produced by the /inventory authority's OWN rule
+ * semantics through the neutral lookup (matching never re-implements
+ * eligibility-rule semantics — no second eligibility authority).
+ */
+export interface CampaignMatchSupplyEligibilityEvaluation {
+  readonly eligible: boolean;
+  readonly ruleResults: readonly {
+    readonly attribute: string;
+    readonly operator: string;
+    readonly values: readonly string[];
+    readonly satisfied: boolean;
+    readonly reason: string;
+  }[];
+}
+
+/**
+ * The neutral supply lookup: candidate enumeration, the
+ * already-placed set and the policy-rule evaluation — all thin
+ * read-only composition-root adapters over the /inventory authority.
+ */
+export interface CampaignMatchSupplyLookup {
+  /** List the org's supply (non-retired by default). */
+  listCandidateItems(
+    organizationScopeId: string,
+    filters?: { readonly retired?: boolean },
+  ): Promise<readonly CampaignMatchInventoryItemView[]>;
+  /** Load one item within the scope (null when absent/cross-scope). */
+  getItem(
+    organizationScopeId: string,
+    itemId: string,
+  ): Promise<CampaignMatchInventoryItemView | null>;
+  /** The inventory item ids this campaign already has placements on. */
+  placedItemIds(
+    organizationScopeId: string,
+    campaignId: string,
+  ): Promise<readonly string[]>;
+  /**
+   * Evaluate the pinned policy's eligibility rules against a supply
+   * option's declared attributes (the /inventory eligibility
+   * engine's semantics — region/language are supply-carried; other
+   * attributes are not carried by supply).
+   */
+  evaluateEligibilityRules(
+    rules: readonly CampaignEligibilityRule[],
+    supply: {
+      readonly territories: readonly string[];
+      readonly languages: readonly string[];
+    },
+  ): Promise<CampaignMatchSupplyEligibilityEvaluation>;
+}
+
+// -- The neutral reputation lookup (over the /reputation authority) --
+
+/**
+ * A canonical reputation score resolved read-only for a supply
+ * owner (the latest snapshot for the dimension — digest pinned on
+ * the run so the evidence base is reproducible). Matching never
+ * computes, stores or mints a score.
+ */
+export interface ResolvedCampaignMatchReputationScore {
+  readonly snapshotId: string;
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string;
+  readonly dimension: string;
+  readonly digest: string;
+  readonly score: number;
+}
+
+export interface CampaignMatchReputationLookup {
+  latestScore(
+    organizationScopeId: string,
+    subjectPersonId: string,
+    dimension: string,
+  ): Promise<ResolvedCampaignMatchReputationScore | null>;
+}
+
+// -- The neutral safety lookup (over the /disputes authority) -------
+
+export interface CampaignMatchSafetyView {
+  readonly held: boolean;
+  readonly controlId: string | null;
+  readonly action: string | null;
+}
+
+export interface CampaignMatchSafetyLookup {
+  activeHold(
+    organizationScopeId: string,
+    ownerPersonId: string,
+  ): Promise<CampaignMatchSafetyView>;
+}
+
+// -- The neutral outcome-evidence lookup (over /outcomes) -----------
+
+/**
+ * One piece of VERIFIED measured-outcome evidence for a supply
+ * subject (the /outcomes authority owns the lifecycle; only
+ * lifecycle-VERIFIED outcomes are performance evidence — DRAFT /
+ * MEASURING / CANCELLED measurements are not).
+ */
+export interface CampaignMatchOutcomeEvidence {
+  readonly measuredOutcomeId: string;
+  readonly outcomeType: string;
+  readonly state: "VERIFIED";
+  readonly value: number;
+  readonly unit: string;
+  readonly confidencePoint: number;
+  readonly rollupStrategy: string;
+  readonly verifiedAt: string | null;
+}
+
+export interface CampaignMatchOutcomeLookup {
+  listVerifiedOutcomesBySubject(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    subjectId: string,
+  ): Promise<readonly CampaignMatchOutcomeEvidence[]>;
+}
+
+// -- The provider-neutral advisory (over /llm) ----------------------
+
+/**
+ * The AI advisory port (AI-002 + AI-003): two bounded consultations,
+ * wired at the composition root over `LlmPort.score` (purposes
+ * "matching" and "safety"). Both are non-authoritative by
+ * construction — they adjust ranking signals within the capped
+ * blends and can never affect a gate.
+ */
+export interface CampaignMatchAdvisory {
+  assessMatching(input: {
+    readonly rubricRef: string;
+    readonly neutralFacts: readonly CampaignMatchNeutralFact[];
+  }): Promise<CampaignMatchAdvisoryAssessment>;
+  assessRisk(input: {
+    readonly rubricRef: string;
+    readonly neutralFacts: readonly CampaignMatchNeutralFact[];
+  }): Promise<CampaignMatchAdvisoryAssessment>;
+}
+
+export interface CampaignMatchLookups {
+  readonly supply: CampaignMatchSupplyLookup;
+  readonly reputation: CampaignMatchReputationLookup;
+  readonly safety: CampaignMatchSafetyLookup;
+  readonly outcomes: CampaignMatchOutcomeLookup;
+}
+
+// -- The match-run record -------------------------------------------
+
+/** One hard-gate evaluation entry (the complete trace). */
+export interface CampaignMatchGateEvaluation {
+  readonly gate: CampaignMatchGateReason;
+  readonly passed: boolean;
+  readonly detail: string | null;
+}
+
+/** The per-candidate eligibility verdict (conjunction of all gates). */
+export interface CampaignMatchEligibility {
+  readonly eligible: boolean;
+  readonly gates: readonly CampaignMatchGateEvaluation[];
+  readonly failedReasons: readonly CampaignMatchGateReason[];
+}
+
+/** One ranked signal with its baseline (pre-advisory) score. */
+export interface CampaignMatchSignalScore {
+  readonly signal: CampaignMatchSignal;
+  /** The FINAL score (post advisory blend when the advisory is used). */
+  readonly score: number;
+  /** The deterministic BASELINE score (advisory-off). */
+  readonly baselineScore: number;
+  readonly weight: number;
+  readonly contribution: number;
+  /** The machine-readable inputs the signal used (the explanation). */
+  readonly inputs: Readonly<Record<string, unknown>>;
+}
+
+/** One ranked (eligible) supply option. */
+export interface CampaignMatchCandidateResult {
+  readonly inventoryItemId: string;
+  readonly ownerPersonId: string;
+  readonly surfaceKind: string;
+  readonly format: string;
+  readonly rank: number;
+  readonly baselineRank: number;
+  readonly totalScore: number;
+  readonly baselineTotalScore: number;
+  /** The campaign already has a placement on this item. */
+  readonly alreadyPlaced: boolean;
+  readonly signals: readonly CampaignMatchSignalScore[];
+  readonly advisory: {
+    readonly matching: CampaignMatchAdvisoryAssessment | null;
+    readonly risk: CampaignMatchAdvisoryAssessment | null;
+  };
+}
+
+/** One excluded (ineligible) supply option with its closed-vocabulary reasons. */
+export interface CampaignMatchExcludedCandidate {
+  readonly inventoryItemId: string;
+  readonly ownerPersonId: string;
+  readonly surfaceKind: string;
+  readonly format: string;
+  readonly failedReasons: readonly CampaignMatchGateReason[];
+}
+
+/**
+ * The append-only campaign match-run record: the complete, immutable
+ * decision record (targeting + weights + advisory metadata + ranked
+ * results with per-signal explanations and baseline/final orderings
+ * + excluded candidates with reasons + deterministic digest) — the
+ * record-of-decision pattern (the NET-W016 run-record precedent).
+ */
+export interface CampaignMatchRunRecord {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly formatVersion: string;
+  readonly campaign: {
+    readonly campaignId: string;
+    readonly policyVersion: number;
+  };
+  /** The EFFECTIVE targeting (explicit ∪ campaign policy derived). */
+  readonly targeting: CampaignMatchTargeting;
+  /** The outcome types the pinned policy's outcome section demands. */
+  readonly requiredOutcomeTypes: readonly string[];
+  readonly weights: CampaignMatchWeightsShape;
+  readonly advisory: {
+    readonly config: CampaignMatchAdvisoryConfig;
+    readonly matching: {
+      readonly used: boolean;
+      readonly blend: number;
+      readonly provider: string | null;
+      readonly modelRef: string | null;
+    };
+    readonly risk: {
+      readonly used: boolean;
+      readonly blend: number;
+      readonly provider: string | null;
+      readonly modelRef: string | null;
+    };
+  };
+  readonly candidateCount: number;
+  readonly eligibleCount: number;
+  readonly results: readonly CampaignMatchCandidateResult[];
+  readonly excluded: readonly CampaignMatchExcludedCandidate[];
+  readonly digest: string;
+  readonly createdBy: string;
+  readonly createdAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+// -- The run command ------------------------------------------------
+
+export interface RunCampaignMatchInput {
+  readonly organizationScopeId: string;
+  readonly campaignId: string;
+  /** Pin a policy version (defaults to the campaign's current version). */
+  readonly policyVersion?: number;
+  /** Explicit targeting (merged with campaign-derived requirements). */
+  readonly targeting?: {
+    readonly requiredFormats?: readonly string[];
+    readonly requiredSurfaceKinds?: readonly string[];
+    readonly targetTerritories?: readonly string[];
+    readonly requiredLanguages?: readonly string[];
+  };
+  readonly weights?: CampaignMatchWeightsShape;
+  readonly advisory?: {
+    readonly matching?: { readonly enabled?: boolean; readonly maxWeight?: number };
+    readonly risk?: { readonly enabled?: boolean; readonly maxWeight?: number };
+  };
+  /** Explicit tenant-scoped candidate list (defaults to the org's supply). */
+  readonly candidateInventoryItemIds?: readonly string[];
+  readonly idempotencyKey: string;
+}
+
+export interface RunCampaignMatchResult {
+  readonly run: CampaignMatchRunRecord;
+  /** false when the idempotency key replayed the committed run. */
+  readonly created: boolean;
+}
+
+// -- The run repository ----------------------------------------------
+
+export interface CampaignMatchRunRepository {
+  createWithinTx(
+    run: CampaignMatchRunRecord,
+    tx: AuthorityTransaction,
+  ): Promise<CampaignMatchRunRecord>;
+  findById(id: string): Promise<CampaignMatchRunRecord | null>;
+  listByOrganization(
+    organizationScopeId: string,
+    campaignId?: string,
+  ): Promise<readonly CampaignMatchRunRecord[]>;
+}
+
+// -- The matching service --------------------------------------------
+
+export interface CampaignMatchingService {
+  /**
+   * Run a campaign match: validate the request → resolve the ACTIVE
+   * campaign + pinned in-scope policy version → merge targeting →
+   * enumerate candidates → assemble facts through the neutral
+   * lookups → run the PURE engine (gates → baseline signals →
+   * bounded advisory blends → final signals → baseline/final
+   * orderings) → persist ONE append-only run record (idempotent,
+   * transactionally audited, digest-pinned).
+   */
+  runCampaignMatch(
+    execution: ExecutionContext,
+    input: RunCampaignMatchInput,
+  ): Promise<RunCampaignMatchResult>;
+  /** Fetch one run (tenant-scoped; cross-scope is NotFound). */
+  getMatchRun(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    id: string,
+  ): Promise<CampaignMatchRunRecord>;
+  /** List an org's runs (optionally filtered by campaign). */
+  listMatchRuns(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    campaignId?: string,
+  ): Promise<readonly CampaignMatchRunRecord[]>;
+}
+
+// ---------------------------------------------------------------------------
 // The boundary port
 // ---------------------------------------------------------------------------
 
@@ -808,6 +1211,7 @@ export interface CampaignsPort {
     readonly campaignBudgetCommitted: "campaign.budget_committed";
     readonly campaignBudgetReleased: "campaign.budget_released";
     readonly campaignOpportunityPublished: "campaign.opportunity_published";
+    readonly campaignMatchRecorded: "campaign_match.recorded";
   };
 }
 

@@ -2361,6 +2361,35 @@ export interface ApiCommands {
   ): Promise<readonly Record<string, unknown>[]>;
 
   // -----------------------------------------------------------------
+  // NET-W021 — Campaign matching and optimization (selection, not
+  // authority): hard gates → evidence-backed features → deterministic
+  // baseline ranking → bounded AI advisory (AI-002 + AI-003) →
+  // explainable candidate ordering. The run record + audit event are
+  // the only writes.
+  // -----------------------------------------------------------------
+
+  /** Run a campaign match (guarded: campaigns.matching.run). */
+  runCampaignMatch(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ run: Record<string, unknown>; created: boolean }>;
+
+  /** Fetch one campaign match run (public read; tenant-scoped). */
+  getCampaignMatchRun(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    id: string,
+  ): Promise<Record<string, unknown>>;
+
+  /** List an org's campaign match runs, optionally by campaign (public read). */
+  listCampaignMatchRuns(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    campaignId?: string,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  // -----------------------------------------------------------------
   // NET-W017 — UGC workflow and rights (creator engagements). The
   // engagement is a canonical /workflows lifecycle subject: composed
   // commands (accept / auto-accept / production open / submit) are

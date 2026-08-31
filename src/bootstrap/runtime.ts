@@ -294,6 +294,8 @@ import {
   createAuthorityCampaignPolicyRepository,
 } from "../campaigns/authority-campaign-repository.ts";
 import { createCampaignService, campaignLockKey } from "../campaigns/campaign-service.ts";
+import { createCampaignMatchingService } from "../campaigns/matching-service.ts";
+import { createAuthorityCampaignMatchRunRepository } from "../campaigns/authority-match-run-repository.ts";
 import {
   createAuthorityCreatorProfileRepository,
   createAuthorityCreatorProfileVersionRepository,
@@ -333,6 +335,7 @@ import {
   createAuthorityPlacementRepository,
 } from "../inventory/authority-inventory-repositories.ts";
 import { createInventoryService } from "../inventory/inventory-service.ts";
+import { evaluatePlacementEligibility } from "../inventory/eligibility-engine.ts";
 import type {
   InventoryCampaignLookup,
   InventoryEvidenceLookup,
@@ -361,9 +364,17 @@ import type {
   DisputeService,
 } from "../disputes/port.ts";
 import type {
+  CampaignMatchInventoryItemView,
+  CampaignMatchOutcomeLookup,
+  CampaignMatchReputationLookup,
+  CampaignMatchRunRecord,
+  CampaignMatchSafetyLookup,
+  CampaignMatchSupplyLookup,
+  CampaignMatchingService,
   CampaignPolicySections,
   CampaignService,
   DefineCampaignPolicyInput,
+  RunCampaignMatchInput,
 } from "../campaigns/port.ts";
 import type {
   CreatorAcceptancePolicyRecord,
@@ -523,6 +534,10 @@ export interface Runtime {
   readonly disputeService: DisputeService;
   // NET-W011 campaigns (campaign policy/configuration) service.
   readonly campaignService: CampaignService;
+  // NET-W021 campaign matching and optimization (selection, not
+  // authority — hard gates, evidence-backed ranking, bounded AI
+  // advisory, explainable ordering).
+  readonly campaignMatchingService: CampaignMatchingService;
   // NET-W015 creators (creator identity and preferences) service.
   readonly creatorService: CreatorService;
   // NET-W016 creator matching (deterministic eligibility + ranking).
@@ -1024,11 +1039,23 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         const c = await contributionRepo.findById(subjectId);
         return c ? c.organizationScopeId : null;
       }
+      // NET-W021: measured outcomes may be subject-scoped to
+      // INVENTORY ITEM subjects — the campaign-matching performance
+      // evidence (verified measured outcomes for a supply option —
+      // the W019 PoV-lookup precedent for evidence subjects).
+      if (subjectType === "inventory_item") {
+        const item = await inventoryItemRepo.findById(subjectId);
+        return item ? item.organizationScopeId : null;
+      }
       return null;
     },
     async exists(subjectType, subjectId) {
       if (subjectType === "opportunity") return opportunityRepo.exists(subjectId);
       if (subjectType === "contribution") return contributionRepo.exists(subjectId);
+      // NET-W021: inventory-item measurement subjects (see above).
+      if (subjectType === "inventory_item") {
+        return (await inventoryItemRepo.findById(subjectId)) !== null;
+      }
       return false;
     },
   };
@@ -2786,6 +2813,241 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   });
 
   // ------------------------------------------------------------------
+  // NET-W021 — Campaign matching and optimization (selection, not
+  // authority). The matching service lives in the /campaigns domain
+  // (the campaign is the matching subject); EVERY cross-domain read
+  // arrives through thin READ-ONLY adapters over the OWNING
+  // authorities' wired repositories:
+  //  - supply (candidates + the already-placed set) + the policy
+  //    eligibility-rule EVALUATION come from /inventory (the pure
+  //    W019 eligibility engine is THE rule-semantics authority —
+  //    matching never re-implements eligibility semantics);
+  //  - reputation scores come from /reputation (latest snapshots —
+  //    digest-pinned evidence bases);
+  //  - the safety gate read comes from /disputes (the active
+  //    participant_eligibility control registry);
+  //  - the performance evidence comes from /outcomes (ONLY
+  //    lifecycle-VERIFIED measured outcomes — the additive
+  //    verified-evidence read);
+  //  - the AI advisory (AI-002 matching + AI-003 risk analysis) is
+  //    the provider-neutral LlmPort (purposes "matching" and
+  //    "safety"), bounded and identity-recorded.
+  // The ONLY write is the append-only run record + its audit event.
+  // ------------------------------------------------------------------
+  const campaignMatchSupplyLookup: CampaignMatchSupplyLookup = {
+    async listCandidateItems(organizationScopeId, filters) {
+      const items = await inventoryItemRepo.listByOrganization(
+        organizationScopeId,
+        {
+          retired: filters?.retired ?? false,
+        },
+      );
+      return items.map((item) => ({
+        id: item.id,
+        organizationScopeId: item.organizationScopeId,
+        ownerPersonId: item.ownerPersonId,
+        surfaceKind: item.surfaceKind,
+        format: item.format,
+        territories: [...item.attributes.territories],
+        languages: [...item.attributes.languages],
+        verificationEvidenceReference: item.verificationEvidenceReference,
+        retiredAt: item.retiredAt,
+      }));
+    },
+    async getItem(organizationScopeId, itemId) {
+      const item = await inventoryItemRepo.findById(itemId);
+      if (
+        !item ||
+        item.organizationScopeId !== organizationScopeId
+      ) {
+        // Cross-scope or nonexistent: indistinguishable.
+        return null;
+      }
+      return {
+        id: item.id,
+        organizationScopeId: item.organizationScopeId,
+        ownerPersonId: item.ownerPersonId,
+        surfaceKind: item.surfaceKind,
+        format: item.format,
+        territories: [...item.attributes.territories],
+        languages: [...item.attributes.languages],
+        verificationEvidenceReference: item.verificationEvidenceReference,
+        retiredAt: item.retiredAt,
+      };
+    },
+    async placedItemIds(organizationScopeId, campaignId) {
+      const placements = await inventoryPlacementRepo.listByOrganization(
+        organizationScopeId,
+        { campaignId },
+      );
+      return placements.map((p) => p.inventoryItemId);
+    },
+    async evaluateEligibilityRules(rules, supply) {
+      // THE /inventory authority's own rule semantics (the W019 pure
+      // engine) — the composition root may import it; the campaigns
+      // domain sees only the neutral interface.
+      const evaluation = evaluatePlacementEligibility(
+        rules.map((rule) => ({
+          attribute: rule.attribute,
+          operator: rule.operator,
+          values: [...rule.values],
+        })),
+        {
+          territories: [...supply.territories],
+          languages: [...supply.languages],
+        },
+        new Date().toISOString(),
+      );
+      return {
+        eligible: evaluation.eligible,
+        ruleResults: evaluation.ruleResults.map((r) => ({
+          attribute: r.attribute,
+          operator: r.operator,
+          values: [...r.values],
+          satisfied: r.satisfied,
+          reason: r.reason,
+        })),
+      };
+    },
+  };
+  const campaignMatchReputationLookup: CampaignMatchReputationLookup = {
+    async latestScore(organizationScopeId, subjectPersonId, dimension) {
+      // The canonical LATEST snapshot for the owner person (W007):
+      // existence + org scope + the dimension score + the digest (the
+      // pinned evidence base). Read-only — /reputation stays the
+      // trust-signal authority.
+      const snapshot = await reputationSnapshotRepo
+        .listBySubject(organizationScopeId, subjectPersonId)
+        .then((snapshots) =>
+          snapshots.length > 0
+            ? snapshots.reduce((a, b) =>
+                b.computedAt > a.computedAt ? b : a,
+              )
+            : null,
+        );
+      if (!snapshot) return null;
+      const score = snapshot.scores.find((s) => s.dimension === dimension);
+      if (!score) return null;
+      return {
+        snapshotId: snapshot.id,
+        organizationScopeId: snapshot.organizationScopeId,
+        subjectPersonId: snapshot.subjectPersonId,
+        dimension: score.dimension,
+        digest: snapshot.digest,
+        score: score.score,
+      };
+    },
+  };
+  const campaignMatchSafetyLookup: CampaignMatchSafetyLookup = {
+    async activeHold(organizationScopeId, ownerPersonId) {
+      // The active-control registry read (the W016 gate-read
+      // precedent): ACTIVE participant_eligibility controls covering
+      // the supply owner. Read-only — /disputes stays the authority.
+      const controls = await riskControlRepo.findActiveControls(
+        organizationScopeId,
+        "participant_eligibility",
+        ownerPersonId,
+      );
+      const control = controls.find(
+        (c) => c.action === "HOLD" || c.action === "BLOCK",
+      );
+      return {
+        held: control !== undefined,
+        controlId: control?.id ?? null,
+        action: control?.action ?? null,
+      };
+    },
+  };
+  const campaignMatchOutcomeLookup: CampaignMatchOutcomeLookup = {
+    async listVerifiedOutcomesBySubject(
+      execution,
+      organizationScopeId,
+      subjectId,
+    ) {
+      // The canonical verified-performance read (the /outcomes
+      // authority owns the lifecycle semantics: only VERIFIED
+      // measurements are evidence). The measured value + confidence
+      // + rollup strategy come from the measurement's rollup.
+      const verified = await measuredOutcomeService
+        .listVerifiedMeasuredOutcomesBySubject(
+          execution,
+          organizationScopeId,
+          subjectId,
+        );
+      return verified.map((m) => ({
+        measuredOutcomeId: m.id,
+        outcomeType: m.outcomeType,
+        state: "VERIFIED" as const,
+        value: m.rollup?.measuredValue.value ?? 0,
+        unit: m.rollup?.measuredValue.unit ?? "units",
+        confidencePoint: m.rollup?.confidence?.point ?? 0,
+        rollupStrategy: m.rollupStrategy,
+        verifiedAt: m.rollup?.computedAt ?? null,
+      }));
+    },
+  };
+  // The advisory adapter over the provider-neutral LlmPort: [0,1] →
+  // 0–100 with provider identity preserved (the W016 precedent,
+  // twice: AI-002 purpose "matching" + AI-003 purpose "safety").
+  const campaignMatchAdvisory = {
+    async assessMatching(input: {
+      readonly rubricRef: string;
+      readonly neutralFacts: readonly {
+        readonly label: string;
+        readonly value: string;
+      }[];
+    }) {
+      const scored = await llmProvider.score({
+        purpose: "matching",
+        rubricRef: input.rubricRef,
+        neutralFacts: input.neutralFacts,
+      });
+      return {
+        score: Math.round(scored.score * 1000) / 10,
+        provider: scored.provider,
+        modelRef: scored.modelRef,
+      };
+    },
+    async assessRisk(input: {
+      readonly rubricRef: string;
+      readonly neutralFacts: readonly {
+        readonly label: string;
+        readonly value: string;
+      }[];
+    }) {
+      const scored = await llmProvider.score({
+        purpose: "safety",
+        rubricRef: input.rubricRef,
+        neutralFacts: input.neutralFacts,
+      });
+      return {
+        score: Math.round(scored.score * 1000) / 10,
+        provider: scored.provider,
+        modelRef: scored.modelRef,
+      };
+    },
+  };
+  const campaignMatchRunRepo = createAuthorityCampaignMatchRunRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("campaigns").debug(m, f) },
+  });
+  const campaignMatchingService = createCampaignMatchingService({
+    campaignRepository: campaignRepo,
+    campaignPolicyRepository: campaignPolicyRepo,
+    runRepository: campaignMatchRunRepo,
+    lookups: {
+      supply: campaignMatchSupplyLookup,
+      reputation: campaignMatchReputationLookup,
+      safety: campaignMatchSafetyLookup,
+      outcomes: campaignMatchOutcomeLookup,
+    },
+    advisory: campaignMatchAdvisory,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("campaigns"),
+  });
+
+  // ------------------------------------------------------------------
   // NET-W009 §3.7 ECONOMIC GATE (the lock-invariant-21 enforcement
   // point). The composition root — NOT the risk domain, NOT the
   // settlement domain — consults the active-control registry before
@@ -3428,6 +3690,26 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       formatVersion: run.formatVersion,
       campaign: run.campaign,
       requirements: run.requirements as unknown as Record<string, unknown>,
+      weights: run.weights,
+      advisory: run.advisory,
+      candidateCount: run.candidateCount,
+      eligibleCount: run.eligibleCount,
+      results: run.results as unknown as readonly Record<string, unknown>[],
+      excluded: run.excluded as unknown as readonly Record<string, unknown>[],
+      digest: run.digest,
+      createdBy: run.createdBy,
+      createdAt: run.createdAt,
+    };
+  }
+  // -- NET-W021 view builder (provenance-preserving) ------------------
+  function toCampaignMatchRunView(run: CampaignMatchRunRecord) {
+    return {
+      id: run.id,
+      organizationScopeId: run.organizationScopeId,
+      formatVersion: run.formatVersion,
+      campaign: run.campaign,
+      targeting: run.targeting as unknown as Record<string, unknown>,
+      requiredOutcomeTypes: [...run.requiredOutcomeTypes],
       weights: run.weights,
       advisory: run.advisory,
       candidateCount: run.candidateCount,
@@ -6371,6 +6653,40 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return runs.map(toCreatorMatchRunView);
     },
 
+    // -- NET-W021 campaign matching commands ----------------------------
+    // Selection, not authority: the run record + its audit event are
+    // the only writes; every cross-domain read flows through the
+    // neutral lookups wired above.
+
+    async runCampaignMatch(execution, _actorPersonId, input) {
+      const result = await campaignMatchingService.runCampaignMatch(
+        execution,
+        input as unknown as RunCampaignMatchInput,
+      );
+      return {
+        run: toCampaignMatchRunView(result.run),
+        created: result.created,
+      };
+    },
+
+    async getCampaignMatchRun(execution, organizationScopeId, id) {
+      const run = await campaignMatchingService.getMatchRun(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        id,
+      );
+      return toCampaignMatchRunView(run);
+    },
+
+    async listCampaignMatchRuns(execution, organizationScopeId, campaignId) {
+      const runs = await campaignMatchingService.listMatchRuns(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        campaignId,
+      );
+      return runs.map(toCampaignMatchRunView);
+    },
+
     // -- NET-W017 engagement/UGC commands --------------------------------
     // The engagement lifecycle is the canonical /workflows authority;
     // these commands compose domain records + workflow transitions.
@@ -8153,6 +8469,8 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     disputeService,
     // NET-W011 campaigns (campaign policy/configuration) service.
     campaignService,
+    // NET-W021 campaign matching and optimization.
+    campaignMatchingService,
     // NET-W015 creators (creator identity and preferences) service.
     creatorService,
     // NET-W016 creator matching (deterministic eligibility + ranking).
