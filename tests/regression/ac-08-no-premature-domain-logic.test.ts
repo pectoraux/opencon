@@ -173,7 +173,27 @@ const NET_W015_DOMAINS = ["creators"];
 // semantics (NET-W019 work order §2 authority separation).
 const NET_W019_DOMAINS = ["inventory"];
 
-// Domains still deferred past NET-W019 (must remain skeletons).
+// Domains implemented in NET-W024 (no longer skeletons). The demand
+// domain (the Phase-7 Demand boundary) carries the CONSUMER DEMAND
+// POOL domain: first-class tenant-scoped pool records with explicit,
+// versioned qualification policy, first-class PRIVATE consumer
+// commitment records with bounded provider-neutral attributes
+// (closed region/quantity/budget-band vocabularies) and
+// server-written aggregate-disclosure consent grants, the DERIVED
+// privacy-preserving qualified-aggregate view (pure engine, frozen
+// privacy floor, deterministic digest, never stored or
+// caller-asserted), and one-way closure/withdrawal field mutations.
+// It introduces NO economically material behaviour (NO economic
+// command exists — /settlement stays the economic authority;
+// commitments mint nothing), NO lifecycle mutation (pools and
+// commitments carry NO lifecycle subject kind — /workflows is
+// untouched), NO membership/identity authority (membership resolves
+// through the neutral composition-root lookup over /organizations)
+// and NO procurement/supplier semantics (NET-W025/W026)
+// (NET-W024 work order §2 authority separation).
+const NET_W024_DOMAINS = ["demand"];
+
+// Domains still deferred past NET-W024 (must remain skeletons).
 const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
   (d) =>
     !NET_W002_DOMAINS.includes(d) &&
@@ -185,7 +205,8 @@ const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
     !NET_W009_DOMAINS.includes(d) &&
     !NET_W011_DOMAINS.includes(d) &&
     !NET_W015_DOMAINS.includes(d) &&
-    !NET_W019_DOMAINS.includes(d),
+    !NET_W019_DOMAINS.includes(d) &&
+    !NET_W024_DOMAINS.includes(d),
 );
 
 // Patterns that would indicate economically/material domain logic,
@@ -419,6 +440,28 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
       // the NET-W019 work order §2).
       expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
       expect(moduleExport.describe?.() ?? "").toMatch(/NET-W019/);
+    }
+  });
+
+  test("NET-W024 domain modules are non-skeletal (tier domain, no 'skeleton' marker, reference NET-W024)", async () => {
+    for (const dir of NET_W024_DOMAINS) {
+      const modulePath = join(SRC, dir, "module.ts");
+      expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
+      const mod = await import(`../../src/${dir}/module.ts`);
+      const moduleExport = Object.values(mod)[0] as {
+        name: string;
+        tier: string;
+        describe?: () => string;
+      };
+      expect(moduleExport.tier).toBe("domain");
+      // NET-W024 modules are no longer skeletons — the demand boundary
+      // carries the consumer demand-pool domain (privacy-preserving
+      // aggregation with the frozen disclosure floor + server-enforced
+      // consent/membership + the derived qualified-aggregate view; NO
+      // economic command exists and lifecycle stays with /workflows
+      // per the NET-W024 work order §2).
+      expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
+      expect(moduleExport.describe?.() ?? "").toMatch(/NET-W024/);
     }
   });
 

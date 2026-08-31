@@ -2927,6 +2927,112 @@ export interface ApiCommands {
   ): Promise<Record<string, unknown>>;
 
   // -----------------------------------------------------------------
+  // NET-W024 — Consumer Demand Pools (privacy-preserving aggregation,
+  // server-enforced consent/membership, derived qualified aggregates).
+  // Pools and commitments carry NO lifecycle subject kind (/workflows
+  // untouched); the aggregate is a DERIVED view (never stored, never
+  // caller-asserted) and the boundary carries NO economic surface
+  // (/settlement stays the economic authority).
+  // -----------------------------------------------------------------
+
+  /**
+   * Create a demand pool (protected; guard action
+   * `demand.pools.create`): the acting person BECOMES the pool
+   * creator (there is no creatorPersonId input — pool ownership
+   * cannot be fabricated by client claims) and must hold an ACTIVE
+   * organization membership (server-enforced). The qualification
+   * policy is explicit, bounded and versioned on the record.
+   */
+  createDemandPool(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ pool: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Close the pool (protected; guard action `demand.pools.close`;
+   * creator-only): one-way; a closed pool accepts no new commitments
+   * and never qualifies (derived).
+   */
+  closeDemandPool(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * Record a consumer demand commitment (protected; guard action
+   * `demand.commitments.create`): the acting person BECOMES the
+   * consumer (there is no consumerPersonId input — demand membership
+   * cannot be fabricated) and must hold an ACTIVE organization
+   * membership. The consent grant is SERVER-WRITTEN (the input may
+   * only name the closed "aggregate_disclosure" scope). ONE active
+   * commitment per (pool, consumer).
+   */
+  createDemandCommitment(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ commitment: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Withdraw the commitment (protected; guard action
+   * `demand.commitments.withdraw`; consumer-only): one-way; the
+   * consent revocation — a withdrawn commitment vanishes from every
+   * derived aggregate immediately (derived).
+   */
+  withdrawDemandCommitment(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * THE SUPPLIER-FACING DERIVATION (protected; guard action
+   * `demand.aggregates.evaluate`): the privacy-preserving qualified
+   * aggregate demand of one pool — a DERIVED 200 decision re-computed
+   * from CURRENT durable records at ONE explicit evaluation anchor.
+   * There is NO aggregate/threshold input (every caller field beyond
+   * scope/pool identity is ignored); aggregate facts exist only
+   * above the frozen privacy floor; below-floor groups are suppressed
+   * (counted, never named).
+   */
+  evaluateQualifiedDemand(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * List the AUTHENTICATED ACTOR'S OWN commitments (protected; guard
+   * action `demand.commitments.read`): the consumer is the
+   * server-resolved actor — there is no consumerPersonId input. This
+   * is the ONLY commitment read surface; individual commitments are
+   * never exposed through any other route (privacy: consumer records
+   * stay private; suppliers see aggregates only).
+   */
+  listMyDemandCommitments(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /** Fetch one demand pool (public read; tenant-scoped; pool metadata only). */
+  getDemandPool(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    poolId: string,
+  ): Promise<Record<string, unknown>>;
+
+  /** List an org's demand pools (public read; pool metadata only). */
+  listDemandPools(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    categoryKey?: string,
+    closed?: boolean,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  // -----------------------------------------------------------------
   // NET-W012 — helpful contributions (Proof-of-Helpfulness).
   // -----------------------------------------------------------------
 

@@ -71,8 +71,15 @@ const NET_W004_DOMAINS = ["opportunities", "contributions", "workflows"];
 // the NET-W004 intent — NET-W004 itself introduced NO creator
 // behaviour — is preserved (the creator domain arrives only with the
 // NET-W015 work item + its own AC-07 regression).
+// NET-W024 UPDATE: demand is implemented by NET-W024 (the consumer
+// demand-pool domain — pools, consented private commitments,
+// privacy-preserving aggregation with the frozen disclosure floor,
+// derived qualified aggregates) and left this list the same way; the
+// NET-W004 intent — NET-W004 itself introduced NO demand behaviour —
+// is preserved (the demand domain arrives only with the NET-W024
+// work item + its own AC-08 regression).
 const DEFERRED_DOMAINS = [
-  "demand", "benefits",
+  "benefits",
 ];
 
 async function listTsFiles(dir: string, out: string[] = []): Promise<string[]> {
