@@ -31,6 +31,10 @@
  */
 
 import type { ExecutionContext } from "../core/execution-context.ts";
+// NET-W023: the neutral adapters-boundary evaluation contract (the
+// /api tier is infrastructure — it may import NEUTRAL ports only,
+// never the adapter tier; the composition root wires the join).
+import type { ExternalAdRequestEvaluation } from "../adapters/port.ts";
 
 /**
  * The ApiPort describes the boundary's readiness. After NET-W002 it is
@@ -434,6 +438,46 @@ export interface ApiMeasurementReportSubmissionView {
   readonly created: boolean;
   readonly observation: ApiOutcomeObservationView;
 }
+
+/**
+ * Inputs to submit ONE raw seller-authorization file alongside an
+ * external ad-request evaluation (NET-W023). The `content` is the raw
+ * file text (ads.txt / app-ads.txt / sellers.json) — opaque at the API
+ * tier; only the provider's adapter interprets it. `sourceIdentity`
+ * declares whose authorization surface the file is; `observedAt` is
+ * the observation time (the staleness evaluation input).
+ */
+export interface ApiSellerAuthorizationSubmissionInput {
+  readonly providerId: string;
+  readonly sourceKind: "ads.txt" | "app-ads.txt" | "sellers.json";
+  readonly content: string;
+  readonly sourceIdentity: string;
+  readonly observedAt?: string;
+}
+
+/**
+ * Inputs to evaluate ONE external ad request (NET-W023). The
+ * `request` field is the RAW vendor-shaped bid-request payload —
+ * OPAQUE at the API tier; only the provider's adapter (selected by
+ * `providerId`) interprets it. The evaluation is a read-only
+ * derivation against registered supply.
+ */
+export interface ApiEvaluateExternalAdRequestInput {
+  readonly organizationScopeId: string;
+  readonly providerId: string;
+  readonly request: unknown;
+  readonly sellerAuthorizations?: readonly ApiSellerAuthorizationSubmissionInput[];
+  readonly evaluatedAt?: string;
+}
+
+/**
+ * The result of an external ad-request evaluation (NET-W023): the
+ * neutral admission decision (supply-side only — it authorizes
+ * nothing), the normalized request facts, the resolved registered
+ * supply, the supply-chain verification status, and the NAMES of the
+ * privacy-redacted vendor fields (never values).
+ */
+export type ApiExternalAdRequestEvaluationView = ExternalAdRequestEvaluation;
 
 /** The public view of a measurement experiment (NET-W006 AC-03). */
 export interface ApiMeasurementExperimentView {
@@ -1508,6 +1552,21 @@ export interface ApiCommands {
     actorPersonId: string,
     input: ApiSubmitMeasurementReportInput,
   ): Promise<ApiMeasurementReportSubmissionView>;
+
+  /**
+   * Evaluate ONE external ad request (NET-W023, ADAPTER-001..002):
+   * normalize the raw vendor bid-request payload through the
+   * provider's adapter (adapters boundary), resolve the external
+   * supply identity against REGISTERED inventory through the neutral
+   * read-only lookup (exact-one or fail closed), and derive the
+   * supply-side admission evaluation. A READ-ONLY derivation — it
+   * mutates nothing and authorizes nothing.
+   */
+  evaluateExternalAdRequest(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiEvaluateExternalAdRequestInput,
+  ): Promise<ApiExternalAdRequestEvaluationView>;
 
   /** Create a measurement experiment (NET-W006 AC-03, protected). */
   createMeasurementExperiment(

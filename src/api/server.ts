@@ -821,6 +821,41 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // POST /api/external-ad-requests — evaluate ONE external ad
+    // request through the adapters boundary against registered supply
+    // (NET-W023, ADAPTER-001..002; protected). The raw vendor payload
+    // is an opaque passthrough to the provider's adapter; the
+    // evaluation is a READ-ONLY derivation (a non-admitted decision is
+    // a 200 result like the placement settlement-readiness view —
+    // malformed input is a validation error).
+    if (path === "/api/external-ad-requests" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "adRequest.evaluate", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = body as Record<string, unknown>;
+      if (obj.request === undefined) {
+        await send(res, 400, {
+          error: "validation",
+          classification: "validation",
+          message: "request (the raw vendor bid-request payload) is required",
+        });
+        return true;
+      }
+      const sellerAuthorizations = parseSellerAuthorizationSubmissions(obj);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.evaluateExternalAdRequest(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          providerId: strField(obj, "providerId"),
+          request: obj.request,
+          ...(sellerAuthorizations !== undefined ? { sellerAuthorizations } : {}),
+          ...(typeof obj.evaluatedAt === "string" ? { evaluatedAt: obj.evaluatedAt } : {}),
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
     // POST /api/measurement-experiments — create an experiment (protected).
     if (path === "/api/measurement-experiments" && method === "POST" && opts.commands) {
       const commands = opts.commands;
@@ -5236,6 +5271,50 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       subjectId: strField(r, "subjectId"),
       subjectType: strField(r, "subjectType"),
     };
+  }
+
+  // Parse the seller-authorization file submissions attached to an
+  // external ad-request evaluation body (NET-W023). Absent →
+  // undefined; malformed → a validation error.
+  function parseSellerAuthorizationSubmissions(
+    obj: Record<string, unknown>,
+  ):
+    | {
+        providerId: string;
+        sourceKind: "ads.txt" | "app-ads.txt" | "sellers.json";
+        content: string;
+        sourceIdentity: string;
+        observedAt?: string;
+      }[]
+    | undefined {
+    const raw = obj.sellerAuthorizations;
+    if (raw === undefined || raw === null) return undefined;
+    if (!Array.isArray(raw)) {
+      throw apiValidationError('field "sellerAuthorizations" must be an array of file submissions');
+    }
+    return raw.map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw apiValidationError("each sellerAuthorization must be an object");
+      }
+      const e = entry as Record<string, unknown>;
+      const sourceKind = strField(e, "sourceKind");
+      if (
+        sourceKind !== "ads.txt" &&
+        sourceKind !== "app-ads.txt" &&
+        sourceKind !== "sellers.json"
+      ) {
+        throw apiValidationError(
+          'sellerAuthorization sourceKind must be "ads.txt", "app-ads.txt" or "sellers.json"',
+        );
+      }
+      return {
+        providerId: strField(e, "providerId"),
+        sourceKind,
+        content: strField(e, "content"),
+        sourceIdentity: strField(e, "sourceIdentity"),
+        ...(typeof e.observedAt === "string" ? { observedAt: e.observedAt } : {}),
+      };
+    });
   }
 
   // Parse a confidence estimate ({ point, lower?, upper?, method? }).
