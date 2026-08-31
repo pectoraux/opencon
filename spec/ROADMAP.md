@@ -45,70 +45,68 @@ Composition-root orchestration is allowed, but an orchestration function must no
 
 ### Phase 1 — Foundation
 
-- **NET-W001 — Platform and modular-monolith foundation** — **COMPLETE**. Established module boundaries, configuration/secrets boundary, workers, logging, execution/correlation IDs, API conventions, static architecture enforcement.
-- **NET-W002 — Identity, organizations and participant model** — **COMPLETE**. Established identity, roles, organizations, server-side authorization, tenancy and audit lineage.
-- **NET-W003 — Persistence, queues, objects, secrets and observability** — **COMPLETE**. PostgreSQL is authoritative; Redis is coordination only; durable objects are referenced from authority; real provider adapters and integration tests exist.
+- **NET-W001 — Platform and modular-monolith foundation** — **COMPLETE**.
+- **NET-W002 — Identity, organizations and participant model** — **COMPLETE**.
+- **NET-W003 — Persistence, queues, objects, secrets and observability** — **COMPLETE**.
 
 ### Phase 2 — Protocol core
 
-- **NET-W004 — Opportunity and contribution lifecycle** — **COMPLETE**. `/workflows` owns lifecycle transitions.
-- **NET-W005 — Evidence and Proof-of-Value** — **COMPLETE**. Evidence provenance, confidence, commitments, attestations and PoV lifecycle established.
-- **NET-W006 — Outcomes and measurement abstraction** — **COMPLETE**. Normalized outcome semantics, attribution and uncertainty preservation established.
-- **NET-W007 — Reputation engine** — **COMPLETE**. Multidimensional deterministic reputation, provenance and decay established.
-- **NET-W008 — Participation Credits and economic ledger** — **COMPLETE**. Double-entry ledger, value maturation, credits, rewards and cash accounting established.
+- **NET-W004 — Opportunity and contribution lifecycle** — **COMPLETE**.
+- **NET-W005 — Evidence and Proof-of-Value** — **COMPLETE**.
+- **NET-W006 — Outcomes and measurement abstraction** — **COMPLETE**.
+- **NET-W007 — Reputation engine** — **COMPLETE**.
+- **NET-W008 — Participation Credits and economic ledger** — **COMPLETE**.
 
 ### Phase 3 — Trust
 
-- **NET-W009 — Fraud and risk engine** — **COMPLETE**. Risk signals, assessments, cases and economic/workflow gates established in `/disputes`.
-- **NET-W010 — Stake, challenges and disputes** — **COMPLETE**. Stakes, challenge windows, dispute lifecycle, appeals and risk gating established.
+- **NET-W009 — Fraud and risk engine** — **COMPLETE**.
+- **NET-W010 — Stake, challenges and disputes** — **COMPLETE**.
 
 ### Phase 4 — Farmable contribution market
 
-- **NET-W011 — Campaign domain** — **COMPLETE**. Campaign policy, budgets, clearing rules and campaign bookkeeping established.
-- **NET-W012 — Helpful contributions** — **COMPLETE**. Proof-of-Helpfulness, disclosure-aware recommendations and publication controls established.
-- **NET-W013 — Quality, moderation and anti-spam controls** — **COMPLETE**. Provider-neutral quality, moderation and spam/abuse integration established; AI remains advisory.
-- **NET-W014 — Reward and settlement integration** — **COMPLETE**. Contribution outcomes integrate into existing settlement/reputation authorities.
+- **NET-W011 — Campaign domain** — **COMPLETE**.
+- **NET-W012 — Helpful contributions** — **COMPLETE**.
+- **NET-W013 — Quality, moderation and anti-spam controls** — **COMPLETE**.
+- **NET-W014 — Reward and settlement integration** — **COMPLETE**.
 
 ### Phase 5 — Creator network
 
-- **NET-W015 — Creator identity and preferences** — **COMPLETE**. Creator profiles, preference sections, rights/restrictions and reputation references established.
-- **NET-W016 — Creator matching** — **COMPLETE**. Hard eligibility gates precede deterministic ranking; AI advisory is bounded and cannot override eligibility.
-- **NET-W017 — UGC workflow and rights** — **COMPLETE**. Engagement lifecycle, auto-acceptance, UGC production, rights and evidence capture established.
-- **NET-W018 — Sponsorship and disclosure** — **COMPLETE**. Commercial relationships, disclosure obligations, publication evidence and sanctioned publication verification established.
+- **NET-W015 — Creator identity and preferences** — **COMPLETE**.
+- **NET-W016 — Creator matching** — **COMPLETE**.
+- **NET-W017 — UGC workflow and rights** — **COMPLETE**.
+- **NET-W018 — Sponsorship and disclosure** — **COMPLETE**.
 
 ### Phase 6 — Advertising network
 
 - **NET-W019 — Inventory and placements** — **COMPLETE**. Supply registration, ownership, placement context, provenance and derived settlement-readiness established.
 - **NET-W020 — Cross-promotion and clearing** — **COMPLETE**. Clearing orchestration established inside `/settlement`; the economic draw, clearing record, campaign bookkeeping and audit lineage share one authoritative transaction.
-- **NET-W021 — Campaign matching and optimization** — **NEXT IMPLEMENTATION TARGET**. Optimize campaign-to-inventory/creator matching under hard constraints and measured-performance signals. AI may advise ranking only after eligibility and risk gates.
-- **NET-W022 — Attribution and privacy measurement adapters** — **PLANNED**. Integrate browser/platform attribution through `/adapters`; normalize into evidence/outcomes while retaining provenance and uncertainty.
-- **NET-W023 — OpenRTB and supply-chain adapters** — **PLANNED**. Connect existing ad supply through provider-specific adapters without bypassing inventory, evidence, risk or settlement semantics.
+- **NET-W021 — Campaign matching and optimization** — **COMPLETE**. Matching remains selection-not-authority; hard eligibility precedes deterministic ranking and bounded AI advisory.
+- **NET-W022 — Attribution and privacy measurement adapters** — **COMPLETE**. Browser/platform and iOS attribution facts normalize through `/measurement`; `/outcomes` remains measurement authority; provider secrets/raw payloads remain isolated.
+- **NET-W023 — OpenRTB and supply-chain adapters** — **CURRENT IMPLEMENTATION TARGET**. Connect existing ad supply through `/adapters` without bypassing inventory, campaign, measurement, evidence, risk or settlement semantics.
 
 ### Phase 7 — Demand economy
 
-- **NET-W024 — Consumer Demand Pools** — **PLANNED**. Aggregate privacy-preserving consumer demand commitments and expose qualified aggregate demand.
-- **NET-W025 — Business procurement pools** — **PLANNED**. Aggregate business procurement demand while minimizing competitively sensitive disclosure.
-- **NET-W026 — Supplier offers and competitive selection** — **PLANNED**. Collect offers, selection criteria and reproducible selection results.
-- **NET-W027 — Verified savings and counterfactuals** — **PLANNED**. Evidence-backed baseline, counterfactual and uncertainty for procurement savings.
-- **NET-W028 — Benefit Pools** — **PLANNED**. Pools funded by verified contributions and allocated under explicit eligibility policy.
+- **NET-W024 — Consumer Demand Pools** — **PLANNED**.
+- **NET-W025 — Business procurement pools** — **PLANNED**.
+- **NET-W026 — Supplier offers and competitive selection** — **PLANNED**.
+- **NET-W027 — Verified savings and counterfactuals** — **PLANNED**.
+- **NET-W028 — Benefit Pools** — **PLANNED**.
 
 ### Phase 8 — Decentralization
 
-- **NET-W029 — Cryptographic attestations and commitments** — **PLANNED**. Strengthen portable integrity/privacy proofs while PostgreSQL remains semantic authority.
-- **NET-W030 — External settlement adapters** — **PLANNED**. Connect internal settlement state to external payment/settlement networks through adapters.
-- **NET-W031 — Portable reputation proofs** — **PLANNED**. Prove reputation claims without exporting raw private history.
-- **NET-W032 — Decentralized validation/dispute layer** — **PLANNED**. Introduce independent validation/challenge participants without allowing unilateral rewrite of authoritative state.
+- **NET-W029 — Cryptographic attestations and commitments** — **PLANNED**.
+- **NET-W030 — External settlement adapters** — **PLANNED**.
+- **NET-W031 — Portable reputation proofs** — **PLANNED**.
+- **NET-W032 — Decentralized validation/dispute layer** — **PLANNED**.
 
 ### Phase 9 — End-to-end proof
 
-- **NET-W033 — Complete contribution lifecycle** — **PLANNED**. Prove contribution → evidence → outcome → reputation → settlement → benefit.
-- **NET-W034 — Complete advertising lifecycle** — **PLANNED**. Prove advertiser → inventory/creator → measurement → Proof-of-Value → settlement.
-- **NET-W035 — Complete creator lifecycle** — **PLANNED**. Prove creator discovery → contract → UGC → disclosure → measurement → payment.
-- **NET-W036 — Complete demand/procurement/benefit lifecycle** — **PLANNED**. Prove demand → supplier → fulfillment → verified savings → benefit allocation.
+- **NET-W033 — Complete contribution lifecycle** — **PLANNED**.
+- **NET-W034 — Complete advertising lifecycle** — **PLANNED**.
+- **NET-W035 — Complete creator lifecycle** — **PLANNED**.
+- **NET-W036 — Complete demand/procurement/benefit lifecycle** — **PLANNED**.
 
 ## Dependency sequence
-
-The frozen backlog defines the primary dependency order:
 
 ```text
 W001 → W002/W003 → W004 → W005 → W006 → W007 → W008
@@ -124,68 +122,63 @@ W028/W033 → W036
 
 The precise dependency and readiness rules remain authoritative in `spec/dependency-graph.md` and `spec/work-items.md`.
 
-## W021 implementation contract
+## W023 implementation contract
 
-W021 is the next implementation target after W020. Its scope must remain inside the existing frozen boundaries.
+### Authority model
+
+```text
+external OpenRTB / supply-chain messages
+        ↓
+provider-specific parsing + validation in `/adapters`
+        ↓
+provider-neutral request / authorization facts
+        ↓
+bootstrap composition root ONLY
+        ↓
+/inventory + /campaigns + /measurement + /evidence + /disputes
+        ↓
+/settlement only through existing approved authority APIs
+```
 
 ### Inputs
 
-- campaign policy and hard requirements from `/campaigns`;
-- inventory and placement context from `/inventory`;
-- creator profile/matching attributes from `/creators`;
-- measured historical performance from `/outcomes` and `/evidence`;
-- reputation scores from `/reputation`;
-- risk/control status from `/disputes`;
-- provider-neutral AI advisory through `/llm` only.
+- OpenRTB request/response structures required by the current advertising surface;
+- seller/publisher/app authorization facts from ads.txt, app-ads.txt, sellers.json and `schain`-style supply-chain inputs;
+- registered `/inventory` supply and placement references;
+- existing campaign targeting/policy;
+- W022 neutral measurement contracts where measurement facts are relevant;
+- existing evidence, risk and settlement interfaces where an approved material operation requires them.
 
-### Required flow
+### Required behavior
 
-```text
-current authoritative records
-        ↓
-hard eligibility / policy / rights / risk gates
-        ↓
-eligible candidate set
-        ↓
-evidence-backed deterministic performance features
-        ↓
-baseline deterministic ranking
-        ↓
-bounded AI advisory ranking (optional)
-        ↓
-explainable optimized ordering
-        ↓
-append-only optimization/match result if required
-```
+1. Provider-specific protocol fields, SDK types and transport details are confined to `/adapters`.
+2. Normalized contracts are provider-neutral, explicitly versioned and deterministically serializable where reproducibility matters.
+3. Critical OpenRTB fields, supported versions, cardinality limits and safety-sensitive values fail closed on invalid input.
+4. Supply-chain records normalize into bounded provenance/authorization facts with source, time/version where available and verification state.
+5. External seller/publisher/app identifiers resolve to exactly one authoritative inventory source or fail closed; the adapter never creates ownership.
+6. Unverified, ambiguous or stale supply-chain facts cannot directly authorize campaigns, create placement eligibility, clear risk, create evidence truth or make supply settlement-ready.
+7. Raw requests are not persisted by default; normalized output contains only approved neutral fields; credentials and secrets never appear in records, logs, audit or errors.
+8. Any material operation preserves tenancy, authorization, idempotency, concurrency and transactional audit lineage.
+9. Coupled material mutations use one authoritative transaction or an explicitly approved recoverable saga.
+10. No new domain boundary and no alternate economic/workflow/risk/measurement authority.
 
-### W021 non-negotiables
+### Evidence gate
 
-- Hard constraints MUST run before optimization.
-- AI MUST NOT override hard constraints, rights, tenant boundaries, risk holds, or settlement-readiness requirements.
-- AI outputs are advisory evidence, never authorization.
-- Ranking inputs must be traceable to authoritative records and evidence.
-- Ranking must be deterministic for identical facts/policy/reference time unless an explicitly recorded stochastic policy is introduced and accepted.
-- Matching/optimization must not become a second campaign-policy authority, inventory authority, reputation authority, risk authority, workflow authority or economic authority.
-- No provider SDK/types may cross into domain semantics.
-- Material mutations require audit/trace lineage and established idempotency/transaction semantics.
-- Any cross-authority composite with coupled material mutation must use a single authoritative transaction or an explicitly approved recoverable saga.
-- New domain boundaries are forbidden without Architecture Change Request.
+W023 is mergeable only after implementation, acceptance coverage, mutation checks, `bun run verify`, configured real PostgreSQL/Redis integration, exactly one implementation PR, and architect approval are all complete.
 
 ## Work-item operating procedure
 
-For the next item, an implementation agent should:
-
-1. Confirm the item is `READY_FOR_IMPLEMENTATION` in GitHub and the dependency graph.
-2. Read the corresponding issue and create/update `spec/work-orders/NET-WXXX.md` as the decision record.
-3. Inspect the relevant existing authorities and tests before designing new primitives.
-4. Prefer existing contracts and `...WithinTx` primitives over new transaction or authority layers.
-5. Implement tests mapped one-to-one with acceptance criteria plus architecture/out-of-scope regressions.
-6. Run `bun run verify` and any required real-provider integration tests.
-7. Perform targeted mutation checks for the highest-risk architectural invariants.
-8. Create exactly one implementation PR for the work item.
-9. Wait for architect review.
-10. On `CHANGES_REQUESTED`, remediate on the same branch/PR; do not create a second implementation PR.
-11. On approval + green verification, merge and update `spec/PROJECT-STATE.md` before advancing.
+1. Confirm GitHub issue/readiness and dependencies.
+2. Read the issue and this roadmap plus `spec/PROJECT-STATE.md`.
+3. Create/update `spec/work-orders/NET-WXXX.md` as the decision record.
+4. Inspect relevant authorities/tests before coding.
+5. Prefer existing ports and `...WithinTx` primitives.
+6. Implement one-to-one acceptance tests plus architecture/out-of-scope regressions.
+7. Run the complete quality gate and configured real-provider integrations.
+8. Perform targeted mutation checks for highest-risk invariants.
+9. Create exactly one implementation PR.
+10. Wait for architect review; remediate on the same PR if required.
+11. On approval and green verification, merge and update `spec/PROJECT-STATE.md` before advancing.
 
 ## Merge policy
 
