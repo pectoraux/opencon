@@ -390,6 +390,19 @@ import type {
   InventoryService,
   PlacementRecord,
 } from "../inventory/port.ts";
+// NET-W024 demand (consumer demand pools).
+import {
+  createAuthorityDemandCommitmentRepository,
+  createAuthorityDemandPoolRepository,
+} from "../demand/authority-demand-repositories.ts";
+import { createDemandService } from "../demand/demand-service.ts";
+import type {
+  DemandCommitment,
+  DemandMembershipLookup,
+  DemandPool,
+  DemandService,
+  QualifiedDemandAggregate,
+} from "../demand/port.ts";
 import type {
   ActivateRiskControlInput,
   AppealDisputeInput,
@@ -631,6 +644,10 @@ export interface Runtime {
   readonly inventoryService: InventoryService;
   // NET-W020 cross-promotion clearing (records + derived eligibility).
   readonly crossPromotionClearingService: CrossPromotionClearingService;
+  // NET-W024 demand (consumer demand pools: privacy-preserving
+  // aggregation, server-enforced consent/membership, derived
+  // qualified-aggregate views — zero economic surface) service.
+  readonly demandService: DemandService;
   // NET-W012 helpful contributions (Proof-of-Helpfulness) service.
   readonly helpfulnessService: HelpfulnessService;
   // NET-W013 quality/moderation/anti-spam services.
@@ -984,6 +1001,18 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   const inventoryPlacementRepo = createAuthorityPlacementRepository({
     authority: postgresAuthority,
     logger: { debug: (m, f) => logger.forModule("inventory").debug(m, f) },
+  });
+  // NET-W024 demand repositories (PostgresAuthority-backed,
+  // append-only collections). The pool + commitment records are the
+  // demand boundary's OWN durable state (DEM-001); the private
+  // commitment records never cross into any other boundary.
+  const demandPoolRepo = createAuthorityDemandPoolRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("demand").debug(m, f) },
+  });
+  const demandCommitmentRepo = createAuthorityDemandCommitmentRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("demand").debug(m, f) },
   });
   const evidenceService = createEvidenceService({
     repository: evidenceRepo,
@@ -2624,6 +2653,35 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   });
 
   // ------------------------------------------------------------------
+  // NET-W024 demand wiring (consumer demand pools).
+  //
+  // The membership lookup is a thin READ-ONLY adapter over the
+  // /organizations membership repository (the W002 structural-lookup
+  // precedent): the demand domain imports core contracts only and
+  // NEVER the organizations port. The /demand domain has ZERO
+  // economic surface (/settlement untouched by NET-W024) and NO
+  // lifecycle machinery (/workflows untouched — pool closure and
+  // commitment withdrawal are one-way field mutations).
+  // ------------------------------------------------------------------
+  const demandMembershipLookup: DemandMembershipLookup = {
+    async resolveMembership(personId, organizationScopeId) {
+      const membership = await membershipRepo.findByPersonAndOrganization(
+        personId,
+        organizationScopeId,
+      );
+      return membership ? membership.status : null;
+    },
+  };
+  const demandService = createDemandService({
+    poolRepository: demandPoolRepo,
+    commitmentRepository: demandCommitmentRepo,
+    membershipLookup: demandMembershipLookup,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("demand"),
+  });
+
+  // ------------------------------------------------------------------
   // NET-W012 helpful contributions wiring (Proof-of-Helpfulness).
   //
   // The helpfulness lookups are thin READ-ONLY adapters over the
@@ -4236,6 +4294,69 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       executionId: item.executionId,
       correlationId: item.correlationId,
       causationId: item.causationId,
+    };
+  }
+  function toDemandPoolView(pool: DemandPool) {
+    return {
+      id: pool.id,
+      organizationScopeId: pool.organizationScopeId,
+      // EXPLICIT pool ownership (the acting person at creation;
+      // never caller-asserted).
+      createdBy: pool.createdBy,
+      name: pool.name,
+      categoryKey: pool.categoryKey,
+      categoryVersion: pool.categoryVersion,
+      policy: pool.policy,
+      closedAt: pool.closedAt,
+      closureReason: pool.closureReason,
+      recordFormat: pool.recordFormat,
+      createdAt: pool.createdAt,
+      updatedAt: pool.updatedAt,
+      idempotencyKey: pool.idempotencyKey,
+      executionId: pool.executionId,
+      correlationId: pool.correlationId,
+      causationId: pool.causationId,
+    };
+  }
+  function toDemandCommitmentView(commitment: DemandCommitment) {
+    return {
+      id: commitment.id,
+      organizationScopeId: commitment.organizationScopeId,
+      poolId: commitment.poolId,
+      // The consumer (owner) is visible ONLY on the owner-scoped
+      // surface (this view is returned exclusively by the mutation
+      // results and the actor-scoped listMyDemandCommitments
+      // command) — never in any supplier-facing aggregate.
+      consumerPersonId: commitment.consumerPersonId,
+      categoryKey: commitment.categoryKey,
+      categoryVersion: commitment.categoryVersion,
+      attributes: commitment.attributes,
+      consent: commitment.consent,
+      withdrawnAt: commitment.withdrawnAt,
+      withdrawalReason: commitment.withdrawalReason,
+      recordFormat: commitment.recordFormat,
+      createdAt: commitment.createdAt,
+      updatedAt: commitment.updatedAt,
+      idempotencyKey: commitment.idempotencyKey,
+      executionId: commitment.executionId,
+      correlationId: commitment.correlationId,
+      causationId: commitment.causationId,
+    };
+  }
+  function toQualifiedDemandAggregateView(view: QualifiedDemandAggregate) {
+    // The derived supplier-facing view passes through as-is: it is
+    // already the minimized aggregate contract (counts/ranges only;
+    // no person/commitment identifiers; anchor + digest recorded).
+    return {
+      poolId: view.poolId,
+      organizationScopeId: view.organizationScopeId,
+      category: view.category,
+      policy: view.policy,
+      qualified: view.qualified,
+      checks: view.checks,
+      aggregate: view.aggregate,
+      digest: view.digest,
+      evaluatedAt: view.evaluatedAt,
     };
   }
   function toPlacementView(placement: PlacementRecord) {
@@ -7510,6 +7631,100 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return toPlacementSettlementReadinessView(readiness);
     },
 
+    // -- NET-W024 demand commands ----------------------------------------
+    async createDemandPool(execution, _actorPersonId, input) {
+      const result = await demandService.createDemandPool(
+        execution,
+        input as unknown as import("../demand/port.ts").CreateDemandPoolInput,
+      );
+      return {
+        pool: toDemandPoolView(result.pool),
+        created: result.created,
+      };
+    },
+
+    async closeDemandPool(execution, _actorPersonId, input) {
+      const pool = await demandService.closeDemandPool(
+        execution,
+        input as unknown as import("../demand/port.ts").CloseDemandPoolInput,
+      );
+      return toDemandPoolView(pool);
+    },
+
+    async createDemandCommitment(execution, _actorPersonId, input) {
+      const result = await demandService.createDemandCommitment(
+        execution,
+        input as unknown as import("../demand/port.ts").CreateDemandCommitmentInput,
+      );
+      return {
+        commitment: toDemandCommitmentView(result.commitment),
+        created: result.created,
+      };
+    },
+
+    async withdrawDemandCommitment(execution, _actorPersonId, input) {
+      const commitment = await demandService.withdrawDemandCommitment(
+        execution,
+        input as unknown as import("../demand/port.ts").WithdrawDemandCommitmentInput,
+      );
+      return toDemandCommitmentView(commitment);
+    },
+
+    async evaluateQualifiedDemand(execution, _actorPersonId, input) {
+      // THE SUPPLIER-FACING DERIVATION: no aggregate/threshold input
+      // exists — every caller field beyond scope/pool identity is
+      // ignored and the evaluation re-derives everything.
+      const view = await demandService.evaluateQualifiedDemand(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+        poolId: input.poolId as string,
+      });
+      return toQualifiedDemandAggregateView(view);
+    },
+
+    async listMyDemandCommitments(execution, actorPersonId, input) {
+      // The consumer is the SERVER-RESOLVED authenticated actor —
+      // there is no consumerPersonId input on this route. This is the
+      // ONLY commitment read surface (individual commitments are
+      // never exposed through any other route).
+      const commitments = await demandService.listDemandCommitments(
+        execution,
+        input.organizationScopeId as string,
+        {
+          consumerPersonId: actorPersonId,
+          ...(input.poolId !== undefined && input.poolId !== null
+            ? { poolId: input.poolId as string }
+            : {}),
+        },
+      );
+      return commitments.map(toDemandCommitmentView);
+    },
+
+    async getDemandPool(execution, organizationScopeId, poolId) {
+      const pool = await demandService.getDemandPool(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        poolId,
+      );
+      return toDemandPoolView(pool);
+    },
+
+    async listDemandPools(
+      execution,
+      organizationScopeId,
+      categoryKey,
+      closed,
+    ) {
+      const pools = await demandService.listDemandPools(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        {
+          ...(categoryKey !== undefined ? { categoryKey } : {}),
+          ...(closed !== undefined ? { closed } : {}),
+        },
+      );
+      return pools.map(toDemandPoolView);
+    },
+
     // -- NET-W012 helpful-contribution commands -------------------------
     async defineHelpfulnessPolicy(execution, _actorPersonId, input) {
       const result = await helpfulnessService.defineHelpfulnessPolicy(
@@ -8788,6 +9003,8 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     inventoryService,
     // NET-W020 cross-promotion clearing (records + derived eligibility).
     crossPromotionClearingService,
+    // NET-W024 demand (consumer demand pools) service.
+    demandService,
     helpfulnessService,
     // NET-W013 quality/moderation/anti-spam services + LLM providers.
     qualityService,
