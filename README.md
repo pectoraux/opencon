@@ -6,10 +6,23 @@ Open Contribution Protocol (OpenCon) is an open protocol for coordinating advert
 
 **Architecture:** v1.0 FROZEN  
 **Requirements:** v1.0 APPROVED BASELINE  
-**Implementation:** NET-W003 in review (persistence, queues, objects, secrets, observability)  
-**Next eligible work item:** `NET-W003` (PR #6 re-review)  
+**Implementation:** NET-W001 through NET-W020 complete and merged  
+**Current target:** `NET-W021` — Campaign matching and optimization  
 **Implementation agent:** Z.ai  
 **Architect:** OpenCon architecture authority
+
+### Resume the project without conversation history
+
+The repository is self-describing. Start here:
+
+1. `AGENTS.md` — durable instructions for LLM architects/reviewers and implementation agents.
+2. `spec/PROJECT-STATE.md` — current merged checkpoint, next work item, architectural lessons, and resume procedure.
+3. `spec/ROADMAP.md` — complete NET-W001..036 roadmap and implementation contract for the next item.
+4. `spec/work-items.md` — original canonical backlog.
+5. `spec/dependency-graph.md` — dependency/readiness rules.
+6. `spec/architecture.md` + `spec/architecture-lock.md` — frozen architecture and non-negotiable invariants.
+
+**The chat is not a source of truth.** A new LLM must be able to continue from repository state alone.
 
 ## Development model
 
@@ -37,6 +50,9 @@ Z.ai is an implementation participant, not the authority for architecture, workf
 - `spec/requirements.md` — v1.0 requirements and acceptance criteria
 - `spec/work-items.md` — implementation backlog and definitions of done
 - `spec/dependency-graph.md` — implementation dependencies and eligibility rules
+- `spec/ROADMAP.md` — durable roadmap and next-work-item contract
+- `spec/PROJECT-STATE.md` — durable implementation checkpoint
+- `AGENTS.md` — durable LLM architect/implementation handoff
 
 ## Implementation (NET-W003)
 
