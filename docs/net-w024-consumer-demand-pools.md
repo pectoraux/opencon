@@ -1,6 +1,6 @@
 # NET-W024 — Consumer Demand Pools
 
-**Status:** IMPLEMENTED on `feat/net-w024-consumer-demand-pools` — full local gate green; PR submitted for architect review
+**Status:** MERGED to `main` (squash merge of PR #49 after architect approval and green CI)
 **GitHub issue:** #48
 **Work order:** `spec/work-orders/NET-W024.md`
 **Architecture:** v1.0 FROZEN
@@ -76,8 +76,9 @@ All six restored green after each check (the driver verified the suite passed ag
 - Staged-diff secret scan: clean (no credential patterns; no new configuration entries).
 - PR: **#49** (https://github.com/pectoraux/opencon/pull/49, Closes #48), head `63639b04f36b621d7b5f6760c568a7f877b0f3ce`.
 - CI on the PR head: **GREEN on BOTH events** — `verify (typecheck + architecture + authority + unit tests)` success (push + pull_request) and `integration (real PostgreSQL + Redis adapters)` success (both runs); 4/4 check runs.
-- Review state: awaiting architect review — **NOT merged** (merge only on green CI AND recorded architect approval).
-- Merge SHA: PENDING.
+- Review state: **APPROVED and merged** (architect approval recorded; merge only on green CI AND recorded architect approval — both gates satisfied).
+- Merge SHA: `cdfe12b8d5d56e3158505bbc77878e9b9e3561f7` (squash-merged as `feat(demand): NET-W024 — Consumer Demand Pools`).
+- Post-merge: `spec/PROJECT-STATE.md`, `spec/ROADMAP.md` and `docs/LLM-ARCHITECT-HANDOFF.md` advanced to NET-W025 before that work item began (the completion rule below, satisfied).
 
 ## Completion rule
 
