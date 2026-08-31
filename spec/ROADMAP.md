@@ -86,8 +86,8 @@ Composition-root orchestration is allowed, but an orchestration function must no
 
 ### Phase 7 — Demand economy
 
-- **NET-W024 — Consumer Demand Pools** — **CURRENT IMPLEMENTATION TARGET**. Aggregate privacy-preserving consumer demand commitments and expose qualified aggregate demand to competing suppliers without exposing individual commitments or creating a parallel economic authority.
-- **NET-W025 — Business procurement pools** — **PLANNED**.
+- **NET-W024 — Consumer Demand Pools** — **COMPLETE**. Privacy-preserving consumer demand aggregation inside `/demand`: tenant-scoped pools, private consented commitments, the frozen disclosure floor, derived qualified-aggregate supplier views (never stored, never caller-asserted); zero economic surface.
+- **NET-W025 — Business procurement pools** — **CURRENT IMPLEMENTATION TARGET**. Aggregate business procurement demand while minimizing disclosure of competitively sensitive information — built on the W024 privacy model inside the same `/demand` boundary, with explicit organization/actor authorization and competition-policy-governed deterministic qualified aggregates.
 - **NET-W026 — Supplier offers and competitive selection** — **PLANNED**.
 - **NET-W027 — Verified savings and counterfactuals** — **PLANNED**.
 - **NET-W028 — Benefit Pools** — **PLANNED**.
@@ -122,48 +122,50 @@ W028/W033 → W036
 
 The precise dependency and readiness rules remain authoritative in `spec/dependency-graph.md` and `spec/work-items.md`.
 
-## W024 implementation contract
+## W025 implementation contract
 
 ### Authority model
 
 ```text
-consumer demand commitments (tenant-scoped, consented)
+business demand commitments (tenant-scoped, buyer-organization-authorized, consented)
         ↓
-/demand owns pools + commitments + versioned neutral category/attribute vocabulary
+/demand owns procurement pools + commitments + versioned neutral category/attribute vocabulary
+(no second demand/procurement authority — the W024 boundary extended, not duplicated)
         ↓
-privacy-preserving aggregation (deterministic derivation, frozen privacy floor)
+privacy / competition policy (deterministic derivation, frozen commitment floor
+AND frozen distinct-organization floor; bands/buckets/windows only — never exact
+quantities, unit prices, budgets or timing)
         ↓
-qualified aggregate demand views (derived, never stored, never caller-asserted)
+deterministic qualified aggregate (derived, never stored, never caller-asserted)
         ↓
-composition root ONLY (neutral membership reads over /organizations)
+supplier-facing minimized demand view
         ↓
 /settlement stays the sole economic authority (zero demand-side economic surface)
 ```
 
 ### Inputs
 
-- consumer demand commitments: bounded provider-neutral category + attribute vocabulary (region, quantity, budget band) with explicit consent;
-- tenant-scoped pool records with explicit, versioned qualification policy;
+- business demand commitments: bounded provider-neutral procurement category + attribute vocabulary (region, quantity, budget band, unit-price band, delivery-timing window) with explicit server-written consent, each naming the buyer organization on whose behalf the acting person commits (the actor must hold ACTIVE membership in BOTH the tenant and the named buyer organization — server-resolved, never client-asserted);
+- tenant-scoped procurement-pool records with explicit, versioned qualification policy (commitment threshold + distinct-organization threshold);
 - organization membership facts resolved read-only through the neutral lookup (server-enforced authorization/consent);
-- existing identity/participant contracts through neutral reads only;
 - nothing else: no activity, spend, wealth, reputation or economic-source assertion may influence qualification.
 
 ### Required behavior
 
-1. Pools and commitments are first-class, tenant-scoped, durable records with explicit provenance and server-written consent grants.
-2. Pool membership requires server-side authorization (guard policy + active organization membership) and correct tenant scope; client claims never fabricate either.
-3. Aggregate demand is derived from authoritative commitment records at evaluation time; no caller-provided aggregate is trusted; nothing aggregate is stored as asserted truth.
-4. Individual commitments are private: supplier-facing outputs are counts/ranges/bounded distributions only, emitted only above the frozen privacy floor, with below-floor groups suppressed (never named).
+1. Procurement pools and business commitments are first-class, tenant-scoped, durable records with explicit provenance and server-written consent grants.
+2. Commitment eligibility requires server-side authorization (guard policy + active tenant membership + active buyer-organization membership) and correct tenant scope; client claims never fabricate either.
+3. Aggregate demand is derived from authoritative commitment records at evaluation time; no caller-provided aggregate, count or qualification is trusted; nothing aggregate is stored as asserted truth.
+4. Individual business commitments are private AND competitively sensitive: supplier-facing outputs are counts/bounded distributions only, emitted only above the frozen commitment floor AND the frozen distinct-organization floor, with below-floor groups suppressed (counted, never named); exact competitor quantities, prices, budgets and timing never appear in any normal output.
 5. Qualification is deterministic and reproducible: one explicit evaluation anchor, canonical digest over the aggregate facts, fixed orderings.
-6. Threshold policy is explicit and versioned and cannot be caller-asserted at evaluation; the privacy floor is a frozen constant no policy can lower.
+6. Threshold/competition policy is explicit and versioned and cannot be caller-asserted at evaluation; the privacy/competition floors are frozen constants no policy can lower.
 7. Pool closure and commitment withdrawal are one-way field mutations (no local status machinery; `/workflows` untouched).
 8. Cross-tenant references fail closed as not-found with no existence oracle.
-9. Material mutations are idempotent (composite keys), concurrency-safe (per-pool locking), and atomically audited on ONE authoritative transaction; failed commits leave no partial pool state.
-10. No economic mutation surface exists in `/demand`: no ledger, credits, cash, stakes, rewards; no new domain boundary; no procurement/supplier-offer/selection/savings/benefit semantics (W025–W028).
+9. Material mutations are idempotent (composite keys), concurrency-safe (per-pool locking), and atomically audited on ONE authoritative transaction; failed commits leave no partial procurement-pool state.
+10. No economic mutation surface exists in `/demand`: no ledger, credits, cash, stakes, rewards; no new domain boundary; no supplier-offer/selection (W026), savings/counterfactual (W027) or Benefit-Pool (W028) semantics.
 
 ### Evidence gate
 
-W024 is mergeable only after implementation, acceptance coverage (privacy, authorization, aggregation, tenancy, idempotency, concurrency, atomicity), mutation checks for privacy/minimization, consent/authorization and threshold bypasses, `bun run verify`, configured real PostgreSQL/Redis integration, exactly one implementation PR, and architect approval are all complete.
+W025 is mergeable only after implementation, acceptance coverage (privacy, competition-sensitive disclosure, authorization, aggregation, tenancy, idempotency, concurrency, atomicity), mutation checks for privacy/minimization, authorization/tenant scope and threshold/disclosure bypasses, `bun run verify`, configured real PostgreSQL/Redis integration, exactly one implementation PR, and architect approval are all complete.
 
 ## Work-item operating procedure
 
