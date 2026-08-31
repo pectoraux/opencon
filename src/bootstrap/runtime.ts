@@ -207,12 +207,42 @@ import { BrowserAttributionAdapter } from "../measurement/providers/browser-attr
 import { IOSAttributionAdapter } from "../measurement/providers/ios-attribution-adapter.ts";
 import { createMeasurementProviderRegistry } from "../measurement/registry.ts";
 import { createMeasurementIngestionService } from "../measurement/ingestion.ts";
+// NET-W023: the OpenRTB / supply-chain adapters (ADAPTER-001..002) —
+// the reference provider adapter, the provider registration boundary
+// and the neutral ingress service live in the /adapters boundary
+// (adapter tier: core + neutral ports only; no domain imports). The
+// delivery-notice measurement adapter (the sanctioned measurement
+// routing path) implements the W022 OPTIONAL normalizeReport contract
+// from the /measurement provider tier and is registered in the
+// measurement registry below.
+import { OpenRtbReferenceAdapter } from "../adapters/openrtb/reference-adapter.ts";
+import { createOpenRtbProviderRegistry } from "../adapters/registry.ts";
+import { createOpenRtbIngressService } from "../adapters/ingress.ts";
+import { OpenRtbDeliveryNoticeAdapter } from "../measurement/providers/openrtb-delivery-adapter.ts";
+import type {
+  ExternalInventorySupplyLookup,
+  OpenRtbIngressService,
+  OpenRtbProviderAdapter,
+} from "../adapters/port.ts";
 
 /** NET-W022 secret key names (resolved ONLY through the SecretProvider). */
 export const MEASUREMENT_BROWSER_ATTRIBUTION_SECRET_KEY =
   "MEASUREMENT_BROWSER_ATTRIBUTION_KEY" as const;
 export const MEASUREMENT_IOS_ATTRIBUTION_SECRET_KEY =
   "MEASUREMENT_IOS_ATTRIBUTION_KEY" as const;
+/** NET-W023 secret key name (the delivery-notice HMAC verification key). */
+export const MEASUREMENT_OPENRTB_DELIVERY_SECRET_KEY =
+  "MEASUREMENT_OPENRTB_DELIVERY_KEY" as const;
+/**
+ * NET-W023 PR #47 remediation secret key name: the seller-authorization
+ * trust channel HMAC key (supply-chain verification). Resolved ONLY
+ * through the SecretProvider at composition time; present → the
+ * ingress authenticates trust envelopes; absent → NO chain can be
+ * `verified` (fail closed). NEVER logged, persisted, or echoed into
+ * audit/error payloads (PRIV-002).
+ */
+export const SELLER_AUTHORIZATION_TRUST_SECRET_KEY =
+  "SELLER_AUTHORIZATION_TRUST_KEY" as const;
 // NET-W007 reputation boundary: the multidimensional reputation engine
 // — evidence-backed inputs (basis DERIVED from upstream records
 // through neutral lookups), immutable versioned deterministic scoring
@@ -534,6 +564,35 @@ export interface Runtime {
    * persistence composition lives in the apiCommands composite).
    */
   readonly measurementIngestion: MeasurementIngestionService;
+  /**
+   * NET-W023: the wired OpenRTB / supply-chain provider adapters
+   * (diagnostics).
+   */
+  readonly openRtbProviders: readonly OpenRtbProviderAdapter[];
+  /**
+   * NET-W023: the provider-neutral OpenRTB ingress boundary — routes
+   * raw submissions to the registered adapter, enforces the neutral
+   * contract, and derives the external ad-request admission
+   * evaluation through the neutral read-only inventory lookup (no
+   * mutation; the ONLY sanctioned material path routes measurement
+   * facts through the W022 ingestion composite).
+   */
+  readonly openRtbIngress: OpenRtbIngressService;
+  /**
+   * NET-W023 PR #47 remediation: whether the seller-authorization
+   * trust channel is configured (the SELLER_AUTHORIZATION_TRUST_KEY
+   * secret, resolved ONLY through the SecretProvider at composition
+   * time — or the explicit composition override). When NOT
+   * configured, no seller-authorization submission can be
+   * authenticated and no supply chain can be `verified` (fail
+   * closed — the admission evaluation reports
+   * `supply_chain_unauthenticated`). Diagnostics only: the secret
+   * value is NEVER exposed here.
+   */
+  readonly openRtbSellerAuthorizationTrust: {
+    readonly configured: boolean;
+    readonly algorithm: "hmac-sha256";
+  };
   // NET-W007 domain services (exposed for integration/security tests).
   readonly reputationPolicyService: ReputationPolicyService;
   readonly reputationInputService: ReputationInputService;
@@ -618,6 +677,26 @@ export interface CreateRuntimeOptions {
    */
   readonly measurement?: {
     readonly providers?: readonly MeasurementProviderAdapter[];
+  };
+  /**
+   * NET-W023: explicitly configured OpenRTB / supply-chain provider
+   * adapters (test doubles or future concrete exchange adapters).
+   * When omitted, the reference adapter is wired (request +
+   * seller-authorization normalization). Consumers use ONLY the
+   * neutral OpenRtbProviderAdapter contract.
+   */
+  readonly adapters?: {
+    readonly openRtbProviders?: readonly OpenRtbProviderAdapter[];
+    /**
+     * NET-W023 PR #47 remediation: explicitly configured
+     * seller-authorization trust key (HMAC-SHA256) for the OpenRTB
+     * ingress (test wiring or an operator-provided channel key). When
+     * omitted, the key resolves through the SecretProvider
+     * (SELLER_AUTHORIZATION_TRUST_KEY); when neither is present the
+     * trust channel is NOT configured and no supply chain can be
+     * `verified` (fail closed).
+     */
+    readonly sellerAuthorizationTrustKey?: string;
   };
   /**
    * NET-W013: explicitly configured LLM provider adapters (test
@@ -1122,6 +1201,16 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   )
     ? secretProvider.getSecretSync(MEASUREMENT_IOS_ATTRIBUTION_SECRET_KEY)
     : undefined;
+  // NET-W023: the delivery-notice verification secret (the sanctioned
+  // measurement routing path — OpenRTB delivery facts flow through the
+  // W022 push-report ingestion chain). Same wiring rule as the
+  // attribution adapters: no secret → the adapter is NOT wired and
+  // pushed notices fail closed.
+  const openRtbDeliverySecret = secretProvider.hasSecret(
+    MEASUREMENT_OPENRTB_DELIVERY_SECRET_KEY,
+  )
+    ? secretProvider.getSecretSync(MEASUREMENT_OPENRTB_DELIVERY_SECRET_KEY)
+    : undefined;
   const measurementProviders: readonly MeasurementProviderAdapter[] =
     opts.measurement?.providers?.length
       ? opts.measurement.providers
@@ -1132,6 +1221,13 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
             : []),
           ...(iosAttributionSecret !== undefined
             ? [new IOSAttributionAdapter({ verificationSecret: iosAttributionSecret })]
+            : []),
+          ...(openRtbDeliverySecret !== undefined
+            ? [
+                new OpenRtbDeliveryNoticeAdapter({
+                  verificationSecret: openRtbDeliverySecret,
+                }),
+              ]
             : []),
         ];
   // NET-W022: the provider registration boundary. Every wired
@@ -2445,6 +2541,86 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     idempotency,
     auditWriter,
     logger: logger.forModule("inventory"),
+  });
+
+  // ------------------------------------------------------------------
+  // NET-W023 — OpenRTB / supply-chain adapters wiring (ADAPTER-001..002).
+  //
+  // The /adapters boundary owns provider-specific protocol parsing;
+  // this composition root is the ONLY join between normalized adapter
+  // output and the existing domain authorities:
+  //  - the NEUTRAL read-only inventory lookup below resolves external
+  //    (provider, externalId) references against REGISTERED supply
+  //    through the inventory authority's own org-scoped reads (the
+  //    adapter tier may not import /inventory — tier matrix);
+  //  - the ingress service routes raw submissions to the registered
+  //    provider adapter, enforces the neutral contract, and derives
+  //    the admission evaluation (a PURE derivation — NO mutation);
+  //  - the ONLY sanctioned material path (delivery-notice measurement
+  //    facts) flows through the W022 submitMeasurementReport composite
+  //    into /outcomes exactly-once ingestion + atomic audit.
+  // ------------------------------------------------------------------
+  const openRtbProviders: readonly OpenRtbProviderAdapter[] =
+    opts.adapters?.openRtbProviders?.length
+      ? opts.adapters.openRtbProviders
+      : [new OpenRtbReferenceAdapter()];
+  const openRtbProviderRegistry = createOpenRtbProviderRegistry();
+  for (const adapter of openRtbProviders) {
+    openRtbProviderRegistry.register(adapter);
+  }
+  const adaptersServiceCtx = createExecutionContext({
+    correlationId: "adapters-supply-lookup",
+    actor: { id: "adapters", kind: "service" },
+  });
+  const externalInventoryLookup: ExternalInventorySupplyLookup = {
+    // READ-ONLY + tenant-scoped: the inventory authority's own
+    // org-scoped list (cross-org identifiers resolve to zero matches —
+    // not-found semantics, no existence oracle). Exact-one
+    // resolution is enforced by the ingress evaluation.
+    async resolveByExternalReference(organizationScopeId, provider, externalId) {
+      const items = await inventoryService.listInventoryItems(
+        getExecutionContext() ?? adaptersServiceCtx,
+        organizationScopeId,
+      );
+      const matches = items.filter(
+        (item) =>
+          item.externalReference !== null &&
+          item.externalReference.provider === provider &&
+          item.externalReference.externalId === externalId,
+      );
+      return matches.map((item) => ({
+        itemId: item.id,
+        organizationScopeId: item.organizationScopeId,
+        surfaceKind: item.surfaceKind,
+        format: item.format,
+        ownerPersonId: item.ownerPersonId,
+        retiredAt: item.retiredAt,
+      }));
+    },
+  };
+  // PR #47 remediation: the seller-authorization trust channel key.
+  // Resolution order: the explicit composition override (test
+  // wiring / operator-provided channel key) FIRST, then the
+  // SELLER_AUTHORIZATION_TRUST_KEY secret through the SecretProvider
+  // — the SAME wiring rule as the measurement attribution adapters.
+  // Neither present → the trust channel is NOT configured: no
+  // seller-authorization submission can be authenticated and no
+  // supply chain can be `verified` (fail closed; the W022
+  // no-secret rule). The value NEVER crosses into logs, audit, or
+  // domain modules (PRIV-002).
+  const sellerAuthorizationTrustKey =
+    opts.adapters?.sellerAuthorizationTrustKey !== undefined
+      ? opts.adapters.sellerAuthorizationTrustKey
+      : secretProvider.hasSecret(SELLER_AUTHORIZATION_TRUST_SECRET_KEY)
+        ? secretProvider.getSecretSync(SELLER_AUTHORIZATION_TRUST_SECRET_KEY)
+        : undefined;
+  const openRtbIngress = createOpenRtbIngressService({
+    registry: openRtbProviderRegistry,
+    inventoryLookup: externalInventoryLookup,
+    logger: logger.forModule("adapters"),
+    ...(sellerAuthorizationTrustKey !== undefined
+      ? { sellerAuthorizationTrustKey }
+      : {}),
   });
 
   // ------------------------------------------------------------------
@@ -4835,6 +5011,26 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         created: result.created,
         observation: toObservationView(result.observation),
       };
+    },
+    async evaluateExternalAdRequest(execution, _actorPersonId, input) {
+      // NET-W023 composition-root composite (the adapter tier cannot
+      // import /inventory — the tier matrix forbids it): the /adapters
+      // ingress normalizes the raw vendor request (fail closed),
+      // resolves the supply identity through the NEUTRAL read-only
+      // inventory lookup, and derives the admission evaluation. This
+      // composite performs NO material mutation — the evaluation is a
+      // pure derivation (issue #46 scope 4/6); the guard has already
+      // authenticated the acting principal.
+      void execution;
+      return openRtbIngress.evaluateAdRequest({
+        organizationScopeId: input.organizationScopeId,
+        providerId: input.providerId,
+        payload: input.request,
+        ...(input.sellerAuthorizations !== undefined
+          ? { sellerAuthorizations: input.sellerAuthorizations }
+          : {}),
+        ...(input.evaluatedAt !== undefined ? { evaluatedAt: input.evaluatedAt } : {}),
+      });
     },
     async createMeasurementExperiment(execution, actorPersonId, input) {
       const experiment = await measurementExperimentService.createMeasurementExperiment(
@@ -8549,6 +8745,12 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     measuredOutcomeService,
     measurementProviders,
     measurementIngestion,
+    openRtbProviders,
+    openRtbIngress,
+    openRtbSellerAuthorizationTrust: {
+      configured: sellerAuthorizationTrustKey !== undefined,
+      algorithm: "hmac-sha256",
+    },
     // NET-W007 domain services.
     reputationPolicyService,
     reputationInputService,

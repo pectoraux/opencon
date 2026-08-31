@@ -22,8 +22,10 @@ import {
   createNetW015Harness,
   key as w015Key,
   personCtx,
+  type NetW008HarnessOptions,
   type NetW015Harness,
 } from "./_net-w015-harness.ts";
+export type { NetW008HarnessOptions };
 import { createExecutionContext } from "../../src/core/execution-context.ts";
 import type { ExecutionContext } from "../../src/core/execution-context.ts";
 import type {
@@ -56,8 +58,10 @@ export interface NetW016Harness {
 
 const GUARD_ACTIONS = ["creators.matching.run"];
 
-export async function createNetW016Harness(): Promise<NetW016Harness> {
-  const w015 = await createNetW015Harness();
+export async function createNetW016Harness(
+  opts: NetW008HarnessOptions = {},
+): Promise<NetW016Harness> {
+  const w015 = await createNetW015Harness(opts);
   const runtime = w015.runtime;
   const bootstrapCtx = w015.bootstrapCtx;
 

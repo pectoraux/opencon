@@ -821,6 +821,41 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // POST /api/external-ad-requests — evaluate ONE external ad
+    // request through the adapters boundary against registered supply
+    // (NET-W023, ADAPTER-001..002; protected). The raw vendor payload
+    // is an opaque passthrough to the provider's adapter; the
+    // evaluation is a READ-ONLY derivation (a non-admitted decision is
+    // a 200 result like the placement settlement-readiness view —
+    // malformed input is a validation error).
+    if (path === "/api/external-ad-requests" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "adRequest.evaluate", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = body as Record<string, unknown>;
+      if (obj.request === undefined) {
+        await send(res, 400, {
+          error: "validation",
+          classification: "validation",
+          message: "request (the raw vendor bid-request payload) is required",
+        });
+        return true;
+      }
+      const sellerAuthorizations = parseSellerAuthorizationSubmissions(obj);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.evaluateExternalAdRequest(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          providerId: strField(obj, "providerId"),
+          request: obj.request,
+          ...(sellerAuthorizations !== undefined ? { sellerAuthorizations } : {}),
+          ...(typeof obj.evaluatedAt === "string" ? { evaluatedAt: obj.evaluatedAt } : {}),
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
     // POST /api/measurement-experiments — create an experiment (protected).
     if (path === "/api/measurement-experiments" && method === "POST" && opts.commands) {
       const commands = opts.commands;
@@ -5236,6 +5271,79 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       subjectId: strField(r, "subjectId"),
       subjectType: strField(r, "subjectType"),
     };
+  }
+
+  // Parse the seller-authorization file submissions attached to an
+  // external ad-request evaluation body (NET-W023). Absent →
+  // undefined; malformed → a validation error.
+  function parseSellerAuthorizationSubmissions(
+    obj: Record<string, unknown>,
+  ):
+    | {
+        providerId: string;
+        sourceKind: "ads.txt" | "app-ads.txt" | "sellers.json";
+        content: string;
+        sourceIdentity: string;
+        observedAt?: string;
+        integrity?: {
+          algorithm: string;
+          signature: string;
+          signedAt: string;
+        };
+      }[]
+    | undefined {
+    const raw = obj.sellerAuthorizations;
+    if (raw === undefined || raw === null) return undefined;
+    if (!Array.isArray(raw)) {
+      throw apiValidationError('field "sellerAuthorizations" must be an array of file submissions');
+    }
+    return raw.map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw apiValidationError("each sellerAuthorization must be an object");
+      }
+      const e = entry as Record<string, unknown>;
+      const sourceKind = strField(e, "sourceKind");
+      if (
+        sourceKind !== "ads.txt" &&
+        sourceKind !== "app-ads.txt" &&
+        sourceKind !== "sellers.json"
+      ) {
+        throw apiValidationError(
+          'sellerAuthorization sourceKind must be "ads.txt", "app-ads.txt" or "sellers.json"',
+        );
+      }
+      // PR #47 remediation: the OPTIONAL trust envelope. Structural
+      // validation only at the transport (three non-empty string
+      // fields; malformed → 400 fail closed) — the cryptographic
+      // verification happens at the adapters-boundary ingress, and an
+      // envelope that does not verify is a DERIVED decision fact
+      // (`supply_chain_unauthenticated`), never a transport error.
+      // The signature value is never echoed into error payloads.
+      let integrity:
+        | { algorithm: string; signature: string; signedAt: string }
+        | undefined;
+      if (e.integrity !== undefined && e.integrity !== null) {
+        if (typeof e.integrity !== "object" || Array.isArray(e.integrity)) {
+          throw apiValidationError(
+            'sellerAuthorization integrity must be an object with algorithm, signature and signedAt',
+          );
+        }
+        const i = e.integrity as Record<string, unknown>;
+        integrity = {
+          algorithm: strField(i, "algorithm"),
+          signature: strField(i, "signature"),
+          signedAt: strField(i, "signedAt"),
+        };
+      }
+      return {
+        providerId: strField(e, "providerId"),
+        sourceKind,
+        content: strField(e, "content"),
+        sourceIdentity: strField(e, "sourceIdentity"),
+        ...(typeof e.observedAt === "string" ? { observedAt: e.observedAt } : {}),
+        ...(integrity !== undefined ? { integrity } : {}),
+      };
+    });
   }
 
   // Parse a confidence estimate ({ point, lower?, upper?, method? }).

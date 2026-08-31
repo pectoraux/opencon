@@ -46,6 +46,27 @@ export const ConfigSchema = z.object({
   // echoed into audit/error payloads (PRIV-002).
   MEASUREMENT_BROWSER_ATTRIBUTION_KEY: z.string().optional(),
   MEASUREMENT_IOS_ATTRIBUTION_KEY: z.string().optional(),
+  // NET-W023: provider verification secret (HMAC-SHA256 key) for the
+  // reference delivery-notice measurement adapter (the sanctioned
+  // measurement routing path: delivery facts flow through the W022
+  // push-report ingestion chain into /outcomes). Classified secret,
+  // resolved ONLY through the SecretProvider at composition time.
+  // When present, the delivery-notice adapter is auto-wired into the
+  // measurement provider registry; when absent, pushed notices fail
+  // closed (unverifiable integrity). Never logged, persisted, or
+  // echoed into audit/error payloads (PRIV-002).
+  MEASUREMENT_OPENRTB_DELIVERY_KEY: z.string().optional(),
+  // NET-W023 PR #47 remediation: the seller-authorization trust
+  // channel key (HMAC-SHA256) for supply-chain verification. When
+  // present, the OpenRTB ingress authenticates seller-authorization
+  // trust envelopes (ads.txt / app-ads.txt / sellers.json submissions
+  // signed by the trusted supply-chain collector channel); when
+  // absent, NO supply chain can be `verified` (fail closed —
+  // unauthenticated authorization evidence is never promoted to
+  // authorization). Classified secret, resolved ONLY through the
+  // SecretProvider at composition time. Never logged, persisted, or
+  // echoed into audit/error payloads (PRIV-002).
+  SELLER_AUTHORIZATION_TRUST_KEY: z.string().optional(),
 
   // Observability
   LOG_LEVEL: LogLevelSchema.default("info"),
@@ -73,6 +94,8 @@ export const CONFIG_FIELD_CLASSIFICATIONS: readonly FieldClassification[] = [
   { key: "ATTESTATION_SIGNING_KEY", classification: "secret", required: false },
   { key: "MEASUREMENT_BROWSER_ATTRIBUTION_KEY", classification: "secret", required: false },
   { key: "MEASUREMENT_IOS_ATTRIBUTION_KEY", classification: "secret", required: false },
+  { key: "MEASUREMENT_OPENRTB_DELIVERY_KEY", classification: "secret", required: false },
+  { key: "SELLER_AUTHORIZATION_TRUST_KEY", classification: "secret", required: false },
   { key: "LOG_LEVEL", classification: "optional", required: false },
   { key: "LOG_PRETTY", classification: "optional", required: false },
 ] as const;
