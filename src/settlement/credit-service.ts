@@ -83,7 +83,7 @@ export interface CreditServiceDeps extends EconomicServiceDeps {
 }
 
 /** The account set an issuance posts to (lock set). */
-function issuanceAccountIds(
+export function issuanceAccountIds(
   organizationScopeId: string,
   beneficiaryPersonId: string,
 ): string[] {
@@ -153,207 +153,221 @@ export function createCreditService(deps: CreditServiceDeps): CreditService {
         idempotency,
         issuanceAccountIds(input.organizationScopeId, input.beneficiaryPersonId),
         () =>
-          idempotency.applyIdempotent(key, async (ctx) => {
-            const tx = ctx.transaction;
-            const record = await valueRepository.findByIdWithinTx(
-              input.sourceValueRecordId,
-              tx,
-            );
-            if (!record) {
-              throw new NotFoundError(
-                `source economic value record not found: ${input.sourceValueRecordId}`,
-                { sourceValueRecordId: input.sourceValueRecordId },
-              );
-            }
-            if (record.organizationScopeId !== input.organizationScopeId) {
-              throw validationError(
-                `source value record ${record.id} belongs to organization scope ${record.organizationScopeId}, not ${input.organizationScopeId}`,
-                {
-                  sourceValueRecordId: record.id,
-                  recordScope: record.organizationScopeId,
-                  inputScope: input.organizationScopeId,
-                },
-              );
-            }
-            if (record.beneficiaryPersonId !== input.beneficiaryPersonId) {
-              throw validationError(
-                `source value record ${record.id} belongs to beneficiary ${record.beneficiaryPersonId}, not ${input.beneficiaryPersonId}`,
-                {
-                  sourceValueRecordId: record.id,
-                  recordBeneficiary: record.beneficiaryPersonId,
-                  inputBeneficiary: input.beneficiaryPersonId,
-                },
-              );
-            }
-            if (record.state === "PENDING") {
-              throw validationError(
-                `source value record ${record.id} is PENDING — pending value cannot be consumed as mature value (architecture-lock invariant 19: mature the record explicitly first)`,
-                { sourceValueRecordId: record.id, state: record.state },
-              );
-            }
-            if (record.state !== "MATURE") {
-              throw validationError(
-                `source value record ${record.id} is ${record.state}, not MATURE — only mature value can issue Participation Credits`,
-                { sourceValueRecordId: record.id, state: record.state },
-              );
-            }
-            // THE PROOF-OF-VALUE GATE (architecture-lock invariant 20):
-            // ≥1 source must be a Proof-of-Value that resolves VERIFIED.
-            const povRefs = record.sources.filter(
-              (s) => s.kind === "proof_of_value",
-            );
-            let verifiedPovId: string | null = null;
-            for (const ref of povRefs) {
-              const resolved = await proofOfValueLookup.resolve(ref.id);
-              if (resolved && resolved.state === "VERIFIED") {
-                verifiedPovId = ref.id;
-                break;
-              }
-            }
-            if (verifiedPovId === null) {
-              throw validationError(
-                `credit issuance against source value record ${record.id} requires a VERIFIED Proof-of-Value reference (architecture-lock invariant 20) — the record's sources carry no VERIFIED Proof-of-Value`,
-                {
-                  sourceValueRecordId: record.id,
-                  sourceKinds: record.sources.map((s) => s.kind),
-                },
-              );
-            }
-            const creditAmount = computeCreditAmount(
-              record.amount,
-              input.creditsPerValueUnit,
-            );
-            const issuanceId = randomUUID();
-            // THE DUAL-SIDE ISSUANCE POSTINGS (balanced per unit).
-            const transaction = await postLedgerTransactionWithinTx(
-              tx,
-              execution,
-              {
-                organizationScopeId: input.organizationScopeId,
-                kind: "credit_issuance",
-                description: input.description,
-                subject: { kind: "credit_issuance", id: issuanceId },
-                entries: [
-                  {
-                    accountId: economicAccountId(
-                      input.organizationScopeId,
-                      input.beneficiaryPersonId,
-                      "mature_value",
-                      "value",
-                    ),
-                    accountKind: "mature_value",
-                    ownerPersonId: input.beneficiaryPersonId,
-                    direction: "debit",
-                    amount: record.amount,
-                    unit: "value",
-                  },
-                  {
-                    accountId: economicAccountId(
-                      input.organizationScopeId,
-                      null,
-                      "protocol_recognition",
-                      "value",
-                    ),
-                    accountKind: "protocol_recognition",
-                    ownerPersonId: null,
-                    direction: "credit",
-                    amount: record.amount,
-                    unit: "value",
-                  },
-                  {
-                    accountId: economicAccountId(
-                      input.organizationScopeId,
-                      null,
-                      "protocol_recognition",
-                      "credits",
-                    ),
-                    accountKind: "protocol_recognition",
-                    ownerPersonId: null,
-                    direction: "debit",
-                    amount: creditAmount,
-                    unit: "credits",
-                  },
-                  {
-                    accountId: economicAccountId(
-                      input.organizationScopeId,
-                      input.beneficiaryPersonId,
-                      "credits",
-                      "credits",
-                    ),
-                    accountKind: "credits",
-                    ownerPersonId: input.beneficiaryPersonId,
-                    direction: "credit",
-                    amount: creditAmount,
-                    unit: "credits",
-                  },
-                ],
-                idempotencyKey: input.idempotencyKey,
-              },
-              ledgerRepository,
-            );
-            const issuance: CreditIssuance = Object.freeze({
-              id: issuanceId,
-              organizationScopeId: input.organizationScopeId,
-              beneficiaryPersonId: input.beneficiaryPersonId,
-              creditAmount,
-              sourceValueRecordId: record.id,
-              sourceValueAmount: record.amount,
-              proofOfValueId: verifiedPovId,
-              creditsPerValueUnit: input.creditsPerValueUnit,
-              status: "issued",
-              reversal: null,
-              transactionId: transaction.id,
-              issuedAt: new Date().toISOString(),
-              description: input.description?.trim() || null,
-              idempotencyKey: input.idempotencyKey,
-              executionId: execution.executionId,
-              correlationId: execution.correlationId,
-              causationId: execution.causationId,
-            });
-            await issuanceRepository.createWithinTx(issuance, tx);
-            // Consume the record (exactly-once — serialized per record).
-            const consumed = Object.freeze({
-              ...record,
-              state: "CONSUMED" as const,
-              version: record.version + 1,
-              consumedBy: { kind: "credit_issuance" as const, id: issuanceId },
-              executionId: execution.executionId,
-              correlationId: execution.correlationId,
-              causationId: execution.causationId,
-            });
-            await valueRepository.saveWithinTx(consumed, record.version, tx);
-            const buffer = auditWriter.forTransaction(tx);
-            await buffer.append({
-              eventType: ISSUANCE_ISSUED,
-              context: execution,
-              actor: execution.actor?.id ?? null,
-              subject: issuance.id,
-              resourceType: "credit_issuance",
-              resourceId: issuance.id,
-              metadata: {
-                organizationScopeId: issuance.organizationScopeId,
-                beneficiaryPersonId: issuance.beneficiaryPersonId,
-                creditAmount: issuance.creditAmount,
-                sourceValueRecordId: issuance.sourceValueRecordId,
-                sourceValueAmount: issuance.sourceValueAmount,
-                proofOfValueId: issuance.proofOfValueId,
-                creditsPerValueUnit: issuance.creditsPerValueUnit,
-                idempotencyKey: issuance.idempotencyKey,
-                idempotencyRecordId: ctx.recordId,
-                transactionId: tx.transactionId,
-                ledgerTransactionId: transaction.id,
-              },
-            });
-            return issuance;
-          }, execution),
+          idempotency.applyIdempotent(
+            key,
+            (ctx) => service.issueCreditsWithinTx(execution, input, ctx),
+            execution,
+          ),
         valueRecordLockKey(input.sourceValueRecordId),
       );
       logger.info("credit_issuance.issued", {
         issuanceId: applied.result.id,
+        beneficiaryPersonId: applied.result.beneficiaryPersonId,
         creditAmount: applied.result.creditAmount,
         created: applied.executed,
       });
       return { issuance: applied.result, created: applied.executed };
+    },
+
+    async issueCreditsWithinTx(execution, input, ctx) {
+      // NET-W020 remediation (PR #40 review): the SAME issuance body
+      // as the standalone command, on the CALLER'S authoritative
+      // transaction (ctx.transaction). No lock acquisition, no own
+      // idempotency apply — the caller's transaction IS the atomicity
+      // boundary; the exactly-once value consumption (MATURE →
+      // CONSUMED below) makes a re-run inside a surviving transaction
+      // impossible.
+      const tx = ctx.transaction;
+      const record = await valueRepository.findByIdWithinTx(
+        input.sourceValueRecordId,
+        tx,
+      );
+      if (!record) {
+        throw new NotFoundError(
+          `source economic value record not found: ${input.sourceValueRecordId}`,
+          { sourceValueRecordId: input.sourceValueRecordId },
+        );
+      }
+      if (record.organizationScopeId !== input.organizationScopeId) {
+        throw validationError(
+          `source value record ${record.id} belongs to organization scope ${record.organizationScopeId}, not ${input.organizationScopeId}`,
+          {
+            sourceValueRecordId: record.id,
+            recordScope: record.organizationScopeId,
+            inputScope: input.organizationScopeId,
+          },
+        );
+      }
+      if (record.beneficiaryPersonId !== input.beneficiaryPersonId) {
+        throw validationError(
+          `source value record ${record.id} belongs to beneficiary ${record.beneficiaryPersonId}, not ${input.beneficiaryPersonId}`,
+          {
+            sourceValueRecordId: record.id,
+            recordBeneficiary: record.beneficiaryPersonId,
+            inputBeneficiary: input.beneficiaryPersonId,
+          },
+        );
+      }
+      if (record.state === "PENDING") {
+        throw validationError(
+          `source value record ${record.id} is PENDING — pending value cannot be consumed as mature value (architecture-lock invariant 19: mature the record explicitly first)`,
+          { sourceValueRecordId: record.id, state: record.state },
+        );
+      }
+      if (record.state !== "MATURE") {
+        throw validationError(
+          `source value record ${record.id} is ${record.state}, not MATURE — only mature value can issue Participation Credits`,
+          { sourceValueRecordId: record.id, state: record.state },
+        );
+      }
+      // THE PROOF-OF-VALUE GATE (architecture-lock invariant 20):
+      // ≥1 source must be a Proof-of-Value that resolves VERIFIED.
+      const povRefs = record.sources.filter(
+        (s) => s.kind === "proof_of_value",
+      );
+      let verifiedPovId: string | null = null;
+      for (const ref of povRefs) {
+        const resolved = await proofOfValueLookup.resolve(ref.id);
+        if (resolved && resolved.state === "VERIFIED") {
+          verifiedPovId = ref.id;
+          break;
+        }
+      }
+      if (verifiedPovId === null) {
+        throw validationError(
+          `credit issuance against source value record ${record.id} requires a VERIFIED Proof-of-Value reference (architecture-lock invariant 20) — the record's sources carry no VERIFIED Proof-of-Value`,
+          {
+            sourceValueRecordId: record.id,
+            sourceKinds: record.sources.map((s) => s.kind),
+          },
+        );
+      }
+      const creditAmount = computeCreditAmount(
+        record.amount,
+        input.creditsPerValueUnit,
+      );
+      const issuanceId = randomUUID();
+      // THE DUAL-SIDE ISSUANCE POSTINGS (balanced per unit).
+      const transaction = await postLedgerTransactionWithinTx(
+        tx,
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId,
+          kind: "credit_issuance",
+          description: input.description,
+          subject: { kind: "credit_issuance", id: issuanceId },
+          entries: [
+            {
+              accountId: economicAccountId(
+                input.organizationScopeId,
+                input.beneficiaryPersonId,
+                "mature_value",
+                "value",
+              ),
+              accountKind: "mature_value",
+              ownerPersonId: input.beneficiaryPersonId,
+              direction: "debit",
+              amount: record.amount,
+              unit: "value",
+            },
+            {
+              accountId: economicAccountId(
+                input.organizationScopeId,
+                null,
+                "protocol_recognition",
+                "value",
+              ),
+              accountKind: "protocol_recognition",
+              ownerPersonId: null,
+              direction: "credit",
+              amount: record.amount,
+              unit: "value",
+            },
+            {
+              accountId: economicAccountId(
+                input.organizationScopeId,
+                null,
+                "protocol_recognition",
+                "credits",
+              ),
+              accountKind: "protocol_recognition",
+              ownerPersonId: null,
+              direction: "debit",
+              amount: creditAmount,
+              unit: "credits",
+            },
+            {
+              accountId: economicAccountId(
+                input.organizationScopeId,
+                input.beneficiaryPersonId,
+                "credits",
+                "credits",
+              ),
+              accountKind: "credits",
+              ownerPersonId: input.beneficiaryPersonId,
+              direction: "credit",
+              amount: creditAmount,
+              unit: "credits",
+            },
+          ],
+          idempotencyKey: input.idempotencyKey,
+        },
+        ledgerRepository,
+      );
+      const issuance: CreditIssuance = Object.freeze({
+        id: issuanceId,
+        organizationScopeId: input.organizationScopeId,
+        beneficiaryPersonId: input.beneficiaryPersonId,
+        creditAmount,
+        sourceValueRecordId: record.id,
+        sourceValueAmount: record.amount,
+        proofOfValueId: verifiedPovId,
+        creditsPerValueUnit: input.creditsPerValueUnit,
+        status: "issued",
+        reversal: null,
+        transactionId: transaction.id,
+        issuedAt: new Date().toISOString(),
+        description: input.description?.trim() || null,
+        idempotencyKey: input.idempotencyKey,
+        executionId: execution.executionId,
+        correlationId: execution.correlationId,
+        causationId: execution.causationId,
+      });
+      await issuanceRepository.createWithinTx(issuance, tx);
+      // Consume the record (exactly-once — serialized per record).
+      const consumed = Object.freeze({
+        ...record,
+        state: "CONSUMED" as const,
+        version: record.version + 1,
+        consumedBy: { kind: "credit_issuance" as const, id: issuanceId },
+        executionId: execution.executionId,
+        correlationId: execution.correlationId,
+        causationId: execution.causationId,
+      });
+      await valueRepository.saveWithinTx(consumed, record.version, tx);
+      const buffer = auditWriter.forTransaction(tx);
+      await buffer.append({
+        eventType: ISSUANCE_ISSUED,
+        context: execution,
+        actor: execution.actor?.id ?? null,
+        subject: issuance.id,
+        resourceType: "credit_issuance",
+        resourceId: issuance.id,
+        metadata: {
+          organizationScopeId: issuance.organizationScopeId,
+          beneficiaryPersonId: issuance.beneficiaryPersonId,
+          creditAmount: issuance.creditAmount,
+          sourceValueRecordId: issuance.sourceValueRecordId,
+          sourceValueAmount: issuance.sourceValueAmount,
+          proofOfValueId: issuance.proofOfValueId,
+          creditsPerValueUnit: issuance.creditsPerValueUnit,
+          idempotencyKey: issuance.idempotencyKey,
+          idempotencyRecordId: ctx.recordId,
+          transactionId: tx.transactionId,
+          ledgerTransactionId: transaction.id,
+        },
+      });
+      return issuance;
     },
 
     async reverseIssuance(execution, input) {

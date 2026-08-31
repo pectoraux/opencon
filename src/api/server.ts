@@ -4870,6 +4870,118 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // POST /api/settlement/cross-promotion-clearings — execute ONE
+    // cross-promotion clearing (protected; guard action reward.clear;
+    // the deterministic draw through the canonical /settlement
+    // primitive, against a settlement-ready target placement, with
+    // exactly-once semantics per idempotency key AND per
+    // contribution-placement pair).
+    if (
+      path === "/api/settlement/cross-promotion-clearings" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "reward.clear", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.executeCrossPromotionClearing(guarded.execution, guarded.personId, {
+          sourceContributionId: strField(obj, "sourceContributionId"),
+          targetPlacementId: strField(obj, "targetPlacementId"),
+          valueRecordId: strField(obj, "valueRecordId"),
+          ...(obj.clearingRuleId !== undefined
+            ? { clearingRuleId: String(obj.clearingRuleId) }
+            : {}),
+          ...(obj.creditsPerValueUnit !== undefined
+            ? { creditsPerValueUnit: Number(obj.creditsPerValueUnit) }
+            : {}),
+          ...(obj.cashKind !== undefined
+            ? { cashKind: String(obj.cashKind) }
+            : {}),
+          ...(obj.counterpartyPersonId !== undefined
+            ? { counterpartyPersonId: String(obj.counterpartyPersonId) }
+            : {}),
+          ...(obj.cashAmount !== undefined
+            ? { cashAmount: Number(obj.cashAmount) }
+            : {}),
+          ...(obj.description !== undefined
+            ? { description: String(obj.description) }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // GET /api/settlement/cross-promotion-clearings/eligibility — THE
+    // DERIVED eligibility view (public; re-derived from CURRENT
+    // durable records on every read — never stored, never asserted).
+    if (
+      path === "/api/settlement/cross-promotion-clearings/eligibility" &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const view = await runWithExecutionContextAsync(ctx, () =>
+        commands.evaluateCrossPromotionClearing(ctx, {
+          organizationScopeId: url.searchParams.get("organizationScopeId") ?? "",
+          sourceContributionId: url.searchParams.get("sourceContributionId") ?? "",
+          targetPlacementId: url.searchParams.get("targetPlacementId") ?? "",
+          valueRecordId: url.searchParams.get("valueRecordId") ?? "",
+          ...(url.searchParams.get("clearingRuleId") !== null
+            ? { clearingRuleId: url.searchParams.get("clearingRuleId") ?? "" }
+            : {}),
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/settlement/cross-promotion-clearings — the tenant's
+    // clearing records (public; tenant-scoped).
+    if (
+      path === "/api/settlement/cross-promotion-clearings" &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const clearings = await runWithExecutionContextAsync(ctx, () =>
+        commands.listCrossPromotionClearings(ctx, organizationScopeId),
+      );
+      await send(res, 200, { clearings });
+      return true;
+    }
+
+    // GET /api/settlement/cross-promotion-clearings/:id — one clearing
+    // record (public; tenant-scoped; a cross-scope id is not found).
+    if (
+      path.startsWith("/api/settlement/cross-promotion-clearings/") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/settlement/cross-promotion-clearings/".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const view = await runWithExecutionContextAsync(ctx, () =>
+        commands.getCrossPromotionClearing(ctx, organizationScopeId, id),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
     return false;
   }
 

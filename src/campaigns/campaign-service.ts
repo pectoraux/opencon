@@ -197,8 +197,9 @@ function buildEvent(
   });
 }
 
-/** Per-record serialization lock (status-machine check-then-act). */
-function campaignLockKey(campaignId: string): string {
+/** The per-campaign-record serialization lock key (exported for the
+ * composition root's clearing bookkeeping port — NET-W020 remediation). */
+export function campaignLockKey(campaignId: string): string {
   return `campaign_record:${campaignId}`;
 }
 
@@ -1392,58 +1393,12 @@ export function createCampaignService(deps: CampaignServiceDeps): CampaignServic
       const applied = await idempotency.withLock(
         campaignLockKey(campaign.id),
         () =>
-          idempotency.applyIdempotent(key, async (ctx) => {
-            const tx = ctx.transaction;
-            const inTx =
-              (await repository.findByIdWithinTx(campaign.id, tx)) ?? campaign;
-            // In-tx re-check (the record mutex serializes rivals).
-            if (inTx.status !== "ACTIVE") {
-              throw new ConflictError(
-                `campaign ${campaign.id} is ${inTx.status} — clearing executions can only be recorded while ACTIVE`,
-                { campaignId: campaign.id, status: inTx.status },
-              );
-            }
-            const event = buildEvent(
-              "clearing_executed",
-              execution,
-              actor,
-              input.description?.trim() || null,
-              {
-                clearingRuleId: rule.id,
-                objectiveId: rule.objectiveId,
-                basis: rule.basis,
-                drawKind: input.drawKind,
-                valueRecordId: input.valueRecordId,
-                resultId: input.resultId,
-                amount: input.amount,
-                policyVersion: policy.version,
-              },
-            );
-            const updated = withEvent(inTx, event, {});
-            await repository.saveWithinTx(updated, tx);
-            const buffer = auditWriter.forTransaction(tx);
-            await buffer.append({
-              eventType: CAMPAIGN_CLEARING_EXECUTED,
-              context: execution,
-              actor,
-              subject: campaign.id,
-              resourceType: "campaign",
-              resourceId: campaign.id,
-              metadata: {
-                organizationScopeId: campaign.organizationScopeId,
-                campaignId: campaign.id,
-                clearingRuleId: rule.id,
-                drawKind: input.drawKind,
-                valueRecordId: input.valueRecordId,
-                resultId: input.resultId,
-                amount: input.amount,
-                policyVersion: policy.version,
-                idempotencyRecordId: ctx.recordId,
-                transactionId: tx.transactionId,
-              },
-            });
-            return updated;
-          }, execution),
+          idempotency.applyIdempotent(
+            key,
+            (ctx) =>
+              service.recordClearingExecutionWithinTx(execution, input, ctx),
+            execution,
+          ),
       );
       logger.info("campaign.clearing_executed", {
         campaignId: applied.result.id,
@@ -1451,6 +1406,128 @@ export function createCampaignService(deps: CampaignServiceDeps): CampaignServic
         drawKind: input.drawKind,
       });
       return applied.result;
+    },
+
+    async recordClearingExecutionWithinTx(execution, input, ctx) {
+      // NET-W020 remediation (PR #40 review): the SAME bookkeeping body
+      // as the standalone command, on the CALLER'S authoritative
+      // transaction (ctx.transaction). No own idempotency apply, no
+      // campaign-record lock acquisition — the CALLER holds the
+      // campaign lock across the whole composite (the bookkeeping
+      // port's lock key) and the caller's transaction IS the atomicity
+      // boundary.
+      assertIdempotencyKey(input.idempotencyKey);
+      if (!input.clearingRuleId?.trim()) {
+        throw campaignValidationError("clearingRuleId is required", {
+          field: "clearingRuleId",
+        });
+      }
+      if (!input.valueRecordId?.trim()) {
+        throw campaignValidationError("valueRecordId is required", {
+          field: "valueRecordId",
+        });
+      }
+      if (!input.resultId?.trim()) {
+        throw campaignValidationError("resultId is required", {
+          field: "resultId",
+        });
+      }
+      if (
+        input.drawKind !== "reward_allocation" &&
+        input.drawKind !== "credit_issuance" &&
+        input.drawKind !== "cash_obligation"
+      ) {
+        throw campaignValidationError(
+          `drawKind must be one of reward_allocation | credit_issuance | cash_obligation (got ${String(input.drawKind)})`,
+          { drawKind: input.drawKind },
+        );
+      }
+      if (!Number.isFinite(input.amount) || input.amount <= 0) {
+        throw campaignValidationError(
+          "amount must be a positive finite number",
+          { amount: input.amount },
+        );
+      }
+      const actor = actingPersonId(execution);
+      const campaign = await loadCampaign(undefined, input.campaignId);
+      assertOwner(campaign, actor);
+      if (campaign.status !== "ACTIVE") {
+        throw new ConflictError(
+          `campaign ${campaign.id} is ${campaign.status} — clearing executions can only be recorded while ACTIVE`,
+          { campaignId: campaign.id, status: campaign.status },
+        );
+      }
+      const policy = await latestPolicy(campaign.id);
+      if (policy === null) {
+        throw campaignValidationError(
+          `campaign ${campaign.id} has no policy version — the clearing rules are undefined`,
+          { campaignId: campaign.id },
+        );
+      }
+      const rule = policy.clearingRules.find(
+        (r) => r.id === input.clearingRuleId,
+      );
+      if (!rule) {
+        throw new NotFoundError(
+          `clearing rule not found: ${input.clearingRuleId} (policy version ${policy.version})`,
+          {
+            campaignId: campaign.id,
+            clearingRuleId: input.clearingRuleId,
+            policyVersion: policy.version,
+          },
+        );
+      }
+
+      const tx = ctx.transaction;
+      const inTx =
+        (await repository.findByIdWithinTx(campaign.id, tx)) ?? campaign;
+      // In-tx re-check (the caller's campaign lock serializes rivals).
+      if (inTx.status !== "ACTIVE") {
+        throw new ConflictError(
+          `campaign ${campaign.id} is ${inTx.status} — clearing executions can only be recorded while ACTIVE`,
+          { campaignId: campaign.id, status: inTx.status },
+        );
+      }
+      const event = buildEvent(
+        "clearing_executed",
+        execution,
+        actor,
+        input.description?.trim() || null,
+        {
+          clearingRuleId: rule.id,
+          objectiveId: rule.objectiveId,
+          basis: rule.basis,
+          drawKind: input.drawKind,
+          valueRecordId: input.valueRecordId,
+          resultId: input.resultId,
+          amount: input.amount,
+          policyVersion: policy.version,
+        },
+      );
+      const updated = withEvent(inTx, event, {});
+      await repository.saveWithinTx(updated, tx);
+      const buffer = auditWriter.forTransaction(tx);
+      await buffer.append({
+        eventType: CAMPAIGN_CLEARING_EXECUTED,
+        context: execution,
+        actor,
+        subject: campaign.id,
+        resourceType: "campaign",
+        resourceId: campaign.id,
+        metadata: {
+          organizationScopeId: campaign.organizationScopeId,
+          campaignId: campaign.id,
+          clearingRuleId: rule.id,
+          drawKind: input.drawKind,
+          valueRecordId: input.valueRecordId,
+          resultId: input.resultId,
+          amount: input.amount,
+          policyVersion: policy.version,
+          idempotencyRecordId: ctx.recordId,
+          transactionId: tx.transactionId,
+        },
+      });
+      return updated;
     },
 
     // ------------------------------------------------------------------

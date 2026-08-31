@@ -243,12 +243,20 @@ import { createCashService } from "../settlement/cash-service.ts";
 import { createConversionService } from "../settlement/conversion-service.ts";
 import { createStakeService } from "../settlement/stake-service.ts";
 import { createEconomicLedgerService } from "../settlement/ledger-service.ts";
+import {
+  createCrossPromotionClearingService,
+  clearingPairLockKey,
+  CrossPromotionClearingConflictError,
+} from "../settlement/clearing-service.ts";
+import { clearingOperationClass } from "../settlement/clearing-eligibility.ts";
+import { createAuthorityCrossPromotionClearingRepository } from "../settlement/authority-clearing-repository.ts";
 import type {
   AllocateRewardsInput,
   CashService,
   ConversionService,
   CreateRewardPolicyInput,
   CreditService,
+  CrossPromotionClearingService,
   EconomicLedgerService,
   EconomicValueService,
   IssueCreditsInput,
@@ -285,7 +293,7 @@ import {
   createAuthorityCampaignRepository,
   createAuthorityCampaignPolicyRepository,
 } from "../campaigns/authority-campaign-repository.ts";
-import { createCampaignService } from "../campaigns/campaign-service.ts";
+import { createCampaignService, campaignLockKey } from "../campaigns/campaign-service.ts";
 import {
   createAuthorityCreatorProfileRepository,
   createAuthorityCreatorProfileVersionRepository,
@@ -523,6 +531,8 @@ export interface Runtime {
   readonly creatorSponsorshipService: CreatorSponsorshipService;
   // NET-W019 inventory (supply registration + placement context) service.
   readonly inventoryService: InventoryService;
+  // NET-W020 cross-promotion clearing (records + derived eligibility).
+  readonly crossPromotionClearingService: CrossPromotionClearingService;
   // NET-W012 helpful contributions (Proof-of-Helpfulness) service.
   readonly helpfulnessService: HelpfulnessService;
   // NET-W013 quality/moderation/anti-spam services.
@@ -2534,6 +2544,248 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   });
 
   // ------------------------------------------------------------------
+  // NET-W020 — Cross-promotion clearing (issue #39).
+  //
+  // Clearing is an ORCHESTRATION/INTEGRATION concern composed HERE
+  // (the W014 executeCampaignClearing precedent); /settlement stays
+  // the SOLE economic authority and owns the clearing RECORDS (pure
+  // lineage — no postings of its own; no new account/transaction/
+  // value-source kind exists). The neutral lookups below are thin
+  // READ-ONLY adapters over the OWNING authorities (contributions +
+  // W012/W013 derived states; the W019 inventory settlement
+  // readiness; the campaigns clearing rules; the disputes risk/
+  // dispute gate). /workflows is COMPLETELY untouched; /inventory,
+  // /campaigns, /contributions and /disputes are never mutated. NO
+  // AI path (the deterministic quality band is the only W013 signal
+  // consumed and it can only BLOCK).
+  // ------------------------------------------------------------------
+  /** A service execution context for the neutral lookup reads. */
+  function executionContextForLookups(correlationId: string) {
+    return createExecutionContext({
+      correlationId,
+      actor: { id: "clearing-lookup", kind: "service" },
+    });
+  }
+  const clearingContributionLookup = {
+    async resolve(contributionId: string) {
+      // The EXACT W014 recognition-bar views, read-only (lifecycle
+      // state from the /workflows authority's field on the
+      // contribution record; PoH state; derived moderation status;
+      // the latest DETERMINISTIC quality band).
+      const contribution = await contributionRepo.findById(contributionId);
+      if (!contribution) return null;
+      const poh = await proofOfHelpfulnessRepo.findByContributionId(
+        contributionId,
+      );
+      const moderation = await moderationService.getModerationSummary(
+        executionContextForLookups("w020-contribution-moderation"),
+        contributionId,
+      );
+      let qualityBand: string | null = null;
+      const evaluation = await qualityService.getLatestQualityEvaluation(
+        executionContextForLookups("w020-contribution-quality"),
+        contributionId,
+      );
+      if (evaluation) qualityBand = evaluation.band;
+      return {
+        organizationScopeId: contribution.organizationScopeId,
+        lifecycleState: contribution.state,
+        contributorPersonId: contribution.contributorId,
+        proofOfHelpfulnessState: poh ? poh.state : "NONE",
+        moderationStatus: moderation.status,
+        qualityBand,
+      };
+    },
+  };
+  const clearingPlacementLookup = {
+    async readiness(organizationScopeId: string, placementId: string) {
+      // The W019 DERIVED settlement readiness (re-derived from CURRENT
+      // durable records on every read) + the placement's campaign
+      // binding and registered owner. A placement that does not
+      // resolve in the requested scope resolves to null (fail-closed).
+      try {
+        const readiness =
+          await inventoryService.getPlacementSettlementReadiness(
+            executionContextForLookups("w020-placement-readiness"),
+            organizationScopeId,
+            placementId,
+          );
+        const placement = await inventoryPlacementRepo.findById(placementId);
+        if (!placement) return null;
+        return {
+          placementId: readiness.placementId,
+          organizationScopeId: readiness.organizationScopeId,
+          campaignId: readiness.sourceContext.campaignId,
+          campaignPolicyVersion: readiness.sourceContext.campaignPolicyVersion,
+          ownerPersonId: readiness.sourceContext.ownerPersonId,
+          settlementReady: readiness.eligible,
+        };
+      } catch {
+        // A missing or cross-scope placement is NotFoundError — the
+        // lookup resolves null (fail-closed; no existence oracle).
+        return null;
+      }
+    },
+  };
+  const clearingCampaignLookup = {
+    async resolve(campaignId: string) {
+      // /campaigns stays the campaign policy authority: existence +
+      // tenant scope + administrative status + the CURRENT policy
+      // version's declared clearing rules (read-only).
+      const campaign = await campaignRepo.findById(campaignId);
+      if (!campaign) return null;
+      const versions = await campaignPolicyRepo.listByCampaign(campaignId);
+      const latest =
+        versions.length > 0
+          ? versions.reduce((a, b) => (b.version > a.version ? b : a))
+          : null;
+      if (!latest) return null;
+      return {
+        campaignId: campaign.id,
+        organizationScopeId: campaign.organizationScopeId,
+        administrativeStatus: campaign.status,
+        currentPolicyVersion: latest.version,
+        clearingRules: latest.clearingRules.map((rule) => ({
+          id: rule.id,
+          objectiveId: rule.objectiveId,
+          basis: rule.basis,
+          drawKind: rule.drawKind,
+          rewardPolicyId: rule.rewardPolicyId,
+          maxDrawAmount: rule.maxDrawAmount,
+        })),
+      };
+    },
+  };
+  const clearingGateLookup = {
+    async assess(input: {
+      readonly organizationScopeId: string;
+      readonly operationClass: string;
+      readonly recordSubjectIds: readonly string[];
+      readonly personSubjectId: string | null;
+    }) {
+      // The W014 gate discipline as a READ: active HOLD/BLOCK controls
+      // matching the operation class + any record/person subject, then
+      // ACTIVE disputes (OPEN/UNDER_REVIEW/APPEALED — PENDING_STAKE
+      // never gates: griefing resistance). Read-only; /disputes stays
+      // the authority.
+      const execution = executionContextForLookups("w020-gate");
+      const operationClass = input.operationClass as RiskOperationClass;
+      for (const recordSubjectId of input.recordSubjectIds) {
+        const control = await riskControlService.findGatingControl(
+          execution,
+          input.organizationScopeId,
+          operationClass,
+          recordSubjectId,
+          input.personSubjectId,
+        );
+        if (control && (control.action === "HOLD" || control.action === "BLOCK")) {
+          return {
+            clear: false,
+            source: "risk_control",
+            controlId: control.id,
+            disputeId: null,
+            detail: {
+              action: control.action,
+              operationClass: input.operationClass,
+              recordSubjectId,
+              originAssessmentId: control.originAssessmentId,
+              originCaseId: control.originCaseId,
+            },
+          };
+        }
+      }
+      const active = await disputeService.listActiveBySubjectIds(
+        execution,
+        input.organizationScopeId,
+        input.recordSubjectIds,
+      );
+      if (active.length > 0) {
+        const dispute = active[0]!;
+        return {
+          clear: false,
+          source: "active_dispute",
+          controlId: null,
+          disputeId: dispute.id,
+          detail: {
+            disputeState: dispute.state,
+            disputeKind: dispute.kind,
+            subjectType: dispute.subjectRef.subjectType,
+            subjectId: dispute.subjectRef.subjectId,
+          },
+        };
+      }
+      return {
+        clear: true,
+        source: null,
+        controlId: null,
+        disputeId: null,
+        detail: {},
+      };
+    },
+  };
+  const clearingRepo = createAuthorityCrossPromotionClearingRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
+  });
+  // NET-W020 remediation (PR #40 review): the campaign clearing
+  // bookkeeping participates IN the clearing's SINGLE authoritative
+  // transaction through this neutral port — /campaigns stays the
+  // bookkeeping authority (the service's `...WithinTx` body runs on
+  // the caller's transaction), and the port exposes the campaign
+  // record's own serialization key so the composite holds it ACROSS
+  // the transaction.
+  const clearingCampaignBookkeeping = {
+    async recordClearingExecutionWithinTx(
+      execution: import("../core/execution-context.ts").ExecutionContext,
+      input: import("../settlement/port.ts").ClearingCampaignBookkeepingInput,
+      ctx: import("../core/idempotency.ts").IdempotentApplyContext,
+    ) {
+      const updated = await campaignService.recordClearingExecutionWithinTx(
+        execution,
+        {
+          campaignId: input.campaignId,
+          clearingRuleId: input.clearingRuleId,
+          drawKind: input.drawKind,
+          valueRecordId: input.valueRecordId,
+          resultId: input.resultId,
+          amount: input.amount,
+          description: input.description,
+          idempotencyKey: input.idempotencyKey,
+        },
+        ctx,
+      );
+      return {
+        campaignId: updated.id,
+        eventCount: updated.events.length,
+      };
+    },
+    bookkeepingLockKey(campaignId: string) {
+      return campaignLockKey(campaignId);
+    },
+  };
+  const crossPromotionClearingService = createCrossPromotionClearingService({
+    clearingRepository: clearingRepo,
+    valueRepository: economicValueRepo,
+    allocationRepository: rewardAllocationRepo,
+    issuanceRepository: creditIssuanceRepo,
+    obligationRepository: cashObligationRepo,
+    lookups: {
+      contribution: clearingContributionLookup,
+      placement: clearingPlacementLookup,
+      campaign: clearingCampaignLookup,
+      gate: clearingGateLookup,
+    },
+    rewardService,
+    creditService,
+    cashService,
+    rewardPolicyRepository: rewardPolicyRepo,
+    campaignBookkeeping: clearingCampaignBookkeeping,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("settlement"),
+  });
+
+  // ------------------------------------------------------------------
   // NET-W009 §3.7 ECONOMIC GATE (the lock-invariant-21 enforcement
   // point). The composition root — NOT the risk domain, NOT the
   // settlement domain — consults the active-control registry before
@@ -2898,6 +3150,28 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       convertedAt: conversion.convertedAt,
       description: conversion.description,
       idempotencyKey: conversion.idempotencyKey,
+    };
+  }
+  function toCrossPromotionClearingView(
+    clearing: import("../settlement/port.ts").CrossPromotionClearingRecord,
+  ) {
+    return {
+      id: clearing.id,
+      organizationScopeId: clearing.organizationScopeId,
+      campaignId: clearing.campaignId,
+      campaignPolicyVersion: clearing.campaignPolicyVersion,
+      clearingRuleId: clearing.clearingRuleId,
+      sourceContributionId: clearing.sourceContributionId,
+      targetPlacementId: clearing.targetPlacementId,
+      valueRecordId: clearing.valueRecordId,
+      drawKind: clearing.drawKind,
+      drawResultId: clearing.drawResultId,
+      drawTransactionId: clearing.drawTransactionId,
+      amount: clearing.amount,
+      eligibility: clearing.eligibility as unknown as Record<string, unknown>,
+      status: clearing.status,
+      clearedAt: clearing.clearedAt,
+      idempotencyKey: clearing.idempotencyKey,
     };
   }
   function toLedgerTransactionView(
@@ -7647,6 +7921,108 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         valueState: value.state,
       };
     },
+
+    // -- NET-W020 cross-promotion clearing commands ----------------------
+    /**
+     * Composite 1 (AC-01..07): execute ONE cross-promotion clearing —
+     * the deterministic draw of a qualifying source contribution's
+     * MATURE value through the canonical /settlement primitive the
+     * campaign's clearing rule selects, against a settlement-ready
+     * target placement (the W019 derived gate), capped by the rule's
+     * maxDrawAmount, gated by risk controls + ACTIVE disputes over
+     * the value record, ALL upstream sources and the placement (with
+     * the value beneficiary AND the placement owner as person
+     * subjects), recorded as the durable clearing record + campaign
+     * bookkeeping (references only).
+     *
+     * NET-W020 REMEDIATION (PR #40 review — the single authoritative
+     * transaction boundary): the WHOLE operation is ONE exactly-once
+     * economic unit in ONE authoritative transaction owned by the
+     * settlement domain's executeCrossPromotionClearing (the draw, the
+     * clearing record, the campaign bookkeeping and the audit lineage
+     * commit together or not at all — a failed authoritative COMMIT
+     * leaves NO partial economic mutation). This adapter is the thin
+     * composition-root bridge: input coercion + the view mapping over
+     * the committed composite result; the same-key replay returns the
+     * stored result verbatim (created:false).
+     */
+    async executeCrossPromotionClearing(execution, _actorPersonId, input) {
+      const result = await crossPromotionClearingService.executeCrossPromotionClearing(
+        getExecutionContext() ?? execution,
+        {
+          sourceContributionId: input.sourceContributionId as string,
+          targetPlacementId: input.targetPlacementId as string,
+          valueRecordId: input.valueRecordId as string,
+          idempotencyKey: input.idempotencyKey as string,
+          ...(input.clearingRuleId !== undefined
+            ? { clearingRuleId: input.clearingRuleId as string }
+            : {}),
+          ...(input.creditsPerValueUnit !== undefined
+            ? { creditsPerValueUnit: input.creditsPerValueUnit as number }
+            : {}),
+          ...(input.cashKind !== undefined
+            ? { cashKind: input.cashKind as string }
+            : {}),
+          ...(input.counterpartyPersonId !== undefined
+            ? { counterpartyPersonId: input.counterpartyPersonId as string }
+            : {}),
+          ...(input.cashAmount !== undefined
+            ? { cashAmount: input.cashAmount as number }
+            : {}),
+          ...(input.description !== undefined
+            ? { description: input.description as string }
+            : {}),
+        },
+      );
+      return {
+        drawKind: result.drawKind,
+        clearing: toCrossPromotionClearingView(result.clearing),
+        ...(result.allocation !== undefined
+          ? { allocation: toRewardAllocationView(result.allocation) }
+          : {}),
+        ...(result.issuance !== undefined
+          ? { issuance: toCreditIssuanceView(result.issuance) }
+          : {}),
+        ...(result.obligation !== undefined
+          ? { obligation: toCashObligationView(result.obligation) }
+          : {}),
+        created: result.created,
+        value: toEconomicValueView(result.value),
+        campaignEventCount: result.campaignEventCount,
+      };
+    },
+    /** The DERIVED eligibility view (AC-02; public read). */
+    async evaluateCrossPromotionClearing(execution, input) {
+      return crossPromotionClearingService.evaluateClearingEligibility(
+        getExecutionContext() ?? execution,
+        {
+          organizationScopeId: input.organizationScopeId as string,
+          sourceContributionId: input.sourceContributionId as string,
+          targetPlacementId: input.targetPlacementId as string,
+          valueRecordId: input.valueRecordId as string,
+          ...(input.clearingRuleId !== undefined
+            ? { clearingRuleId: input.clearingRuleId as string }
+            : {}),
+        },
+      );
+    },
+
+    async getCrossPromotionClearing(execution, organizationScopeId, clearingId) {
+      const clearing = await crossPromotionClearingService.getCrossPromotionClearing(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        clearingId,
+      );
+      return toCrossPromotionClearingView(clearing);
+    },
+
+    async listCrossPromotionClearings(execution, organizationScopeId) {
+      const clearings = await crossPromotionClearingService.listCrossPromotionClearings(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+      );
+      return clearings.map(toCrossPromotionClearingView);
+    },
   };
 
   const registry = createModuleRegistry(snapshot, logger);
@@ -7786,6 +8162,8 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     creatorSponsorshipService,
     // NET-W019 inventory (supply registration + placement context).
     inventoryService,
+    // NET-W020 cross-promotion clearing (records + derived eligibility).
+    crossPromotionClearingService,
     helpfulnessService,
     // NET-W013 quality/moderation/anti-spam services + LLM providers.
     qualityService,

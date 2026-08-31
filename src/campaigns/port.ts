@@ -61,7 +61,10 @@ import type {
   PostgresAuthority,
 } from "../core/postgres-authority.ts";
 import type { TransactionalAuditWriter } from "../core/audit.ts";
-import type { IdempotencyStore } from "../core/idempotency.ts";
+import type {
+  IdempotencyStore,
+  IdempotentApplyContext,
+} from "../core/idempotency.ts";
 import type {
   CampaignClearingBasis,
   CampaignClearingDrawKind,
@@ -721,6 +724,25 @@ export interface CampaignService {
   recordClearingExecution(
     execution: ExecutionContext,
     input: RecordClearingExecutionInput,
+  ): Promise<CampaignRecord>;
+  /**
+   * NET-W020 remediation (PR #40 review — the single authoritative
+   * transaction boundary): the SAME bookkeeping body as
+   * recordClearingExecution, executed on the CALLER'S authoritative
+   * transaction (the apply context's transaction) instead of opening
+   * its own — the cross-promotion clearing commits its economic draw,
+   * its clearing record, THIS campaign event and the audit lineage in
+   * ONE transaction (or nothing at all). Validations + the committed
+   * pre-reads (owner, ACTIVE status, current policy rule) are
+   * identical to the standalone command; the ACTIVE re-check and the
+   * event append run in-tx. Returns the updated campaign record (the
+   * caller participates in the SAME transaction and reads the
+   * tx-visible state).
+   */
+  recordClearingExecutionWithinTx(
+    execution: ExecutionContext,
+    input: RecordClearingExecutionInput,
+    ctx: IdempotentApplyContext,
   ): Promise<CampaignRecord>;
 
   /**

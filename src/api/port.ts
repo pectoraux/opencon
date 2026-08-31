@@ -3074,6 +3074,58 @@ export interface ApiCommands {
     created: boolean;
     valueState: string;
   }>;
+
+  // -----------------------------------------------------------------
+  // NET-W020 — cross-promotion clearing (issue #39).
+  // -----------------------------------------------------------------
+
+  /**
+   * Execute ONE cross-promotion clearing — the composition-root
+   * composite over the existing authorities (protected; the
+   * deterministic draw of a qualifying source contribution's MATURE
+   * value through the canonical /settlement primitive the campaign's
+   * clearing rule selects, against a settlement-ready target placement
+   * (the W019 derived gate); risk/dispute-gated; recorded as the
+   * durable clearing record + campaign bookkeeping; exactly-once per
+   * idempotency key and per contribution-placement pair).
+   */
+  executeCrossPromotionClearing(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{
+    drawKind: string;
+    clearing: Record<string, unknown>;
+    allocation?: Record<string, unknown>;
+    issuance?: Record<string, unknown>;
+    obligation?: Record<string, unknown>;
+    created: boolean;
+    value: Record<string, unknown>;
+    campaignEventCount: number;
+  }>;
+
+  /**
+   * The DERIVED cross-promotion clearing eligibility view (public
+   * read; re-derived from CURRENT authoritative records on every
+   * call — never stored, never caller-asserted).
+   */
+  evaluateCrossPromotionClearing(
+    execution: ExecutionContext,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /** One clearing record by id (public; tenant-scoped). */
+  getCrossPromotionClearing(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    clearingId: string,
+  ): Promise<Record<string, unknown>>;
+
+  /** The tenant's clearing records (public; tenant-scoped). */
+  listCrossPromotionClearings(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+  ): Promise<readonly Record<string, unknown>[]>;
 }
 
 export type { ExecutionContext };
