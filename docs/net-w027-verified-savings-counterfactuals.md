@@ -1,11 +1,11 @@
 # NET-W027 Evidence Ledger — Verified savings and counterfactuals
 
-**Status:** COMPLETE — implementation + verification green, PR pending  
+**Status:** COMPLETE — implementation + verification green; PR #55 open with green CI, awaiting architect review  
 **Issue:** #54 (open — READY_FOR_IMPLEMENTATION)  
 **Dependency:** NET-W026 merged at `6b8d8424587405aae7e0d8b8ea6bd5e48a5e0936`; NET-W006 merged (the `/outcomes` measurement authority)  
 **Architecture:** v1.0 frozen  
 **Implementation branch:** `feat/net-w027-verified-savings-counterfactuals`  
-**Implementation PR:** TBD (the single canonical PR, `Closes #54`)
+**Implementation PR:** #55 (`Closes #54`; head `e2b2b2c`)
 
 ## Evidence status
 
@@ -14,12 +14,12 @@
 | Canonical issue | #54 OPEN (READY_FOR_IMPLEMENTATION) |
 | Canonical work order | `spec/work-orders/NET-W027.md` (authored on activation) |
 | Implementation branch | `feat/net-w027-verified-savings-counterfactuals` (prepared from merged W026 baseline at `6b8d842`, fast-forwarded through the W027 activation docs at `640ffe6`) |
-| Implementation PR | TBD |
+| Implementation PR | **#55 OPEN** (head `e2b2b2c`; verification-status comment id 5489976046) |
 | Architect review | PENDING (approval to be recorded in the PR — the same-account limitation precedent) |
-| CI | PENDING (`verify` + real PostgreSQL/Redis `integration`) |
+| CI | **GREEN** — 4/4 checks on BOTH events at head `e2b2b2c`: `verify` (typecheck + architecture + authority + unit tests) + `integration` (real PostgreSQL 17 + Redis 7); `mergeable_state: clean` |
 | Mutation suite | **7/7 caught** (counterfactual-interval, qualifying-source, anchor-in-digest, unsupported-record, tenant-scope, idempotency, staleness/supersession) |
 | Local full verification | **1727 pass / 15 skip / 0 fail / 20861 expect() / 1742 tests / 223 files**; `arch:check` + `authority:check` **298 files / 0 violations**; typecheck clean |
-| Real PostgreSQL/Redis integration | PENDING (CI integration job with postgres:17 + redis:7 service containers) |
+| Real PostgreSQL/Redis integration | **GREEN** (CI integration job with postgres:17 + redis:7 service containers, both events) |
 
 ## Architectural guardrails (verified)
 
@@ -93,5 +93,8 @@ Driver: `opencon-tmp/w027-mutation-driver.py` outside the repository; never comm
 
 ## Review history
 
-- Implementation + local verification complete on `feat/net-w027-verified-savings-counterfactuals` (work order authored on activation per `spec/PROJECT-STATE.md`'s current action).
-- Next: commit + push the branch, open the single canonical PR (`Closes #54`), CI, the verification-status comment, architect review. On APPROVED: merge, advance durable state to W028; on CHANGES REQUESTED: remediate on the SAME PR.
+- Implementation + local verification complete on `feat/net-w027-verified-savings-counterfactuals` (work order authored on activation per `spec/PROJECT-STATE.md`'s current action; implementation commit `e2b2b2c`).
+- The single canonical PR **#55** opened (`Closes #54`) with the full authority-model, implementation-shape, design-decision and verification description.
+- CI GREEN on BOTH events at head `e2b2b2c`: `verify` (typecheck + architecture + authority + unit tests) success + `integration` (real PostgreSQL + Redis) success — 4/4 checks; `mergeable_state: clean`.
+- The verification-status comment posted (id 5489976046) with the complete local gate table, mutation table and boundary-compliance record.
+- PR #55 left UNMERGED per the standing protocol, awaiting architect review. On APPROVED: merge, update `spec/PROJECT-STATE.md` + roadmap pointers with the merge SHA, activate NET-W028 (Benefit Pools). On CHANGES REQUESTED: remediate on the SAME branch/PR.
