@@ -87,8 +87,8 @@ Composition-root orchestration is allowed, but an orchestration function must no
 ### Phase 7 — Demand economy
 
 - **NET-W024 — Consumer Demand Pools** — **COMPLETE**. Privacy-preserving consumer demand aggregation inside `/demand`: tenant-scoped pools, private consented commitments, the frozen disclosure floor, derived qualified-aggregate supplier views (never stored, never caller-asserted); zero economic surface.
-- **NET-W025 — Business procurement pools** — **CURRENT IMPLEMENTATION TARGET**. Aggregate business procurement demand while minimizing disclosure of competitively sensitive information — built on the W024 privacy model inside the same `/demand` boundary, with explicit organization/actor authorization and competition-policy-governed deterministic qualified aggregates.
-- **NET-W026 — Supplier offers and competitive selection** — **PLANNED**.
+- **NET-W025 — Business procurement pools** — **COMPLETE**. Privacy/competition-preserving business demand aggregation inside `/demand`, with dual server-enforced membership, frozen commitment and distinct-organization floors, deterministic qualification, and minimized supplier-facing demand. Merged in PR #51 as `bcaf81b82088688af701f1a90242cc61b1fdd094`.
+- **NET-W026 — Supplier offers and competitive selection** — **CURRENT IMPLEMENTATION TARGET**. Extend the same `/demand` procurement authority with authorized supplier offers, server-derived hard eligibility and deterministic competitive selection without weakening W025 privacy or introducing economic authority.
 - **NET-W027 — Verified savings and counterfactuals** — **PLANNED**.
 - **NET-W028 — Benefit Pools** — **PLANNED**.
 
@@ -143,29 +143,52 @@ supplier-facing minimized demand view
 /settlement stays the sole economic authority (zero demand-side economic surface)
 ```
 
+### W025 outcome
+
+NET-W025 is complete. Its authoritative work order and evidence ledger remain in `spec/work-orders/NET-W025.md` and `docs/net-w025-business-procurement-pools.md`; implementation merged to `main` at `bcaf81b82088688af701f1a90242cc61b1fdd094` after green CI and architect approval.
+
+## W026 implementation contract
+
+### Authority model
+
+```text
+NET-W025 qualified business demand
+        ↓
+supplier offers (tenant/pool scoped, durable, provenance + validity)
+        ↓
+server-derived hard eligibility
+        ↓
+deterministic competitive ranking / selection
+        ↓
+auditable selection result
+        ↓
+/settlement remains the SOLE economic authority
+```
+
 ### Inputs
 
-- business demand commitments: bounded provider-neutral procurement category + attribute vocabulary (region, quantity, budget band, unit-price band, delivery-timing window) with explicit server-written consent, each naming the buyer organization on whose behalf the acting person commits (the actor must hold ACTIVE membership in BOTH the tenant and the named buyer organization — server-resolved, never client-asserted);
-- tenant-scoped procurement-pool records with explicit, versioned qualification policy (commitment threshold + distinct-organization threshold);
-- organization membership facts resolved read-only through the neutral lookup (server-enforced authorization/consent);
-- nothing else: no activity, spend, wealth, reputation or economic-source assertion may influence qualification.
+- qualified NET-W025 procurement demand and its minimized supplier-facing contract;
+- supplier identities and memberships resolved server-side through existing identity/organization authorities;
+- bounded provider-neutral offer attributes, validity/effective windows and provenance;
+- explicit bounded/versioned selection policy and deterministic tie-breaking;
+- nothing that exposes individual buyer commitments or exact competitor terms.
 
 ### Required behavior
 
-1. Procurement pools and business commitments are first-class, tenant-scoped, durable records with explicit provenance and server-written consent grants.
-2. Commitment eligibility requires server-side authorization (guard policy + active tenant membership + active buyer-organization membership) and correct tenant scope; client claims never fabricate either.
-3. Aggregate demand is derived from authoritative commitment records at evaluation time; no caller-provided aggregate, count or qualification is trusted; nothing aggregate is stored as asserted truth.
-4. Individual business commitments are private AND competitively sensitive: supplier-facing outputs are counts/bounded distributions only, emitted only above the frozen commitment floor AND the frozen distinct-organization floor, with below-floor groups suppressed (counted, never named); exact competitor quantities, prices, budgets and timing never appear in any normal output.
-5. Qualification is deterministic and reproducible: one explicit evaluation anchor, canonical digest over the aggregate facts, fixed orderings.
-6. Threshold/competition policy is explicit and versioned and cannot be caller-asserted at evaluation; the privacy/competition floors are frozen constants no policy can lower.
-7. Pool closure and commitment withdrawal are one-way field mutations (no local status machinery; `/workflows` untouched).
-8. Cross-tenant references fail closed as not-found with no existence oracle.
-9. Material mutations are idempotent (composite keys), concurrency-safe (per-pool locking), and atomically audited on ONE authoritative transaction; failed commits leave no partial procurement-pool state.
-10. No economic mutation surface exists in `/demand`: no ledger, credits, cash, stakes, rewards; no new domain boundary; no supplier-offer/selection (W026), savings/counterfactual (W027) or Benefit-Pool (W028) semantics.
+1. Supplier offers are first-class tenant/pool-scoped durable records with explicit provenance and validity.
+2. Offers can only compete against currently qualified NET-W025 demand. Closed, withdrawn or unqualified demand is a hard gate.
+3. Supplier hard eligibility is server-derived and cannot be caller-asserted.
+4. Competitive ranking and selection are deterministic and reproducible for identical authoritative state and evaluation anchor.
+5. Buyer commitments remain private: no buyer IDs, commitment IDs, exact competitor quantities, prices, budgets or timing may cross supplier-facing surfaces.
+6. Any material offer/selection mutation follows the established idempotency → concurrency → one authoritative transaction → transactional audit → post-commit publication pattern.
+7. AI, if later introduced, may advise ranking only after hard eligibility and may never authorize eligibility, privacy release, selection, tenancy or economic mutation.
+8. `/settlement` remains the sole economic authority. No `/demand` offer/selection command mints value or creates credits, balances, cash obligations, rewards or payment instructions.
+9. `/workflows` remains lifecycle authority; no local transition machinery.
+10. W027 savings/counterfactual and W028 Benefit Pool semantics remain excluded.
 
-### Evidence gate
+### Required evidence
 
-W025 is mergeable only after implementation, acceptance coverage (privacy, competition-sensitive disclosure, authorization, aggregation, tenancy, idempotency, concurrency, atomicity), mutation checks for privacy/minimization, authorization/tenant scope and threshold/disclosure bypasses, `bun run verify`, configured real PostgreSQL/Redis integration, exactly one implementation PR, and architect approval are all complete.
+One-to-one AC-01..08 coverage, W025 privacy-preservation regressions, tenant/authorization fail-closed coverage, deterministic ranking/selection tests, nondeterminism mutation checks, idempotency/concurrency/atomicity tests, economic-bypass regression, architecture/authority checks, secret/config scan, `bun run verify`, and configured real PostgreSQL/Redis integration.
 
 ## Work-item operating procedure
 
