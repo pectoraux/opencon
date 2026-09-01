@@ -181,6 +181,15 @@ export interface EvidenceRepository {
   saveWithinTx(evidence: Evidence, tx: AuthorityTransaction): Promise<Evidence>;
   /** Read an evidence record by id (committed state). */
   findById(id: string): Promise<Evidence | null>;
+  /**
+   * NET-W029 (additive, non-breaking): read an evidence record by id
+   * INSIDE a caller-owned authoritative transaction. Signed-attestation
+   * coverage re-derives the covered digests IN the authoritative
+   * transaction (work order §3.7), so the in-tx twin is required for the
+   * evidence coverage family. Sees uncommitted writes made in the same
+   * transaction; existing consumers that never call it are unaffected.
+   */
+  findByIdWithinTx(id: string, tx: AuthorityTransaction): Promise<Evidence | null>;
   /** List evidence records supporting a subject (committed state). */
   listBySubject(subjectId: string): Promise<readonly Evidence[]>;
   /** Check existence. */
@@ -595,10 +604,454 @@ export interface ProofOfValueService {
   ): Promise<ProofOfValueTransitionResult>;
 }
 
+// ---------------------------------------------------------------------
+// NET-W029 — Cryptographic attestations and commitments (issue #58).
+//
+// EXTENDS the W005 attestation/commitment foundation — never rewrites
+// it. The W005 contracts above (Attestation, AttestationSigner,
+// AttestationVerifier, and the "attestation/v1" canonical digest-input
+// discipline in attestation-service.ts) stay byte-for-byte untouched;
+// everything below is ADDITIVE.
+//
+// W029 adds, inside the SAME frozen /evidence boundary:
+//  - production-grade SIGNED attestations behind new versioned
+//    signer/verifier interfaces, with CLOSED, VERSIONED algorithm and
+//    key-reference vocabularies (real asymmetric cryptography —
+//    Ed25519 / ECDSA P-256 via node:crypto — implemented in the
+//    composition root behind the injected interfaces; key material
+//    resolves ONLY through the SecretProvider and never enters this
+//    domain);
+//  - coverage extension beyond evidence records to the authoritative
+//    record families the frozen architecture already owns (reputation
+//    inputs, settlement value records) — referenced read-only by
+//    canonical id through NEUTRAL lookups wired at the composition
+//    root (the W021/W027/W028 dependency-inversion precedent);
+//  - deterministic server-side verification that fails closed with
+//    MACHINE-READABLE reasons (a closed reason vocabulary), including
+//    tamper detection over the statement, the covered set, the
+//    underlying records, the signature, the algorithm and the key
+//    reference, and current-state containment (a REVERSED covered
+//    value record never verifies as current);
+//  - the established composite idempotency + ONE authoritative
+//    transaction + transactional audit discipline for material
+//    mutations — the covered digests re-derive INSIDE the transaction;
+//  - one-way revocation (a revoked signed attestation never verifies
+//    again; the W028 closure precedent — no lifecycle machinery, no
+//    /workflows extension).
+//
+// PostgreSQL remains THE authoritative state for every record: an
+// attestation never mints, mutates or resurrects semantic authority.
+// Cryptography is an integrity/provenance layer, never a consensus
+// layer (no blockchain, no network validation, no token economics).
+//
+// Work order: spec/work-orders/NET-W029.md; issue #58; requirements
+// EVID-006 + PRIV-003.
+// ---------------------------------------------------------------------
+
+/** The record format marker for NET-W029 signed attestations. */
+export const SIGNED_ATTESTATION_RECORD_FORMAT = "NET-W029:1" as const;
+
+/**
+ * The CLOSED, VERSIONED signature algorithm vocabulary (work order
+ * §3.2). `ed25519/v1` and `ecdsa-p256/v1` are real asymmetric
+ * production algorithms (node:crypto, wired in the composition root
+ * behind the injected interfaces); `hmac-sha256/v1` is the symmetric
+ * production path that reuses the existing ATTESTATION_SIGNING_KEY
+ * secret. Identifiers are versioned: a future algorithm revision is a
+ * NEW vocabulary entry, never an in-place rewrite.
+ */
+export const SIGNED_ATTESTATION_ALGORITHMS = [
+  "ed25519/v1",
+  "ecdsa-p256/v1",
+  "hmac-sha256/v1",
+] as const;
+
+export type SignedAttestationAlgorithm = (typeof SIGNED_ATTESTATION_ALGORITHMS)[number];
+
+export function isSignedAttestationAlgorithm(
+  value: string,
+): value is SignedAttestationAlgorithm {
+  return (SIGNED_ATTESTATION_ALGORITHMS as readonly string[]).includes(value);
+}
+
+/**
+ * The CLOSED, VERSIONED key-reference vocabulary (work order §3.2). A
+ * key reference names WHICH key material (resolved exclusively
+ * through the SecretProvider at the composition root) produced and
+ * verifies a signature. `attestation-signing/dev-insecure/v1` is the
+ * WELL-KNOWN development/test default — clearly marked, and never
+ * selected in production/staging (the composition root fails closed
+ * there, exactly as the W005 remediation does for the HMAC key).
+ */
+export const SIGNED_ATTESTATION_KEY_REFERENCES = [
+  "attestation-signing/ed25519/v1",
+  "attestation-signing/ecdsa-p256/v1",
+  "attestation-signing/hmac/v1",
+  "attestation-signing/dev-insecure/v1",
+] as const;
+
+export type SignedAttestationKeyReference =
+  (typeof SIGNED_ATTESTATION_KEY_REFERENCES)[number];
+
+export function isSignedAttestationKeyReference(
+  value: string,
+): value is SignedAttestationKeyReference {
+  return (SIGNED_ATTESTATION_KEY_REFERENCES as readonly string[]).includes(value);
+}
+
+/**
+ * The frozen algorithm → key-reference pairing. A signed attestation's
+ * (algorithm, keyReference) pair MUST match this map: hmac-sha256/v1
+ * pairs with EITHER the production hmac reference or the well-known
+ * dev-insecure reference; the asymmetric algorithms pair with exactly
+ * their own reference.
+ */
+export const SIGNED_ATTESTATION_KEY_REFERENCE_BY_ALGORITHM: Readonly<
+  Record<SignedAttestationAlgorithm, readonly SignedAttestationKeyReference[]>
+> = Object.freeze({
+  "ed25519/v1": ["attestation-signing/ed25519/v1"],
+  "ecdsa-p256/v1": ["attestation-signing/ecdsa-p256/v1"],
+  "hmac-sha256/v1": ["attestation-signing/hmac/v1", "attestation-signing/dev-insecure/v1"],
+});
+
+/**
+ * The CLOSED coverage-family vocabulary (work order §3.3): the
+ * authoritative record families a signed attestation may cover —
+ * evidence records (W005, this boundary), reputation inputs (W007) and
+ * settlement value records (W008) — each referenced read-only by
+ * canonical id through neutral lookups. No 17th domain; no other
+ * family can be covered without a frozen-vocabulary change.
+ */
+export const SIGNED_ATTESTATION_COVERAGE_FAMILIES = [
+  "evidence",
+  "reputation_input",
+  "settlement_value",
+] as const;
+
+export type SignedAttestationCoverageFamily =
+  (typeof SIGNED_ATTESTATION_COVERAGE_FAMILIES)[number];
+
+export function isSignedAttestationCoverageFamily(
+  value: string,
+): value is SignedAttestationCoverageFamily {
+  return (SIGNED_ATTESTATION_COVERAGE_FAMILIES as readonly string[]).includes(value);
+}
+
+/** Upper bound on covered records per signed attestation (bounded declaration set). */
+export const SIGNED_ATTESTATION_MAX_COVERAGE_RECORDS = 64;
+
+/**
+ * One covered record on a signed attestation: the family + canonical
+ * record id + the STORED coverage commitment (a salted sha256
+ * commitment over the record's canonical facts — payload-hiding,
+ * binding; PRIV-003). The commitment is derived server-side INSIDE the
+ * authoritative transaction at creation; verification rebuilds the
+ * canonical input from these STORED digests — never from plaintext.
+ */
+export interface SignedAttestationCoverageEntry {
+  readonly family: SignedAttestationCoverageFamily;
+  readonly recordId: string;
+  readonly commitment: EvidenceCommitment;
+}
+
+/**
+ * Structural (neutral) view of a reputation input as seen by the
+ * /evidence coverage layer. Wired at the composition root over the
+ * /reputation authority's OWN repository (read-only; the reputation
+ * port stays untouched). Full field set: the coverage commitment binds
+ * the record's substantive content (reputation inputs are immutable +
+ * append-only, so the whole record is substantive).
+ */
+export interface ReputationInputCoverageFacts {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string;
+  readonly dimension: string;
+  readonly basis: string;
+  readonly sources: readonly { readonly kind: string; readonly id: string }[];
+  readonly description: string | null;
+  readonly occurredAt: string;
+  readonly recordedAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+/**
+ * ReputationInputCoverageLookup — neutral read path for the
+ * reputation_input coverage family (committed + in-tx twins; the
+ * composition root adapts the /reputation input repository).
+ */
+export interface ReputationInputCoverageLookup {
+  resolve(id: string): Promise<ReputationInputCoverageFacts | null>;
+  resolveWithinTx(id: string, tx: AuthorityTransaction): Promise<ReputationInputCoverageFacts | null>;
+}
+
+/**
+ * Structural (neutral) view of a settlement value record as seen by
+ * the /evidence coverage layer. Wired at the composition root over the
+ * /settlement authority's OWN value-record repository (read-only; the
+ * settlement port stays untouched).
+ *
+ * The SUBSTANTIVE fields (beneficiary, amount, sources, maturation,
+ * recognition lineage) participate in the coverage commitment; the
+ * LIFECYCLE fields (`state`, `version`, `maturedAt`, `consumedBy`,
+ * `reversal`) deliberately do NOT — legitimate lifecycle progression
+ * (PENDING → MATURE → CONSUMED) must not invalidate an otherwise-sound
+ * attestation, while lifecycle INVALIDATION (REVERSED) is caught by the
+ * explicit current-state gate with the precise machine-readable reason
+ * (an attestation can never make revoked/invalidated authoritative
+ * state verify as current — work order §3.4).
+ */
+export interface SettlementValueCoverageFacts {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly beneficiaryPersonId: string;
+  /** Current authoritative lifecycle state (PENDING | MATURE | CONSUMED | REVERSED). */
+  readonly state: string;
+  readonly version: number;
+  readonly amount: number;
+  readonly sources: readonly { readonly kind: string; readonly id: string }[];
+  readonly maturation: Readonly<Record<string, unknown>>;
+  readonly description: string | null;
+  readonly recordedAt: string;
+  readonly recognitionTransactionId: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+/**
+ * SettlementValueCoverageLookup — neutral read path for the
+ * settlement_value coverage family (committed + in-tx twins; the
+ * composition root adapts the /settlement value-record repository).
+ */
+export interface SettlementValueCoverageLookup {
+  resolve(id: string): Promise<SettlementValueCoverageFacts | null>;
+  resolveWithinTx(id: string, tx: AuthorityTransaction): Promise<SettlementValueCoverageFacts | null>;
+}
+
+/** The neutral coverage lookups bundle injected into the service. */
+export interface SignedAttestationCoverageLookups {
+  readonly reputationInput: ReputationInputCoverageLookup;
+  readonly settlementValue: SettlementValueCoverageLookup;
+}
+
+/**
+ * A SignedAttestation — a verifier's cryptographically signed statement
+ * binding a set of authoritative records across the closed coverage
+ * families (work order §3.2/§3.3).
+ *
+ * Invariants:
+ *  - the record is IMMUTABLE after creation except the ONE-WAY
+ *    revocation fields (`revokedAt`/`revocationReason`; the W028
+ *    closure precedent — never a lifecycle transition);
+ *  - `algorithm` ∈ SIGNED_ATTESTATION_ALGORITHMS and `keyReference` ∈
+ *    SIGNED_ATTESTATION_KEY_REFERENCES and the pair matches the frozen
+ *    pairing map (closed, versioned vocabularies);
+ *  - `coverage` is sorted by (family, recordId), non-empty, bounded by
+ *    SIGNED_ATTESTATION_MAX_COVERAGE_RECORDS, and every entry carries
+ *    the STORED coverage commitment derived in-tx at creation;
+ *  - the signature covers the "attestation/v2" canonical digest input
+ *    (statement + verifier + algorithm + key reference + coverage
+ *    lines built from the STORED digests) — verification NEVER requires
+ *    plaintext disclosure of any covered material (PRIV-003);
+ *  - lineage identifiers trace the record to its creating execution.
+ */
+export interface SignedAttestation {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly verifierId: string;
+  readonly statement: string;
+  readonly coverage: readonly SignedAttestationCoverageEntry[];
+  readonly algorithm: SignedAttestationAlgorithm;
+  readonly keyReference: SignedAttestationKeyReference;
+  readonly signature: string;
+  readonly signedAt: string;
+  /** Set by the ONE-WAY revocation mutation; null until revoked. */
+  readonly revokedAt: string | null;
+  readonly revocationReason: string | null;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+  readonly createdAt: string;
+  readonly recordFormat: typeof SIGNED_ATTESTATION_RECORD_FORMAT;
+}
+
+export interface CreateSignedAttestationInput {
+  readonly organizationScopeId: string;
+  readonly verifierId: string;
+  readonly statement: string;
+  /** The covered authoritative records: {family, recordId} pairs. */
+  readonly coverage: readonly { readonly family: string; readonly recordId: string }[];
+  readonly idempotencyKey: string;
+}
+
+export interface CreateSignedAttestationResult {
+  readonly attestation: SignedAttestation;
+  /** false when an attestation with the same idempotency key already existed. */
+  readonly created: boolean;
+}
+
+export interface RevokeSignedAttestationInput {
+  readonly organizationScopeId: string;
+  readonly attestationId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+/**
+ * The CLOSED, machine-readable verification reason vocabulary (work
+ * order §3.4: failures fail closed with a machine-readable reason).
+ */
+export const SIGNED_ATTESTATION_VERIFICATION_REASONS = [
+  "verified",
+  "attestation_revoked",
+  "unsupported_algorithm",
+  "unknown_key_reference",
+  "algorithm_key_reference_mismatch",
+  "signature_mismatch",
+  "covered_record_missing",
+  "covered_record_mutated",
+  "covered_state_invalid",
+] as const;
+
+export type SignedAttestationVerificationReason =
+  (typeof SIGNED_ATTESTATION_VERIFICATION_REASONS)[number];
+
+/** The closed check-name vocabulary for per-check verification detail. */
+export type SignedAttestationCheckName =
+  | "revocation"
+  | "algorithm_vocabulary"
+  | "key_reference_vocabulary"
+  | "algorithm_key_reference_pairing"
+  | "signature"
+  | "covered_current_state"
+  | "covered_integrity";
+
+/**
+ * One verification check outcome (deterministic order; no aggregate
+ * counts — the aggregate-disclosure lesson).
+ */
+export interface SignedAttestationCheck {
+  readonly check: SignedAttestationCheckName;
+  /** e.g. "evidence:<recordId>" for per-coverage checks; null for global checks. */
+  readonly subject: string | null;
+  readonly passed: boolean;
+  readonly reason: string;
+}
+
+/**
+ * The deterministic verification verdict: identical (attestation,
+ * current authoritative state, active verifier) ⇒ identical verdict
+ * object. No plaintext is disclosed; covered-record identifiers appear
+ * only to the authorized in-scope caller (the verification surface is
+ * guarded + tenant-scoped).
+ */
+export interface SignedAttestationVerification {
+  readonly attestationId: string;
+  readonly valid: boolean;
+  readonly reason: SignedAttestationVerificationReason;
+  readonly checks: readonly SignedAttestationCheck[];
+}
+
+/**
+ * Versioned signing (NET-W029 §3.2): the domain builds the
+ * "attestation/v2" canonical digest input; the signer produces the
+ * opaque (algorithm, signature, keyReference) triple. The declared
+ * `algorithm`/`keyReference` properties let the service build the
+ * canonical input BEFORE signing; the returned triple MUST match them
+ * (the service validates fail-closed against the closed vocabularies).
+ * Production signers arrive as adapters (real Ed25519/ECDSA via
+ * node:crypto in the composition root); the domain never performs
+ * provider-specific crypto and never sees key material.
+ */
+export interface SignedAttestationSigner {
+  readonly algorithm: string;
+  readonly keyReference: string;
+  signVersioned(
+    canonicalInput: string,
+  ): Promise<{ readonly algorithm: string; readonly signature: string; readonly keyReference: string }>;
+}
+
+/**
+ * Versioned verification (NET-W029 §3.4): receives the canonical input
+ * REBUILT from the STORED coverage commitments (no plaintext) plus the
+ * stored algorithm/signature/key reference, and decides validity.
+ * Never throws for an invalid attestation — returns
+ * { valid: false, reason }.
+ */
+export interface SignedAttestationVerifier {
+  verifyVersioned(
+    canonicalInput: string,
+    attestation: { readonly algorithm: string; readonly signature: string; readonly keyReference: string },
+  ): Promise<{ readonly valid: boolean; readonly reason: string }>;
+}
+
+export interface SignedAttestationRepository {
+  save(attestation: SignedAttestation, execution: ExecutionContext): Promise<SignedAttestation>;
+  saveWithinTx(attestation: SignedAttestation, tx: AuthorityTransaction): Promise<SignedAttestation>;
+  findById(id: string): Promise<SignedAttestation | null>;
+  findByIdWithinTx(id: string, tx: AuthorityTransaction): Promise<SignedAttestation | null>;
+  exists(id: string): Promise<boolean>;
+}
+
+export interface SignedAttestationService {
+  /**
+   * Create a signed attestation: validates the coverage set against the
+   * closed family vocabulary (bounded, duplicate-free), re-derives every
+   * covered record's canonical facts + coverage commitment INSIDE the
+   * authoritative transaction (missing records, cross-scope records and
+   * REVERSED value records fail closed at creation), signs the
+   * "attestation/v2" canonical input through the injected versioned
+   * signer, persists, and emits the `signed_attestation.created` audit
+   * event atomically with the mutation (composite idempotency;
+   * replay-safe).
+   */
+  createSignedAttestation(
+    execution: ExecutionContext,
+    input: CreateSignedAttestationInput,
+  ): Promise<CreateSignedAttestationResult>;
+  /**
+   * Tenant-scoped read: a record in another organization scope is
+   * indistinguishable from a nonexistent one (no existence oracle).
+   */
+  getSignedAttestation(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    id: string,
+  ): Promise<SignedAttestation>;
+  /**
+   * Deterministic server-side verification (a derived, non-mutating,
+   * non-audited 200-style decision): revocation → vocabulary → pairing
+   * → signature (rebuilt from the STORED digests) → per-covered-record
+   * current-state + integrity re-derivation. Fails closed with a
+   * machine-readable reason.
+   */
+  verifySignedAttestation(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    id: string,
+  ): Promise<SignedAttestationVerification>;
+  /**
+   * ONE-WAY revocation (the W028 closure precedent — a field mutation,
+   * never a lifecycle transition). Idempotent: revoking an
+   * already-revoked attestation returns it unchanged. Audited atomically.
+   * A revoked attestation NEVER verifies again.
+   */
+  revokeSignedAttestation(
+    execution: ExecutionContext,
+    input: RevokeSignedAttestationInput,
+  ): Promise<SignedAttestation>;
+}
+
 /**
  * The EvidencePort describes the boundary's readiness. After NET-W005
  * it is `"ready"` (the boundary carries evidence, outcome claims,
- * attestations, aggregation, and the Proof-of-Value model).
+ * attestations, aggregation, and the Proof-of-Value model); NET-W029
+ * (additive) extends the attestation layer with signed attestations.
  */
 export interface EvidencePort {
   readonly boundary: "evidence";
@@ -612,6 +1065,8 @@ export interface EvidencePort {
     readonly proofOfValueEvidenceAttached: "proof_of_value.evidence_attached";
     readonly proofOfValueAggregated: "proof_of_value.aggregated";
     readonly proofOfValueAttestationAttached: "proof_of_value.attestation_attached";
+    readonly signedAttestationCreated: "signed_attestation.created";
+    readonly signedAttestationRevoked: "signed_attestation.revoked";
   };
 }
 

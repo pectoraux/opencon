@@ -64,6 +64,13 @@ export function createAuthorityEvidenceRepository(
       return rec ? rec.value : null;
     },
 
+    async findByIdWithinTx(id, tx) {
+      // NET-W029 (additive): the in-tx twin for the evidence coverage
+      // family — sees uncommitted writes in the caller's transaction.
+      const rec = await tx.get<Evidence>(COLLECTION, id);
+      return rec ? rec.value : null;
+    },
+
     async listBySubject(subjectId) {
       const all = await authority.scan<Evidence>(COLLECTION);
       return all

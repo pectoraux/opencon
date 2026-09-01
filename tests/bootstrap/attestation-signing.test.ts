@@ -379,6 +379,21 @@ describe("attestation signing selection — end-to-end runtime wiring", () => {
   test("createRuntime(production, provider secrets + explicit adapter pair) BOOTS with the explicit adapters", async () => {
     const { createRuntime } = await import("../../src/bootstrap/runtime.ts");
     const pair = createHmacAttestationSignerVerifier({ key: "explicit-runtime-pair-key" });
+    // NET-W029 UPDATE (sanctioned additive amendment): the versioned
+    // (signed-attestation) surface has its OWN adapter contract, so a
+    // production boot with explicit adapters now requires the versioned
+    // pair too (a W005-only pair is INCOMPLETE crypto configuration —
+    // fail closed, exactly like a missing secret). The versioned pair
+    // here is a REAL Ed25519 pair (generated in-test via node:crypto
+    // and wrapped by the composition-root helper) so this composition
+    // test exercises the production asymmetric path end-to-end.
+    const { generateKeyPairSync } = await import("node:crypto");
+    const { createEd25519VersionedSignerVerifier } = await import(
+      "../../src/bootstrap/attestation-signing.ts"
+    );
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const versionedPair = createEd25519VersionedSignerVerifier({ privateKeyPem });
     const runtime = createRuntime({
       env: {
         APP_ENV: "production",
@@ -388,9 +403,17 @@ describe("attestation signing selection — end-to-end runtime wiring", () => {
         OBJECT_STORAGE_BUCKET: "TESTFIXTURE-bucket",
       },
       port: 0,
-      attestation: { signer: pair, verifier: pair },
+      attestation: {
+        signer: pair,
+        verifier: pair,
+        versionedSigner: versionedPair,
+        versionedVerifier: versionedPair,
+      },
     });
     expect(runtime.attestationSigning.mode).toBe("explicit-adapters");
+    // The ACTIVE versioned identifiers are the real Ed25519 pair's.
+    expect(runtime.attestationSigning.algorithm).toBe("ed25519/v1");
+    expect(runtime.attestationSigning.keyReference).toBe("attestation-signing/ed25519/v1");
     await runtime.shutdown();
   });
 

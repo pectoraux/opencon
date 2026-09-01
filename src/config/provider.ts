@@ -88,6 +88,9 @@ export function loadConfig(opts: LoadConfigOptions = {}): {
     appName: raw.APP_NAME,
     port: raw.PORT,
     logLevel: raw.LOG_LEVEL,
+    // NET-W029 (additive): the versioned-attestation production
+    // algorithm selector (non-secret; defaults to "hmac-sha256").
+    attestationSigningAlgorithm: raw.ATTESTATION_SIGNING_ALGORITHM,
     descriptors: Object.freeze(descriptors),
     frozenAt,
   }) as ConfigSnapshot;

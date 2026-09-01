@@ -59,6 +59,14 @@ export interface ConfigSnapshot {
   readonly appName: string;
   readonly port: number;
   readonly logLevel: string;
+  /**
+   * NET-W029 (additive, non-breaking): the configured production
+   * signature algorithm for the versioned (signed-attestation)
+   * surface — "ed25519" | "ecdsa-p256" | "hmac-sha256" (default
+   * "hmac-sha256"). NON-SECRET: a vocabulary choice; the key material
+   * itself resolves only through the SecretProvider.
+   */
+  readonly attestationSigningAlgorithm: "ed25519" | "ecdsa-p256" | "hmac-sha256";
   /** Catalog of recognized fields with redacted diagnostics. */
   readonly descriptors: readonly ConfigFieldDescriptor[];
   /** Frozen at validation time; immutable for the process lifetime. */
