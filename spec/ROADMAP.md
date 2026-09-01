@@ -88,8 +88,8 @@ Composition-root orchestration is allowed, but an orchestration function must no
 
 - **NET-W024 — Consumer Demand Pools** — **COMPLETE**. Privacy-preserving consumer demand aggregation inside `/demand`: tenant-scoped pools, private consented commitments, the frozen disclosure floor, derived qualified-aggregate supplier views (never stored, never caller-asserted); zero economic surface.
 - **NET-W025 — Business procurement pools** — **COMPLETE**. Privacy/competition-preserving business demand aggregation inside `/demand`, with dual server-enforced membership, frozen commitment and distinct-organization floors, deterministic qualification, and minimized supplier-facing demand. Merged in PR #51 as `bcaf81b82088688af701f1a90242cc61b1fdd094`.
-- **NET-W026 — Supplier offers and competitive selection** — **CURRENT IMPLEMENTATION TARGET**. Extend the same `/demand` procurement authority with authorized supplier offers, server-derived hard eligibility and deterministic competitive selection without weakening W025 privacy or introducing economic authority.
-- **NET-W027 — Verified savings and counterfactuals** — **PLANNED**.
+- **NET-W026 — Supplier offers and competitive selection** — **COMPLETE**. Supplier offers and deterministic competitive selection live inside `/demand`; hard eligibility is server-derived; W025 privacy remains intact; selection is procurement-only and non-economic. Merged in PR #53 as `6b8d8424587405aae7e0d8b8ea6bd5e48a5e0936`.
+- **NET-W027 — Verified savings and counterfactuals** — **CURRENT IMPLEMENTATION TARGET**. Establish evidence-backed baselines, counterfactuals and realized savings with explicit uncertainty, deterministic anchor-aware derivation and fail-closed evidence sufficiency.
 - **NET-W028 — Benefit Pools** — **PLANNED**.
 
 ### Phase 8 — Decentralization
@@ -165,30 +165,56 @@ auditable selection result
 /settlement remains the SOLE economic authority
 ```
 
+### W026 outcome
+
+NET-W026 is complete. The authoritative work order and evidence ledger remain in `spec/work-orders/NET-W026.md` and `docs/net-w026-supplier-offers-competitive-selection.md`; implementation merged to `main` at `6b8d8424587405aae7e0d8b8ea6bd5e48a5e0936` after green CI and architect approval.
+
+## W027 implementation contract
+
+### Authority model
+
+```text
+W026 supplier selection / procurement outcome context
+                    ↓
+           explicit baseline + supported observed/counterfactual inputs
+                    ↓
+        /evidence + /outcomes remain truth/measurement authorities
+                    ↓
+        deterministic savings / uncertainty derivation in the
+        existing procurement boundary or composition root
+                    ↓
+        economically-authoritative use only after evidence sufficiency
+                    ↓
+        /settlement remains the SOLE economic authority
+```
+
 ### Inputs
 
-- qualified NET-W025 procurement demand and its minimized supplier-facing contract;
-- supplier identities and memberships resolved server-side through existing identity/organization authorities;
-- bounded provider-neutral offer attributes, validity/effective windows and provenance;
-- explicit bounded/versioned selection policy and deterministic tie-breaking;
-- nothing that exposes individual buyer commitments or exact competitor terms.
+- explicit baseline record with method/version, population or comparison window, provenance and evaluation scope;
+- authoritative observed outcomes from `/outcomes` and supporting evidence/commitments from `/evidence`;
+- explicit counterfactual model/assumptions with version, uncertainty and invalidation/quality status;
+- W026 offer/selection context only as lineage/context — offer price alone is never savings truth;
+- one explicit evaluation anchor for deterministic derivation;
+- server-resolved tenancy/authorization facts.
 
 ### Required behavior
 
-1. Supplier offers are first-class tenant/pool-scoped durable records with explicit provenance and validity.
-2. Offers can only compete against currently qualified NET-W025 demand. Closed, withdrawn or unqualified demand is a hard gate.
-3. Supplier hard eligibility is server-derived and cannot be caller-asserted.
-4. Competitive ranking and selection are deterministic and reproducible for identical authoritative state and evaluation anchor.
-5. Buyer commitments remain private: no buyer IDs, commitment IDs, exact competitor quantities, prices, budgets or timing may cross supplier-facing surfaces.
-6. Any material offer/selection mutation follows the established idempotency → concurrency → one authoritative transaction → transactional audit → post-commit publication pattern.
-7. AI, if later introduced, may advise ranking only after hard eligibility and may never authorize eligibility, privacy release, selection, tenancy or economic mutation.
-8. `/settlement` remains the sole economic authority. No `/demand` offer/selection command mints value or creates credits, balances, cash obligations, rewards or payment instructions.
-9. `/workflows` remains lifecycle authority; no local transition machinery.
-10. W027 savings/counterfactual and W028 Benefit Pool semantics remain excluded.
+1. Baselines are first-class, explicit, versioned/immutable where required, tenant-scoped and provenance-backed.
+2. Counterfactuals preserve assumptions, method/version, uncertainty and invalidation semantics; caller arithmetic is never trusted as authoritative truth.
+3. Realized savings derive only from supported baseline + authoritative outcome/counterfactual evidence; supplier offer price, spend, reputation or raw activity alone cannot produce a verified savings claim.
+4. Uncertainty is first-class and never silently collapsed into a point value. Unsupported exact claims fail closed.
+5. Derived savings are deterministic for identical authoritative state and explicit evaluation anchor; canonical digest excludes the anchor.
+6. Invalid, stale, missing or insufficient evidence fails closed for economically authoritative use; no evidence downgrade may occur implicitly.
+7. Cross-tenant references and unauthorized reads/mutations fail closed without existence oracles.
+8. Material baseline/counterfactual/savings mutations use composite idempotency, concurrency serialization, one authoritative transaction and transactional audit publication after commit.
+9. `/settlement` remains the only economic authority. W027 creates no ledger, credits, cash, rewards or payment execution state.
+10. W028 Benefit Pools remain excluded; W027 does not allocate member benefits or create benefit-pool semantics.
+11. AI/model output, if introduced, is advisory only and cannot establish evidence sufficiency, approve a savings claim, release privacy, or authorize economics.
+12. Frozen architecture and lock remain unchanged.
 
 ### Required evidence
 
-One-to-one AC-01..08 coverage, W025 privacy-preservation regressions, tenant/authorization fail-closed coverage, deterministic ranking/selection tests, nondeterminism mutation checks, idempotency/concurrency/atomicity tests, economic-bypass regression, architecture/authority checks, secret/config scan, `bun run verify`, and configured real PostgreSQL/Redis integration.
+One-to-one AC-01..09 coverage, baseline/counterfactual immutability and provenance tests, uncertainty-preservation tests, deterministic anchor/digest tests, evidence sufficiency/staleness tests, tenancy/authorization regressions, idempotency/concurrency/atomicity tests, economic-containment regressions, targeted mutation checks, architecture/authority checks, secret scan, `bun run verify`, and configured real PostgreSQL/Redis integration.
 
 ## Work-item operating procedure
 
