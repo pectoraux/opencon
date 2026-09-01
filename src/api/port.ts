@@ -3363,6 +3363,116 @@ export interface ApiCommands {
   ): Promise<readonly Record<string, unknown>[]>;
 
   // -----------------------------------------------------------------
+  // NET-W028 — Benefit Pools (/benefits).
+  // -----------------------------------------------------------------
+
+  /**
+   * Create a benefit allocation policy version (protected; guard
+   * action `benefits.policy.create`): append-only versioned lineage
+   * under the organization-independent mutex (a lineage can never
+   * fork); the declaration set (members + weights, eligibility
+   * criteria, remainder disposition, benefit type) is validated
+   * fail-closed.
+   */
+  createBenefitPoolPolicy(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ policy: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * List the policy lineage versions (protected; guard action
+   * `benefits.policy.read`).
+   */
+  listBenefitPolicyVersions(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /**
+   * Create the Benefit Pool (protected; guard action
+   * `benefits.pool.create`): tenant-scoped, funding REFERENCES only —
+   * there is deliberately NO funded-amount input (funding resolves
+   * server-side at every use; a caller-asserted balance is never
+   * authority).
+   */
+  createBenefitPool(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ pool: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Close the pool (ONE-WAY; protected; guard action
+   * `benefits.pool.close`; pool-creator-only — a closed pool can
+   * never re-open or allocate again).
+   */
+  closeBenefitPool(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * List the acting member's benefit pools (protected; guard action
+   * `benefits.pool.read`; creator-scoped).
+   */
+  listBenefitPools(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /**
+   * THE DERIVED ALLOCATION VIEW (protected; guard action
+   * `benefits.allocation.evaluate`; pool-creator-only): the current
+   * funding + eligibility + deterministic plan derivation — a derived
+   * 200 decision (no command asserts, stores or waives eligibility).
+   */
+  evaluatePoolAllocation(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * THE ATOMIC ALLOCATION OPERATION (protected; guard action
+   * `benefits.allocation.execute`; pool-creator-only): funding +
+   * eligibility re-derived INSIDE the authoritative transaction, the
+   * deterministic conservation-preserving plan, and (for economic
+   * draws) the /settlement reward-allocation draw WithinTx — ONE
+   * exactly-once economic unit (everything commits together or
+   * nothing does).
+   */
+  allocatePoolBenefits(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ allocation: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * List the pool's allocation lineage (protected; guard action
+   * `benefits.allocation.read`; pool-creator-only).
+   */
+  listPoolAllocations(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /**
+   * THE PRIVACY-PRESERVING MEMBER VIEW (protected; guard action
+   * `benefits.member.read`): the acting member sees THEIR OWN shares
+   * and totals ONLY — never other members' identities or amounts.
+   */
+  getMemberBenefitView(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  // -----------------------------------------------------------------
   // NET-W012 — helpful contributions (Proof-of-Helpfulness).
   // -----------------------------------------------------------------
 
