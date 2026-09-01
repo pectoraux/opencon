@@ -75,7 +75,9 @@ All six restored green after each check (the driver verified the suite passed ag
 - Integration: the procurement material path runs on the SAME PostgreSQL authority + IdempotencyStore + transactional-audit machinery exercised by the configured real PostgreSQL/Redis integration job (CI `integration`); the domain introduces no new provider.
 - W025 acceptance tests: 59 (49 demand + 10 regression) + 1 amended skeleton-activation test = 60 new passing tests.
 - Staged-diff secret scan: clean (no credential patterns; no new configuration entries).
-- PR: (recorded below after submission).
+- PR: **#51** (https://github.com/pectoraux/opencon/pull/51, Closes #50), implementation head `84f24c8a946e79924570b8bb304701f65bcbc791`.
+- CI on the PR: **GREEN on BOTH events** — `verify (typecheck + architecture + authority + unit tests)` success (push + pull_request) and `integration (real PostgreSQL + Redis adapters)` success (both runs); 4/4 check runs on the implementation head (re-verified on the evidence-ledger head after this update).
+- Verification-status comment: posted on PR #51 (id 5486602298).
 - Review state: awaiting architect review — **NOT merged** (merge only on green CI AND recorded architect approval).
 - Merge SHA: PENDING.
 
