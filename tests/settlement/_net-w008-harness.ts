@@ -34,6 +34,7 @@ import type {
   CreditIssuance,
   EconomicConversion,
   EconomicValueRecord,
+  ExternalSettlementProviderAdapter,
   RewardAllocationPolicy,
 } from "../../src/settlement/port.ts";
 
@@ -67,6 +68,13 @@ export interface NetW008Harness {
  * `createRuntime` (the supply-chain verification trust envelope).
  * Omitted → the trust channel is NOT configured (fail closed —
  * no chain can be `verified`).
+ *
+ * NET-W030: `adapters.externalSettlementProviders` /
+ * `adapters.externalSettlementTrustKeys` thread the external
+ * settlement adapter doubles + the per-provider trust keys into
+ * `createRuntime` (the authenticated external-fact ingestion
+ * channel). Omitted keys → the providers' ingestion fails closed
+ * (`unauthenticated`).
  */
 export interface NetW008HarnessOptions {
   readonly llm?: {
@@ -74,12 +82,32 @@ export interface NetW008HarnessOptions {
   };
   readonly adapters?: {
     readonly sellerAuthorizationTrustKey?: string;
+    readonly externalSettlementProviders?: readonly ExternalSettlementProviderAdapter[];
+    readonly externalSettlementTrustKeys?: Readonly<Record<string, string>>;
   };
 }
 
 export async function createNetW008Harness(
   opts: NetW008HarnessOptions = {},
 ): Promise<NetW008Harness> {
+  // Compose the adapters options once (seller-authorization trust key
+  // + NET-W030 external settlement threading) so no spread can
+  // clobber another.
+  const adaptersOptions: {
+    sellerAuthorizationTrustKey?: string;
+    externalSettlementProviders?: readonly ExternalSettlementProviderAdapter[];
+    externalSettlementTrustKeys?: Readonly<Record<string, string>>;
+  } = {};
+  if (opts.adapters?.sellerAuthorizationTrustKey !== undefined) {
+    adaptersOptions.sellerAuthorizationTrustKey = opts.adapters.sellerAuthorizationTrustKey;
+  }
+  if (opts.adapters?.externalSettlementProviders !== undefined) {
+    adaptersOptions.externalSettlementProviders = opts.adapters.externalSettlementProviders;
+  }
+  if (opts.adapters?.externalSettlementTrustKeys !== undefined) {
+    adaptersOptions.externalSettlementTrustKeys = opts.adapters.externalSettlementTrustKeys;
+  }
+  const hasAdapterOptions = Object.keys(adaptersOptions).length > 0;
   const runtime = createRuntime({
     forceEnv: "test",
     env: { APP_ENV: "test", LOG_LEVEL: "warn" },
@@ -87,13 +115,7 @@ export async function createNetW008Harness(
     ...(opts.llm?.providers
       ? { llm: { providers: opts.llm.providers } }
       : {}),
-    ...(opts.adapters?.sellerAuthorizationTrustKey !== undefined
-      ? {
-          adapters: {
-            sellerAuthorizationTrustKey: opts.adapters.sellerAuthorizationTrustKey,
-          },
-        }
-      : {}),
+    ...(hasAdapterOptions ? { adapters: adaptersOptions } : {}),
   });
   await runtime.initialize();
   await runtime.api.start();

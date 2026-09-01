@@ -320,6 +320,8 @@ import type {
   CrossPromotionClearingService,
   EconomicLedgerService,
   EconomicValueService,
+  ExternalSettlementProviderAdapter,
+  ExternalSettlementService,
   IssueCreditsInput,
   RecordCashObligationInput,
   RecordConversionInput,
@@ -328,6 +330,22 @@ import type {
   RewardService,
   StakeService,
 } from "../settlement/port.ts";
+
+// NET-W030 — external settlement adapters (ADAPTER-008; issue #61):
+// the reference provider adapter (adapter tier — structurally
+// implements the NEUTRAL contract declared in the /settlement port;
+// the composition root is the ONLY join) + the trust-channel
+// selection (per-provider HMAC material resolved exclusively through
+// the SecretProvider — fail closed when absent) + the fact
+// repository and the authenticated ingestion/reconciliation service
+// INSIDE the /settlement authority (facts, never economic mutation).
+import { ExternalSettlementReferenceAdapter } from "../adapters/settlement/reference-adapter.ts";
+import {
+  selectExternalSettlementAuthentication,
+  EXTERNAL_SETTLEMENT_TRUST_SECRET_KEYS,
+} from "./external-settlement-authentication.ts";
+import { createAuthorityExternalSettlementFactRepository } from "../settlement/authority-external-settlement-repository.ts";
+import { createExternalSettlementService } from "../settlement/external-settlement-service.ts";
 
 // NET-W009 disputes boundary (the Phase-3 Trust domain): the fraud/risk
 // foundation — first-class provenance-backed risk signals, versioned
@@ -706,6 +724,27 @@ export interface Runtime {
   readonly economicLedgerService: EconomicLedgerService;
   // NET-W010 stake escrow (the settlement authority's stake commands).
   readonly stakeService: StakeService;
+  /**
+   * NET-W030: the external settlement service — authenticated,
+   * fail-closed ingestion of append-only external transaction FACTS
+   * inside the /settlement authority + the DERIVED deterministic
+   * reconciliation. An external fact can never mint, consume, reverse
+   * or mutate internal economic state (architecture-lock §14
+   * invariant 25).
+   */
+  readonly externalSettlementService: ExternalSettlementService;
+  /** NET-W030: the wired external settlement provider adapters (diagnostics). */
+  readonly externalSettlementProviders: readonly ExternalSettlementProviderAdapter[];
+  /**
+   * NET-W030: the external settlement trust-channel diagnostic — the
+   * providers whose verification material resolved through the
+   * SecretProvider (or the explicit composition override). Unlisted
+   * providers fail closed at ingestion (`unauthenticated`). The
+   * secret values are NEVER exposed here.
+   */
+  readonly externalSettlementTrust: {
+    readonly configuredProviders: readonly string[];
+  };
   // NET-W009 disputes (fraud/risk foundation) services.
   readonly riskSignalService: RiskSignalService;
   readonly riskPolicyService: RiskPolicyService;
@@ -833,6 +872,23 @@ export interface CreateRuntimeOptions {
      * `verified` (fail closed).
      */
     readonly sellerAuthorizationTrustKey?: string;
+    /**
+     * NET-W030: explicitly configured external settlement provider
+     * adapters (test doubles or future concrete payment-network
+     * adapters). When omitted, the reference adapter is wired.
+     * Consumers use ONLY the neutral ExternalSettlementProviderAdapter
+     * contract declared in the /settlement port.
+     */
+    readonly externalSettlementProviders?: readonly ExternalSettlementProviderAdapter[];
+    /**
+     * NET-W030: explicitly configured per-provider external settlement
+     * trust keys (HMAC-SHA256; test wiring or operator-provided
+     * channel keys). When omitted for a provider, the key resolves
+     * through the SecretProvider; when neither is present, ingestion
+     * for that provider fails closed (`unauthenticated` — nothing is
+     * ever recorded).
+     */
+    readonly externalSettlementTrustKeys?: Readonly<Record<string, string>>;
   };
   /**
    * NET-W013: explicitly configured LLM provider adapters (test
@@ -1925,6 +1981,92 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     stakeRepository: stakeRepo,
     ledgerRepository: economicLedgerRepo,
     subjectLookup: economicSubjectLookup,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("settlement"),
+  });
+
+  // ------------------------------------------------------------------
+  // NET-W030 — external settlement adapters wiring (ADAPTER-008; issue
+  // #61).
+  //
+  // The /adapters boundary owns provider-specific payload parsing; the
+  // /settlement authority owns the authenticated ingestion + the
+  // derived reconciliation. This composition root is the ONLY join:
+  //  - the provider adapter list (explicit test doubles or the
+  //    reference adapter) implements the NEUTRAL contract declared in
+  //    the /settlement port STRUCTURALLY (the adapter tier may not
+  //    import /settlement — the tier matrix);
+  //  - the per-provider trust material resolves through the
+  //    SecretProvider (or the explicit composition override) — the
+  //    W023 trust-channel wiring rule; absent ⇒ ingestion fails
+  //    closed, NEVER a silent fallback;
+  //  - the service records append-only FACTS and derives the
+  //    deterministic reconciliation — it performs NO economic
+  //    mutation (architecture-lock §14 invariant 25: payment adapters
+  //    provide transaction facts; /settlement retains semantic
+  //    authority).
+  // ------------------------------------------------------------------
+  const externalSettlementProviders: readonly ExternalSettlementProviderAdapter[] =
+    opts.adapters?.externalSettlementProviders?.length
+      ? opts.adapters.externalSettlementProviders
+      : [new ExternalSettlementReferenceAdapter()];
+  const externalSettlementAuthentication = selectExternalSettlementAuthentication({
+    secretProvider,
+    logger,
+    ...(opts.adapters?.externalSettlementTrustKeys !== undefined
+      ? { overrides: opts.adapters.externalSettlementTrustKeys }
+      : {}),
+  });
+  const externalSettlementFactRepo = createAuthorityExternalSettlementFactRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
+  });
+  function toApiExternalSettlementFactView(
+    fact: import("../settlement/port.ts").ExternalSettlementFactRecord,
+  ): import("../api/port.ts").ApiExternalSettlementFactView {
+    return {
+      id: fact.id,
+      organizationScopeId: fact.organizationScopeId,
+      provider: fact.provider,
+      providerVersion: fact.providerVersion,
+      externalId: fact.externalId,
+      internalTransactionId: fact.internalTransactionId,
+      reportedAmount: fact.reportedAmount,
+      reportedUnit: fact.reportedUnit,
+      observedAt: fact.observedAt,
+      recordedAt: fact.recordedAt,
+      correctionOf: fact.correctionOf,
+      idempotencyKey: fact.idempotencyKey,
+      recordFormat: fact.recordFormat,
+    };
+  }
+  function toApiExternalSettlementReconciliationView(
+    view: import("../settlement/port.ts").ExternalSettlementReconciliationView,
+  ): import("../api/port.ts").ApiExternalSettlementReconciliationView {
+    return {
+      factId: view.factId,
+      organizationScopeId: view.organizationScopeId,
+      provider: view.provider,
+      externalId: view.externalId,
+      internalTransactionId: view.internalTransactionId,
+      verdict: view.verdict,
+      reason: view.reason,
+      checks: view.checks.map((c) => ({
+        check: c.check,
+        satisfied: c.satisfied,
+        reason: c.reason,
+        detail: c.detail as unknown as Record<string, unknown>,
+      })),
+      internalTransaction: view.internalTransaction,
+      derivedAt: view.derivedAt,
+    };
+  }
+  const externalSettlementService = createExternalSettlementService({
+    repository: externalSettlementFactRepo,
+    ledgerRepository: economicLedgerRepo,
+    adapters: externalSettlementProviders,
+    authenticator: externalSettlementAuthentication.authenticator,
     idempotency,
     auditWriter,
     logger: logger.forModule("settlement"),
@@ -5890,6 +6032,52 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         idempotencyKey: input.idempotencyKey,
       });
       return toApiSignedAttestationView(attestation);
+    },
+    // -- NET-W030 external settlement commands --------------------------
+    async recordExternalSettlementFact(execution, _actorPersonId, input) {
+      const result = await externalSettlementService.recordExternalSettlementFact(execution, {
+        organizationScopeId: input.organizationScopeId,
+        provider: input.provider,
+        payload: input.payload,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return {
+        fact: toApiExternalSettlementFactView(result.fact),
+        created: result.created,
+        reconciliation: toApiExternalSettlementReconciliationView(result.reconciliation),
+      };
+    },
+    async getExternalSettlementFact(execution, id, input) {
+      try {
+        const fact = await externalSettlementService.getExternalSettlementFact(
+          getExecutionContext() ?? execution,
+          input.organizationScopeId,
+          id,
+        );
+        return fact === null ? null : toApiExternalSettlementFactView(fact);
+      } catch {
+        // Cross-tenant + nonexistent are indistinguishable (no
+        // existence oracle) — the route renders 404.
+        return null;
+      }
+    },
+    async evaluateExternalSettlementReconciliation(execution, id, input) {
+      const view = await externalSettlementService.evaluateExternalSettlementReconciliation(
+        getExecutionContext() ?? execution,
+        { organizationScopeId: input.organizationScopeId, factId: id },
+      );
+      return toApiExternalSettlementReconciliationView(view);
+    },
+    async listExternalSettlementFactsByTransaction(execution, input) {
+      const facts = await externalSettlementService.listExternalSettlementFactsByTransaction(
+        getExecutionContext() ?? execution,
+        input.organizationScopeId,
+        input.internalTransactionId,
+      );
+      return {
+        internalTransactionId: input.internalTransactionId,
+        facts: facts.map((f) => toApiExternalSettlementFactView(f)),
+      };
     },
     async createProofOfValue(execution, actorPersonId, input) {
       const proof = await proofOfValueService.createProofOfValue(execution, {
@@ -10355,6 +10543,12 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     economicLedgerService,
     // NET-W010 stake escrow.
     stakeService,
+    // NET-W030 external settlement adapters (facts, never authority).
+    externalSettlementService,
+    externalSettlementProviders,
+    externalSettlementTrust: {
+      configuredProviders: externalSettlementAuthentication.configuredProviders,
+    },
     // NET-W009 disputes (fraud/risk foundation) services.
     riskSignalService,
     riskPolicyService,
