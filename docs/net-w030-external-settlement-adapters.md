@@ -63,6 +63,16 @@ AC-08 — architecture/out-of-scope regression and W031+/W032 deferrals — `tes
   - M9 recording audit verdict-lineage removal — AC-03 caught.
 - Real PostgreSQL/Redis integration: exercised by the CI `integration` job (PostgreSQL 17 + Redis 7 services) on the PR's own events — the same configured-integration discipline as W028/W029 (the fact repository runs on the identical PostgresAuthority machinery the W003 integration suite covers against real PostgreSQL).
 
+## Post-submission remediation (CI red — honest record)
+
+The first push of this PR turned the CI `verify` job RED on BOTH events (1 fail: `NET-W029-AC-03 … tampered SIGNATURE fails closed: signature_mismatch`). Root cause — a LATENT W029 TEST defect, not a W030 behavior change:
+
+- The W029 tamper helper rewrote the signature with a FIXED first character (`\`0${signature.slice(1)}\``). A fixed prepend is a NO-OP whenever the hex signature already starts with `0` — a ~1/16 flake per run (first-character luck). The same trap existed in the W029 stored-commitment tamper (`f${digest.slice(1)}`).
+- Proof, not assumption: the failing file reproduced at **3 fails / 24 runs** locally before the fix (a first character of `0` with additional hex-char overlap) and **0 fails / 24 runs** after it.
+- The fix applies the repo's established guaranteed-different-nibble discipline (W023 harness `replace(/^0/, "1")` / W030 harness nibble flip) to both W029 tamper sites — TEST-ONLY, no production code touched, no assertion semantics changed (the tamper is now always observably a tamper).
+- Full gate re-run after the fix: **1916 pass / 15 skip / 0 fail / 1931 tests / 247 files**; arch:check + authority:check 309/0; mutation driver re-executed end-to-end: **9/9 CAUGHT, final green, byte-identical restores, clean tree**.
+- Why the prior local run passed: the ~1/16 flake did not trigger in the single pre-push local run — the gate claim in the original commit message was locally true but not robust. This section is the correction of record.
+
 ## Driver-development disclosure (honest record)
 
 The mutation driver required three corrections during bring-up, all disclosed:
