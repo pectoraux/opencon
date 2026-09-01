@@ -36,6 +36,25 @@ export const ConfigSchema = z.object({
   // well-known dev default is permitted only in development (warned)
   // and test (silent).
   ATTESTATION_SIGNING_KEY: z.string().optional(),
+  // NET-W029: the production signature algorithm selector for the
+  // versioned (signed-attestation) surface. NON-SECRET configuration.
+  // Default "hmac-sha256" keeps existing configured deployments
+  // booting unchanged (the W005 remediation contract); "ed25519" /
+  // "ecdsa-p256" opt IN to the real asymmetric production algorithms
+  // (key material then resolves ONLY through the SecretProvider via
+  // ATTESTATION_SIGNING_ED25519_PRIVATE_KEY /
+  // ATTESTATION_SIGNING_ECDSA_PRIVATE_KEY — fail closed when absent).
+  ATTESTATION_SIGNING_ALGORITHM: z
+    .enum(["ed25519", "ecdsa-p256", "hmac-sha256"])
+    .default("hmac-sha256"),
+  // NET-W029: asymmetric production signing key material (PKCS#8 PEM),
+  // resolved ONLY through the SecretProvider at composition time —
+  // never logged, persisted, or echoed into audit/error payloads
+  // (PRIV-002/PRIV-003; the secret scan stays clean). Presence is
+  // REQUIRED only when the matching algorithm is selected in
+  // production/staging (fail closed); absent otherwise.
+  ATTESTATION_SIGNING_ED25519_PRIVATE_KEY: z.string().optional(),
+  ATTESTATION_SIGNING_ECDSA_PRIVATE_KEY: z.string().optional(),
   // NET-W022: provider verification secrets (HMAC-SHA256 keys) for
   // the reference attribution adapters. Classified secrets, resolved
   // ONLY through the SecretProvider at composition time. When
@@ -92,6 +111,12 @@ export const CONFIG_FIELD_CLASSIFICATIONS: readonly FieldClassification[] = [
   { key: "REDIS_URL", classification: "secret", required: false },
   { key: "OBJECT_STORAGE_BUCKET", classification: "secret", required: false },
   { key: "ATTESTATION_SIGNING_KEY", classification: "secret", required: false },
+  // NET-W029: the algorithm selector is NON-SECRET (a vocabulary
+  // choice, not key material); the private-key PEMs are classified
+  // secrets resolved only through the SecretProvider.
+  { key: "ATTESTATION_SIGNING_ALGORITHM", classification: "optional", required: false },
+  { key: "ATTESTATION_SIGNING_ED25519_PRIVATE_KEY", classification: "secret", required: false },
+  { key: "ATTESTATION_SIGNING_ECDSA_PRIVATE_KEY", classification: "secret", required: false },
   { key: "MEASUREMENT_BROWSER_ATTRIBUTION_KEY", classification: "secret", required: false },
   { key: "MEASUREMENT_IOS_ATTRIBUTION_KEY", classification: "secret", required: false },
   { key: "MEASUREMENT_OPENRTB_DELIVERY_KEY", classification: "secret", required: false },

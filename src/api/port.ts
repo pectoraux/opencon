@@ -344,6 +344,69 @@ export interface ApiAttestationVerificationView {
   readonly reason: string;
 }
 
+// ---------------------------------------------------------------------
+// NET-W029 — signed attestations (cryptographic attestations and
+// commitments, issue #58). The /evidence boundary EXTENDED: production
+// signed attestations with closed, versioned algorithm + key-reference
+// vocabularies over the three authoritative coverage families.
+// ---------------------------------------------------------------------
+
+/** One covered record on a signed attestation (public view). */
+export interface ApiSignedAttestationCoverageView {
+  readonly family: string;
+  readonly recordId: string;
+  readonly commitment: Readonly<Record<string, unknown>>;
+}
+
+/** The public view of a signed attestation (NET-W029). */
+export interface ApiSignedAttestationView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly verifierId: string;
+  readonly statement: string;
+  readonly coverage: readonly ApiSignedAttestationCoverageView[];
+  readonly algorithm: string;
+  readonly keyReference: string;
+  readonly signature: string;
+  readonly signedAt: string;
+  readonly revokedAt: string | null;
+  readonly revocationReason: string | null;
+  readonly createdAt: string;
+  readonly recordFormat: string;
+}
+
+/** Inputs to create a signed attestation via the API (NET-W029). */
+export interface ApiCreateSignedAttestationInput {
+  readonly organizationScopeId: string;
+  readonly verifierId: string;
+  readonly statement: string;
+  readonly coverage: readonly { readonly family: string; readonly recordId: string }[];
+  readonly idempotencyKey: string;
+}
+
+/** One machine-readable verification check outcome (NET-W029). */
+export interface ApiSignedAttestationCheckView {
+  readonly check: string;
+  readonly subject: string | null;
+  readonly passed: boolean;
+  readonly reason: string;
+}
+
+/** The deterministic verification verdict for a signed attestation (NET-W029). */
+export interface ApiSignedAttestationVerificationView {
+  readonly attestationId: string;
+  readonly valid: boolean;
+  readonly reason: string;
+  readonly checks: readonly ApiSignedAttestationCheckView[];
+}
+
+/** Inputs to revoke a signed attestation via the API (NET-W029; ONE-WAY). */
+export interface ApiRevokeSignedAttestationInput {
+  readonly organizationScopeId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
 /** The public view of a proof of value (NET-W005 AC-06). */
 export interface ApiProofOfValueView {
   readonly id: string;
@@ -1471,6 +1534,64 @@ export interface ApiCommands {
     execution: ExecutionContext,
     id: string,
   ): Promise<ApiAttestationVerificationView>;
+
+  // -----------------------------------------------------------------
+  // NET-W029 — signed attestations (cryptographic attestations and
+  // commitments, issue #58).
+  // -----------------------------------------------------------------
+
+  /**
+   * Create a signed attestation (NET-W029, protected mutation; guard
+   * action `signedAttestation.create`): the coverage set re-derives
+   * INSIDE the authoritative transaction (missing/cross-scope/REVERSED
+   * covered records fail closed), the "attestation/v2" canonical input
+   * is signed by the injected versioned signer (closed algorithm +
+   * key-reference vocabularies), and the record commits atomically with
+   * its audit event (composite idempotency).
+   */
+  createSignedAttestation(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateSignedAttestationInput,
+  ): Promise<ApiSignedAttestationView>;
+
+  /**
+   * Fetch a signed attestation (NET-W029, tenant-scoped read; guard
+   * action `signedAttestation.read`): cross-tenant and nonexistent are
+   * indistinguishable (null → 404; no existence oracle).
+   */
+  getSignedAttestation(
+    execution: ExecutionContext,
+    id: string,
+    input: { readonly organizationScopeId: string },
+  ): Promise<ApiSignedAttestationView | null>;
+
+  /**
+   * Verify a signed attestation (NET-W029, derived decision; guard
+   * action `signedAttestation.verify`): deterministic, server-side,
+   * fail-closed verification with machine-readable reasons — rebuilds
+   * the canonical input from the STORED coverage commitments (no
+   * plaintext disclosure) and re-derives the covered records' current
+   * state + integrity.
+   */
+  verifySignedAttestation(
+    execution: ExecutionContext,
+    id: string,
+    input: { readonly organizationScopeId: string },
+  ): Promise<ApiSignedAttestationVerificationView>;
+
+  /**
+   * Revoke a signed attestation (NET-W029, ONE-WAY mutation; guard
+   * action `signedAttestation.revoke`): a revoked attestation NEVER
+   * verifies again; revoking an already-revoked record is an idempotent
+   * no-op returning the record.
+   */
+  revokeSignedAttestation(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    id: string,
+    input: ApiRevokeSignedAttestationInput,
+  ): Promise<ApiSignedAttestationView>;
 
   /** Create a proof of value (NET-W005 AC-06, protected mutation). */
   createProofOfValue(

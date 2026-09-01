@@ -118,6 +118,10 @@ function makeFakeConfig(environment: ConfigSnapshot["environment"]): Configurati
     appName: "opencon-test",
     port: 0,
     logLevel: "info",
+    // NET-W029 UPDATE (sanctioned additive amendment): the typed
+    // snapshot gained the non-secret versioned-attestation algorithm
+    // selector; the fixture carries the frozen default.
+    attestationSigningAlgorithm: "hmac-sha256" as const,
     descriptors: [],
     frozenAt: new Date().toISOString(),
   } as ConfigSnapshot;

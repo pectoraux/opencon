@@ -612,6 +612,120 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // -- NET-W029 signed attestations (issue #58) ----------------------
+
+    // POST /api/evidence/signed-attestations — create a signed
+    // attestation (protected; guard action signedAttestation.create —
+    // the coverage digests re-derive INSIDE the authoritative
+    // transaction; the closed algorithm + key-reference vocabularies
+    // apply; composite idempotency).
+    if (
+      path === "/api/evidence/signed-attestations" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "signedAttestation.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseSignedAttestationInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createSignedAttestation(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // POST /api/evidence/signed-attestations/:id/read — fetch a signed
+    // attestation (protected; guard action signedAttestation.read;
+    // tenant-scoped — cross-tenant and nonexistent are indistinguishable
+    // 404s, no existence oracle).
+    if (
+      path.startsWith("/api/evidence/signed-attestations/") &&
+      path.endsWith("/read") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/evidence/signed-attestations/".length, -"/read".length);
+      const guarded = await guardMutation(ctx, req, "signedAttestation.read", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.getSignedAttestation(guarded.execution, id, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+        }),
+      );
+      if (!view) {
+        await send(res, 404, {
+          error: "not_found",
+          message: `signed attestation not found: ${id}`,
+        });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/evidence/signed-attestations/:id/verification — verify a
+    // signed attestation (protected; guard action
+    // signedAttestation.verify; deterministic server-side decision —
+    // fails closed with machine-readable reasons).
+    if (
+      path.startsWith("/api/evidence/signed-attestations/") &&
+      path.endsWith("/verification") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/evidence/signed-attestations/".length,
+        -"/verification".length,
+      );
+      const guarded = await guardMutation(ctx, req, "signedAttestation.verify", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.verifySignedAttestation(guarded.execution, id, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/evidence/signed-attestations/:id/revocation — revoke a
+    // signed attestation (protected; guard action
+    // signedAttestation.revoke; ONE-WAY — a revoked attestation never
+    // verifies again).
+    if (
+      path.startsWith("/api/evidence/signed-attestations/") &&
+      path.endsWith("/revocation") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/evidence/signed-attestations/".length,
+        -"/revocation".length,
+      );
+      const guarded = await guardMutation(ctx, req, "signedAttestation.revoke", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.revokeSignedAttestation(guarded.execution, guarded.personId, id, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          reason: strField(obj, "reason"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
     // POST /api/proofs-of-value — create a proof of value (protected).
     if (path === "/api/proofs-of-value" && method === "POST" && opts.commands) {
       const commands = opts.commands;
@@ -6800,6 +6914,45 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       verifierId: strField(obj, "verifierId"),
       statement: strField(obj, "statement"),
       evidenceIds: obj.evidenceIds as string[],
+    };
+  }
+
+  // -- NET-W029 signed-attestation request-body parsers ----------------
+
+  function parseSignedAttestationInput(
+    body: unknown,
+  ): import("./port.ts").ApiCreateSignedAttestationInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    if (!Array.isArray(obj.coverage) || obj.coverage.length === 0) {
+      throw apiValidationError(
+        'field "coverage" must be a non-empty array of {family, recordId} entries',
+      );
+    }
+    const coverage: { family: string; recordId: string }[] = [];
+    for (const entry of obj.coverage) {
+      if (!entry || typeof entry !== "object") {
+        throw apiValidationError('each "coverage" entry must be an object');
+      }
+      const e = entry as Record<string, unknown>;
+      const family = e.family;
+      const recordId = e.recordId;
+      if (typeof family !== "string" || !family.trim()) {
+        throw apiValidationError('each "coverage" entry requires a non-empty "family"');
+      }
+      if (typeof recordId !== "string" || !recordId.trim()) {
+        throw apiValidationError('each "coverage" entry requires a non-empty "recordId"');
+      }
+      coverage.push({ family, recordId });
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      verifierId: strField(obj, "verifierId"),
+      statement: strField(obj, "statement"),
+      coverage,
+      idempotencyKey: strField(obj, "idempotencyKey"),
     };
   }
 

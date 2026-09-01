@@ -27,6 +27,12 @@ import type {
   Evidence,
   ProofOfValue,
 } from "../../src/evidence/port.ts";
+// NET-W029 (additive): forwarded to createRuntime for the versioned
+// (signed-attestation) surface.
+import type {
+  SignedAttestationSigner,
+  SignedAttestationVerifier,
+} from "../../src/evidence/port.ts";
 
 export interface NetW005Harness {
   readonly runtime: Runtime;
@@ -47,10 +53,16 @@ export interface NetW005HarnessOptions {
    * Explicit attestation signer/verifier adapters wired through the
    * composition root (exercises the "explicit-adapters" selection
    * mode). When omitted the dev/test default applies (test env).
+   *
+   * NET-W029 (additive): `versionedSigner`/`versionedVerifier` are the
+   * versioned (signed-attestation) adapters, forwarded verbatim to
+   * createRuntime (e.g. REAL Ed25519/ECDSA pairs for the W029 suites).
    */
   readonly attestation?: {
     readonly signer?: AttestationSigner;
     readonly verifier?: AttestationVerifier;
+    readonly versionedSigner?: SignedAttestationSigner;
+    readonly versionedVerifier?: SignedAttestationVerifier;
   };
 }
 

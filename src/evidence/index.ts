@@ -23,3 +23,7 @@ export * from "./attestation-service.ts";
 export * from "./authority-proof-of-value-repository.ts";
 export * from "./proof-of-value-service.ts";
 export * from "./hmac-attestation-verifier.ts";
+// NET-W029 — cryptographic attestations and commitments (issue #58).
+export * from "./signed-attestation-input.ts";
+export * from "./signed-attestation-service.ts";
+export * from "./authority-signed-attestation-repository.ts";

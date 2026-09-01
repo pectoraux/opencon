@@ -44,7 +44,7 @@ import type { SecretProvider } from "../core/secrets.ts";
 import type { JobQueue } from "../core/queue.ts";
 import type { JobHandler } from "../core/queue.ts";
 import type { ModuleRegistry } from "../core/module.ts";
-import type { ApiAuth, ApiCommands } from "../api/port.ts";
+import type { ApiAuth, ApiCommands, ApiSignedAttestationView } from "../api/port.ts";
 import type { ApiServer } from "../api/server.ts";
 import type { PostgresAuthority } from "../core/postgres-authority.ts";
 import type { CoordinationService } from "../core/coordination.ts";
@@ -138,7 +138,11 @@ import { createProofOfValueService } from "../evidence/proof-of-value-service.ts
 // production/staging require a configured ATTESTATION_SIGNING_KEY
 // secret or an explicit production signer/verifier adapter pair; the
 // well-known dev default is permitted only in development/test.
-import { selectAttestationSigning, type AttestationSigningMode } from "./attestation-signing.ts";
+import {
+  selectAttestationSigning,
+  selectVersionedAttestationSigning,
+  type AttestationSigningMode,
+} from "./attestation-signing.ts";
 import type {
   AttestationService,
   AttestationSigner,
@@ -148,8 +152,18 @@ import type {
   EvidenceService,
   OutcomeClaimService,
   ProofOfValueService,
+  ReputationInputCoverageFacts,
+  ReputationInputCoverageLookup,
+  SettlementValueCoverageFacts,
+  SettlementValueCoverageLookup,
+  SignedAttestation,
+  SignedAttestationService,
+  SignedAttestationSigner,
+  SignedAttestationVerifier,
   SubjectLookup,
 } from "../evidence/port.ts";
+import { createAuthoritySignedAttestationRepository } from "../evidence/authority-signed-attestation-repository.ts";
+import { createSignedAttestationService } from "../evidence/signed-attestation-service.ts";
 // NET-W006 outcomes boundary: first-class immutable/append-corrected
 // outcome observations, distinct deterministic/probabilistic/
 // experimental attribution representation, experiments/holdouts +
@@ -584,8 +598,17 @@ export interface Runtime {
    * with "explicit-adapters" or "configured-secret" — the insecure
    * "dev-default" is structurally confined to development/test
    * (selection throws otherwise). Diagnostics only; no key material.
+   *
+   * NET-W029 (additive): `algorithm` + `keyReference` expose the
+   * ACTIVE closed-vocabulary identifiers of the VERSIONED
+   * (signed-attestation) selection (e.g. "ed25519/v1" +
+   * "attestation-signing/ed25519/v1") for diagnostics and tests.
    */
-  readonly attestationSigning: { readonly mode: AttestationSigningMode };
+  readonly attestationSigning: {
+    readonly mode: AttestationSigningMode;
+    readonly algorithm: string;
+    readonly keyReference: string;
+  };
   readonly workerLoop: {
     registerHandler(handler: JobHandler): void;
     start(): void;
@@ -621,6 +644,8 @@ export interface Runtime {
   readonly evidenceService: EvidenceService;
   readonly outcomeClaimService: OutcomeClaimService;
   readonly attestationService: AttestationService;
+  // NET-W029 domain service (the versioned signed-attestation surface).
+  readonly signedAttestationService: SignedAttestationService;
   readonly proofOfValueService: ProofOfValueService;
   // NET-W006 domain services (exposed for integration/security tests).
   readonly outcomeObservationService: OutcomeObservationService;
@@ -765,10 +790,18 @@ export interface CreateRuntimeOptions {
    * ATTESTATION_SIGNING_KEY secret in every environment. Partial
    * wiring is rejected (fail closed). Production/staging require
    * EITHER this pair OR the configured secret — never the dev default.
+   *
+   * NET-W029 (additive): `versionedSigner`/`versionedVerifier` are the
+   * versioned (algorithm + key reference) adapters for the
+   * signed-attestation surface — also PAIR-required, also taking
+   * precedence in every environment. The two pairs are independent
+   * (the W005 surface and the W029 surface can be wired separately).
    */
   readonly attestation?: {
     readonly signer?: AttestationSigner;
     readonly verifier?: AttestationVerifier;
+    readonly versionedSigner?: SignedAttestationSigner;
+    readonly versionedVerifier?: SignedAttestationVerifier;
   };
   /**
    * NET-W006: explicitly configured measurement provider adapters
@@ -1187,6 +1220,25 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     authority: postgresAuthority,
     auditWriter,
     logger: logger.forModule("evidence"),
+  });
+  // NET-W029: the VERSIONED (algorithm + key reference) signing
+  // selection for the signed-attestation surface — the same
+  // fail-closed provider-selection discipline as the W005 surface,
+  // extended with REAL asymmetric production algorithms (Ed25519 /
+  // ECDSA P-256 via node:crypto) behind the injected interfaces. Key
+  // material resolves ONLY through the SecretProvider (never env, never
+  // the domain); the default "hmac-sha256" keeps existing configured
+  // deployments booting unchanged (the W005 remediation contract).
+  const versionedAttestationSigning = selectVersionedAttestationSigning({
+    environment: snapshot.environment,
+    secretProvider,
+    logger,
+    algorithm: snapshot.attestationSigningAlgorithm,
+    attestation: opts.attestation,
+  });
+  const signedAttestationRepo = createAuthoritySignedAttestationRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("evidence").debug(m, f) },
   });
   // Proof-of-Value: the subject lookup adapter delegates to the wired
   // opportunity/contribution repositories WITHOUT a domain→domain
@@ -1650,6 +1702,138 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   const economicValueRepo = createAuthorityEconomicValueRepository({
     authority: postgresAuthority,
     logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
+  });
+
+  // ------------------------------------------------------------------
+  // NET-W029 signed attestations wiring (the /evidence boundary,
+  // extended — issue #58).
+  //
+  // The coverage lookups are thin READ-ONLY adapters over the
+  // /reputation and /settlement authorities' OWN repositories
+  // (committed + in-tx fresh reads) — the same dependency-inversion
+  // pattern as every neutral join above. The /evidence domain imports
+  // core contracts only; it never imports /reputation or /settlement,
+  // and neither of those ports gains a signed-attestation surface.
+  // ------------------------------------------------------------------
+  function toReputationInputCoverageFacts(record: {
+    readonly id: string;
+    readonly organizationScopeId: string;
+    readonly subjectPersonId: string;
+    readonly dimension: string;
+    readonly basis: string;
+    readonly sources: readonly { readonly kind: string; readonly id: string }[];
+    readonly description: string | null;
+    readonly occurredAt: string;
+    readonly recordedAt: string;
+    readonly idempotencyKey: string;
+    readonly executionId: string;
+    readonly correlationId: string;
+    readonly causationId: string | null;
+  }): ReputationInputCoverageFacts {
+    return {
+      id: record.id,
+      organizationScopeId: record.organizationScopeId,
+      subjectPersonId: record.subjectPersonId,
+      dimension: record.dimension,
+      basis: record.basis,
+      sources: record.sources.map((s) => ({ kind: s.kind, id: s.id })),
+      description: record.description,
+      occurredAt: record.occurredAt,
+      recordedAt: record.recordedAt,
+      idempotencyKey: record.idempotencyKey,
+      executionId: record.executionId,
+      correlationId: record.correlationId,
+      causationId: record.causationId,
+    };
+  }
+  const reputationInputCoverageLookup: ReputationInputCoverageLookup = {
+    async resolve(id) {
+      const record = await reputationInputRepo.findById(id);
+      return record === null ? null : toReputationInputCoverageFacts(record);
+    },
+    async resolveWithinTx(id, tx) {
+      const record = await reputationInputRepo.findByIdWithinTx(id, tx);
+      return record === null ? null : toReputationInputCoverageFacts(record);
+    },
+  };
+  function toSettlementValueCoverageFacts(record: {
+    readonly id: string;
+    readonly organizationScopeId: string;
+    readonly beneficiaryPersonId: string;
+    readonly state: string;
+    readonly version: number;
+    readonly amount: number;
+    readonly sources: readonly { readonly kind: string; readonly id: string }[];
+    readonly maturation: { readonly strategy: string; readonly windowEndAt?: string };
+    readonly description: string | null;
+    readonly recordedAt: string;
+    readonly recognitionTransactionId: string;
+    readonly idempotencyKey: string;
+    readonly executionId: string;
+    readonly correlationId: string;
+    readonly causationId: string | null;
+  }): SettlementValueCoverageFacts {
+    return {
+      id: record.id,
+      organizationScopeId: record.organizationScopeId,
+      beneficiaryPersonId: record.beneficiaryPersonId,
+      state: record.state,
+      version: record.version,
+      amount: record.amount,
+      sources: record.sources.map((s) => ({ kind: s.kind, id: s.id })),
+      maturation: record.maturation as Readonly<Record<string, unknown>>,
+      description: record.description,
+      recordedAt: record.recordedAt,
+      recognitionTransactionId: record.recognitionTransactionId,
+      idempotencyKey: record.idempotencyKey,
+      executionId: record.executionId,
+      correlationId: record.correlationId,
+      causationId: record.causationId,
+    };
+  }
+  const settlementValueCoverageLookup: SettlementValueCoverageLookup = {
+    async resolve(id) {
+      const record = await economicValueRepo.findById(id);
+      return record === null ? null : toSettlementValueCoverageFacts(record);
+    },
+    async resolveWithinTx(id, tx) {
+      const record = await economicValueRepo.findByIdWithinTx(id, tx);
+      return record === null ? null : toSettlementValueCoverageFacts(record);
+    },
+  };
+  function toApiSignedAttestationView(attestation: SignedAttestation): ApiSignedAttestationView {
+    return {
+      id: attestation.id,
+      organizationScopeId: attestation.organizationScopeId,
+      verifierId: attestation.verifierId,
+      statement: attestation.statement,
+      coverage: attestation.coverage.map((entry) => ({
+        family: entry.family,
+        recordId: entry.recordId,
+        commitment: entry.commitment as unknown as Record<string, unknown>,
+      })),
+      algorithm: attestation.algorithm,
+      keyReference: attestation.keyReference,
+      signature: attestation.signature,
+      signedAt: attestation.signedAt,
+      revokedAt: attestation.revokedAt,
+      revocationReason: attestation.revocationReason,
+      createdAt: attestation.createdAt,
+      recordFormat: attestation.recordFormat,
+    };
+  }
+  const signedAttestationService = createSignedAttestationService({
+    repository: signedAttestationRepo,
+    evidenceRepository: evidenceRepo,
+    coverageLookups: {
+      reputationInput: reputationInputCoverageLookup,
+      settlementValue: settlementValueCoverageLookup,
+    },
+    signer: versionedAttestationSigning.signer,
+    verifier: versionedAttestationSigning.verifier,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("evidence"),
   });
   const creditIssuanceRepo = createAuthorityCreditIssuanceRepository({
     authority: postgresAuthority,
@@ -5654,6 +5838,58 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
         id,
       );
       return { attestationId: result.attestationId, valid: result.valid, reason: result.reason };
+    },
+    // -- NET-W029 signed-attestation commands ---------------------------
+    async createSignedAttestation(execution, _actorPersonId, input) {
+      const result = await signedAttestationService.createSignedAttestation(execution, {
+        organizationScopeId: input.organizationScopeId,
+        verifierId: input.verifierId,
+        statement: input.statement,
+        coverage: input.coverage.map((ref) => ({ family: ref.family, recordId: ref.recordId })),
+        idempotencyKey: input.idempotencyKey,
+      });
+      return toApiSignedAttestationView(result.attestation);
+    },
+    async getSignedAttestation(execution, id, input) {
+      try {
+        const attestation = await signedAttestationService.getSignedAttestation(
+          getExecutionContext() ?? execution,
+          input.organizationScopeId,
+          id,
+        );
+        return toApiSignedAttestationView(attestation);
+      } catch {
+        // Cross-tenant + nonexistent are indistinguishable (no
+        // existence oracle) — the route renders 404.
+        return null;
+      }
+    },
+    async verifySignedAttestation(execution, id, input) {
+      const verdict = await signedAttestationService.verifySignedAttestation(
+        getExecutionContext() ?? execution,
+        input.organizationScopeId,
+        id,
+      );
+      return {
+        attestationId: verdict.attestationId,
+        valid: verdict.valid,
+        reason: verdict.reason,
+        checks: verdict.checks.map((c) => ({
+          check: c.check,
+          subject: c.subject,
+          passed: c.passed,
+          reason: c.reason,
+        })),
+      };
+    },
+    async revokeSignedAttestation(execution, _actorPersonId, id, input) {
+      const attestation = await signedAttestationService.revokeSignedAttestation(execution, {
+        organizationScopeId: input.organizationScopeId,
+        attestationId: id,
+        reason: input.reason,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return toApiSignedAttestationView(attestation);
     },
     async createProofOfValue(execution, actorPersonId, input) {
       const proof = await proofOfValueService.createProofOfValue(execution, {
@@ -10049,7 +10285,13 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     postgresAuthority,
     coordinationService,
     providerSelection,
-    attestationSigning: { mode: attestationSigning.mode },
+    attestationSigning: {
+      mode: attestationSigning.mode,
+      // NET-W029: the ACTIVE closed-vocabulary identifiers of the
+      // versioned selection (diagnostics only; no key material).
+      algorithm: versionedAttestationSigning.algorithm,
+      keyReference: versionedAttestationSigning.keyReference,
+    },
     queue,
     workerLoop,
     registry,
@@ -10081,6 +10323,8 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     evidenceService,
     outcomeClaimService,
     attestationService,
+    // NET-W029 domain service (the versioned signed-attestation surface).
+    signedAttestationService,
     proofOfValueService,
     // NET-W006 domain services.
     outcomeObservationService,
