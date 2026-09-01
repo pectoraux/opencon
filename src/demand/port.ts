@@ -62,6 +62,9 @@ import type {
   ProcurementUnitPriceBand,
 } from "../core/procurement.ts";
 import type { SupplierOfferConsentScope } from "../core/procurement-offer.ts";
+import type { BaselineKind, MeasurementProvenance } from "../core/measurement.ts";
+import type { ConfidenceEstimate } from "../core/evidence.ts";
+import type { ProcurementBaselineMethod } from "../core/procurement-savings.ts";
 
 // ---------------------------------------------------------------------------
 // NET-W024 records
@@ -1608,6 +1611,549 @@ export interface SupplierOfferServiceDeps {
 }
 
 // ---------------------------------------------------------------------------
+// NET-W027 records (verified savings and counterfactuals — the SAME
+// boundary)
+// ---------------------------------------------------------------------------
+
+/**
+ * Neutral, read-only facts about one /evidence record, resolved at
+ * the composition root (the dependency-inversion precedent — this
+ * port imports core contracts only; the bootstrap root wires the
+ * thin adapter over the /evidence authority's repository). The
+ * savings boundary consumes EXACTLY these facts: tenancy scope, the
+ * subject binding and the source type (the provenance/truth
+ * authority keeps everything else).
+ */
+export interface ProcurementSavingsEvidenceFacts {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly subjectId: string;
+  readonly subjectType: string;
+  /** The evidence source type (see EVIDENCE_SOURCE_TYPES). */
+  readonly sourceType: string;
+}
+
+/**
+ * The neutral /evidence lookup consumed by the savings boundary
+ * (scope + subject-binding + source-type facts ONLY — never the
+ * payload, commitment or grade machinery of the /evidence
+ * authority).
+ */
+export interface ProcurementSavingsEvidenceLookup {
+  resolve(evidenceId: string): Promise<ProcurementSavingsEvidenceFacts | null>;
+}
+
+/**
+ * Neutral, read-only facts about one /outcomes observation (the
+ * normalized measurement authority's OutcomeObservation records),
+ * resolved at the composition root. The savings boundary consumes
+ * EXACTLY these facts: tenancy scope, the subject binding, the
+ * outcome type, the observed value + unit, the confidence, the
+ * provenance source type + collection time, and the correction-chain
+ * position (`supersededByObservationId` is computed by the adapter
+ * over the authority's correction index — an observation corrected
+ * by a later record is NOT chain head and can never support a
+ * savings derivation). Measurement semantics stay in /outcomes.
+ */
+export interface ProcurementSavingsOutcomeObservationFacts {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly subjectId: string;
+  readonly subjectType: string;
+  readonly outcomeType: string;
+  readonly observedValue: {
+    readonly value: number;
+    readonly unit: string;
+  };
+  readonly confidence: ConfidenceEstimate;
+  readonly provenance: {
+    readonly sourceType: string;
+    readonly collectedAt: string;
+  };
+  /** The observation this record corrects (null for a root record). */
+  readonly correctsObservationId: string | null;
+  /** The LATER observation that supersedes this one (null = chain head). */
+  readonly supersededByObservationId: string | null;
+}
+
+/**
+ * The neutral /outcomes lookup consumed by the savings boundary
+ * (committed-state reads through the composition root).
+ */
+export interface ProcurementSavingsOutcomeLookup {
+  resolve(observationId: string): Promise<ProcurementSavingsOutcomeObservationFacts | null>;
+}
+
+/**
+ * A ProcurementBaseline — the first-class, tenant/pool-scoped,
+ * durable, explicit baseline or counterfactual reference for one
+ * procurement pool's realized-outcome comparison (PROC-002; issue
+ * #54 invariant 1): the explicit kind (the NET-W006 BaselineKind
+ * vocabulary — a `counterfactual` kind REQUIRES a quantified
+ * confidence interval, validated at creation and re-derived at
+ * every evaluation), the closed-vocabulary method + REQUIRED
+ * method version (method identity never collapsed), the bounded
+ * HISTORICAL comparison window + bounded population (the explicit
+ * assumptions), the baseline value + unit with a validated
+ * ConfidenceEstimate, the measurement provenance, and ≥1 traceable
+ * /evidence references subject-bound to the pool (resolved through
+ * the neutral lookup, fail closed). The acting person must be the
+ * POOL CREATOR (the W026 selection-surface precedent — procurement
+ * outcome analysis stays with the demand owner).
+ *
+ * The record is STATIC after creation except the ONE-WAY
+ * invalidation (`invalidatedAt` + reason from the closed
+ * vocabulary) — an invalidated baseline can never again support a
+ * savings derivation (fail-closed re-derivation; /workflows is
+ * untouched — no lifecycle subject kind, NO transition machinery).
+ * Evidence staleness is likewise DERIVED at each evaluation anchor,
+ * never mutated. NO economic surface exists anywhere on this record
+ * (a baseline is a measurement reference, not value).
+ */
+export interface ProcurementBaseline {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly poolId: string;
+  /** The pool creator who established the baseline (server-resolved actor). */
+  readonly createdBy: string;
+  /** "baseline" | "counterfactual" — the NET-W006 BaselineKind, reused. */
+  readonly baselineKind: BaselineKind;
+  /** The closed-vocabulary baseline method (see PROCUREMENT_BASELINE_METHODS). */
+  readonly method: ProcurementBaselineMethod;
+  /** REQUIRED method version — method identity is never collapsed. */
+  readonly methodVersion: string;
+  /** The bounded HISTORICAL comparison window (1..365 days). */
+  readonly comparisonWindow: {
+    readonly startsAt: string;
+    readonly endsAt: string;
+  };
+  /** The bounded population/assumptions description (prose). */
+  readonly population: string;
+  /** The baseline reference value + unit (never an economic amount). */
+  readonly baselineValue: {
+    readonly value: number;
+    readonly unit: string;
+  };
+  /** Validated confidence; a counterfactual carries a quantified interval. */
+  readonly confidence: ConfidenceEstimate;
+  /** How the baseline material was produced (measurement provenance). */
+  readonly provenance: MeasurementProvenance;
+  /** The traceable /evidence references (subject-bound to the pool). */
+  readonly evidenceIds: readonly string[];
+  /** One-way invalidation (null while the baseline is valid). */
+  readonly invalidatedAt: string | null;
+  readonly invalidationReason: string | null;
+  readonly recordFormat: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W027 inputs / results
+// ---------------------------------------------------------------------------
+
+export interface CreateProcurementBaselineInput {
+  readonly organizationScopeId: string;
+  readonly poolId: string;
+  /** "baseline" | "counterfactual" (closed vocabulary). */
+  readonly baselineKind: string;
+  /** The closed-vocabulary baseline method. */
+  readonly method: string;
+  /** REQUIRED method version (never collapsed). */
+  readonly methodVersion: string;
+  /** The bounded HISTORICAL comparison window. */
+  readonly comparisonWindow: {
+    readonly startsAt: string;
+    readonly endsAt: string;
+  };
+  /** The bounded population/assumptions description. */
+  readonly population: string;
+  readonly baselineValue: {
+    readonly value: number;
+    readonly unit: string;
+  };
+  /** Validated confidence (counterfactual ⇒ quantified interval). */
+  readonly confidence: ConfidenceEstimate;
+  /** The baseline material provenance (sourceType + collectedAt required). */
+  readonly provenance: {
+    readonly sourceType: string;
+    readonly sourceId?: string;
+    readonly collectedAt: string;
+    readonly collectorId?: string;
+  };
+  /** 1..8 traceable /evidence references (subject-bound to the pool). */
+  readonly evidenceIds: readonly string[];
+  readonly idempotencyKey: string;
+  // NOTE: there is deliberately NO validity/supported/quality input —
+  // baseline validity and evidence sufficiency are SERVER-DERIVED at
+  // every evaluation anchor (issue #54 invariant 3: caller assertions
+  // cannot authorize a savings claim).
+}
+
+export interface CreateProcurementBaselineResult {
+  readonly baseline: ProcurementBaseline;
+  /** false when the idempotency key replayed the committed record. */
+  readonly created: boolean;
+}
+
+export interface InvalidateProcurementBaselineInput {
+  readonly organizationScopeId: string;
+  readonly baselineId: string;
+  /** The closed-vocabulary invalidation reason. */
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+/**
+ * The derivation input: WHICH explicit baseline + WHICH authoritative
+ * observations to derive over (each id is resolved and validated
+ * server-side — scope, subject, type, chain-head, source, freshness).
+ * The optional W026 selection reference is NEUTRAL LINEAGE only.
+ */
+export interface EvaluateProcurementSavingsInput {
+  readonly organizationScopeId: string;
+  readonly poolId: string;
+  readonly baselineId: string;
+  /** 0..8 outcome-observation ids (empty ⇒ the derivation fails closed). */
+  readonly outcomeObservationIds: readonly string[];
+  /** Optional W026 competitive-selection lineage reference (never savings truth). */
+  readonly selectionId?: string | null;
+  // NOTE: there is deliberately NO savings value, confidence, supported
+  // flag or baseline-facts input — the derivation is server-owned
+  // arithmetic over authoritative records (issue #54 invariant 1:
+  // savings cannot be inferred from caller-provided arithmetic).
+}
+
+export interface RecordProcurementSavingsInput extends EvaluateProcurementSavingsInput {
+  readonly idempotencyKey: string;
+}
+
+export interface RecordProcurementSavingsResult {
+  readonly savings: ProcurementSavings;
+  /** false when the idempotency key replayed the committed record. */
+  readonly created: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// The DERIVED savings view (PROC-002 — never stored, never
+// caller-asserted) and the authoritative savings lineage record
+// ---------------------------------------------------------------------------
+
+/**
+ * One machine-readable sufficiency check of the derived savings
+ * evaluation (issue #54 invariant 5). Every check re-derives from
+ * CURRENT authoritative records at the evaluation anchor — no
+ * caller-asserted sufficiency exists anywhere.
+ */
+export interface ProcurementSavingsCheck {
+  readonly check:
+    | "baseline_valid"
+    | "baseline_kind_interval"
+    | "baseline_evidence_supported"
+    | "baseline_evidence_fresh"
+    | "observation_present"
+    | "observation_supported"
+    | "observation_chain_head"
+    | "observation_subject_bound"
+    | "observation_outcome_type_savings"
+    | "observation_evidence_fresh"
+    | "unit_consistent"
+    | "uncertainty_preserved";
+  readonly satisfied: boolean;
+  /** Deterministic machine-readable detail (baseline/observation facts only). */
+  readonly detail: Record<string, unknown>;
+}
+
+/**
+ * The DERIVED savings view (PROC-002): the deterministic,
+ * uncertainty-preserving derivation of one pool's realized savings
+ * against one explicit baseline at ONE explicit evaluation anchor —
+ * a PURE derivation over (the durable pool, the CURRENT baseline,
+ * the baseline's re-resolved /evidence facts, the re-resolved
+ * /outcomes observations). There is NO command that asserts, stores
+ * or waives sufficiency: `supported` is the conjunctive verdict of
+ * the machine-readable checks, the observed value combines
+ * conservatively (sum + unit consistency; MIN confidence point +
+ * interval envelope — the NET-W006 rollup precedent), and savings =
+ * baseline − observed (SERVER-OWNED arithmetic — never caller
+ * arithmetic, never offer price), and the digest EXCLUDES the
+ * evaluation anchor (identical authoritative state ⇒ identical
+ * digest). `/settlement` remains the economic authority: this view
+ * is a MEASUREMENT DECISION surface, never an economic one; W028
+ * Benefit Pool semantics are excluded. Mutates nothing; audits
+ * nothing (a derived 200 decision).
+ */
+export interface ProcurementSavingsView {
+  readonly poolId: string;
+  readonly organizationScopeId: string;
+  /** The explicit, versioned, server-owned derivation policy snapshot. */
+  readonly derivationPolicy: {
+    readonly version: number;
+    readonly method: string;
+    readonly criteria: readonly string[];
+  };
+  readonly baselineId: string;
+  readonly baselineKind: BaselineKind;
+  /** The conjunctive sufficiency verdict (every check satisfied). */
+  readonly supported: boolean;
+  readonly checks: readonly ProcurementSavingsCheck[];
+  readonly baselineValue: {
+    readonly value: number;
+    readonly unit: string;
+  };
+  /** The conservatively combined observed value (null when un combinable). */
+  readonly observedValue: {
+    readonly value: number;
+    readonly unit: string;
+  } | null;
+  /** savings = baseline − observed (null when un combinable; may be negative — honest realized dis-savings). */
+  readonly savings: {
+    readonly value: number;
+    readonly unit: string;
+  } | null;
+  /** The conservatively combined confidence (null when un combinable). */
+  readonly confidence: ConfidenceEstimate | null;
+  /** The contributing observation ids, in canonical id order (input-order independent). */
+  readonly observationIds: readonly string[];
+  /**
+   * The deterministic digest over the canonical decision facts
+   * (policy + baseline + evidence + observations + checks + derived
+   * values) — EXCLUDING the evaluation anchor (the W021/W024/W025/
+   * W026 decision-digest precedent).
+   */
+  readonly digest: string;
+  /** The explicit evaluation anchor (recorded, never digested). */
+  readonly evaluatedAt: string;
+}
+
+/**
+ * A ProcurementSavings — the first-class, durable, tenant-scoped
+ * AUTHORITATIVE savings-lineage record (PROC-002 / PROC-AC-01's
+ * gate): one pool-creator-executed verified savings claim, derived
+ * from CURRENT records at ONE explicit anchor and persisted once
+ * (IMMUTABLE thereafter — each record is a lineage event;
+ * re-derivation records a NEW record). Fails closed when the
+ * derivation is not supported (invalid, stale or insufficient
+ * evidence — never caller-asserted). The snapshot carries the full
+ * derivation facts (policy, baseline identity/kind/value, observed
+ * value, savings, confidence, checks, digest) + provenance. A
+ * verified savings claim is a MEASUREMENT DECISION — never an
+ * economic mutation (`/settlement` stays the sole economic
+ * authority; W028 semantics are excluded). Economically
+ * authoritative consumers (NET-W028+) must consume the DERIVED
+ * evaluation for current verdicts, never stale snapshots.
+ */
+export interface ProcurementSavings {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly poolId: string;
+  readonly baselineId: string;
+  /** Optional W026 competitive-selection lineage (neutral reference). */
+  readonly selectionId: string | null;
+  /** The pool creator who recorded the claim (server-resolved actor). */
+  readonly recordedBy: string;
+  readonly derivationPolicy: {
+    readonly version: number;
+    readonly method: string;
+    readonly criteria: readonly string[];
+  };
+  readonly baselineKind: BaselineKind;
+  readonly baselineValue: {
+    readonly value: number;
+    readonly unit: string;
+  };
+  readonly observedValue: {
+    readonly value: number;
+    readonly unit: string;
+  } | null;
+  readonly savings: {
+    readonly value: number;
+    readonly unit: string;
+  } | null;
+  readonly confidence: ConfidenceEstimate | null;
+  readonly observationIds: readonly string[];
+  readonly checks: readonly ProcurementSavingsCheck[];
+  /** Always true on a persisted record (unsupported derivations fail closed). */
+  readonly supported: boolean;
+  /** The explicit evaluation anchor the record's derivation used. */
+  readonly evaluationAnchor: string;
+  readonly digest: string;
+  readonly recordFormat: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W027 repositories
+// ---------------------------------------------------------------------------
+
+export interface ProcurementBaselineRepository {
+  save(
+    baseline: ProcurementBaseline,
+    execution: ExecutionContext,
+  ): Promise<ProcurementBaseline>;
+  findById(id: string): Promise<ProcurementBaseline | null>;
+  createWithinTx(
+    baseline: ProcurementBaseline,
+    tx: AuthorityTransaction,
+  ): Promise<ProcurementBaseline>;
+  /** In-tx fresh read (the composites' TOCTOU closure). */
+  getByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<ProcurementBaseline | null>;
+  /**
+   * One-way baseline invalidation (in-tx with the invalidation audit
+   * event): an already-invalidated baseline is returned unchanged.
+   */
+  invalidateWithinTx(
+    baselineId: string,
+    invalidatedAt: string,
+    reason: string,
+    tx: AuthorityTransaction,
+  ): Promise<ProcurementBaseline>;
+  listByOrganization(
+    organizationScopeId: string,
+    filters?: {
+      readonly poolId?: string;
+      readonly invalidated?: boolean;
+    },
+  ): Promise<readonly ProcurementBaseline[]>;
+}
+
+export interface ProcurementSavingsRepository {
+  save(
+    savings: ProcurementSavings,
+    execution: ExecutionContext,
+  ): Promise<ProcurementSavings>;
+  findById(id: string): Promise<ProcurementSavings | null>;
+  createWithinTx(
+    savings: ProcurementSavings,
+    tx: AuthorityTransaction,
+  ): Promise<ProcurementSavings>;
+  /** In-tx fresh read. */
+  getByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<ProcurementSavings | null>;
+  /**
+   * The pool's savings lineage, newest-first by (createdAt, id) —
+   * immutable records (no mutation methods exist: a savings record
+   * is append-only lineage).
+   */
+  listByOrganization(
+    organizationScopeId: string,
+    filters?: {
+      readonly poolId?: string;
+    },
+  ): Promise<readonly ProcurementSavings[]>;
+}
+
+// ---------------------------------------------------------------------------
+// The NET-W027 savings/counterfactual service (same boundary: /demand)
+// ---------------------------------------------------------------------------
+
+export interface ProcurementSavingsService {
+  /**
+   * Establish the explicit baseline/counterfactual record for a
+   * procurement pool (PROC-002): pool-creator-only; the attributes,
+   * confidence (counterfactual ⇒ quantified interval), provenance and
+   * bounded window/population are validated fail-closed, and every
+   * evidence reference is resolved through the NEUTRAL /evidence
+   * lookup (missing/cross-tenant ⇒ NotFoundError — no existence
+   * oracle; subject-bound to the pool or rejected). Evidence
+   * SUFFICIENCE (the qualifying source-type rule) is NOT stored — it
+   * is re-derived at every evaluation anchor. Commits atomically
+   * with the `procurement_baseline.created` audit event.
+   */
+  createProcurementBaseline(
+    execution: ExecutionContext,
+    input: CreateProcurementBaselineInput,
+  ): Promise<CreateProcurementBaselineResult>;
+  /**
+   * Invalidate the baseline (ONE-WAY, pool-creator-only): an
+   * invalidated baseline can never again support a savings
+   * derivation (the derivation's baseline_valid check fails closed —
+   * fail-closed re-derivation, never a status transition; /workflows
+   * untouched). Commits atomically with the
+   * `procurement_baseline.invalidated` audit event.
+   */
+  invalidateProcurementBaseline(
+    execution: ExecutionContext,
+    input: InvalidateProcurementBaselineInput,
+  ): Promise<ProcurementBaseline>;
+  /** The pool's baselines (pool-creator-only read). */
+  listPoolBaselines(
+    execution: ExecutionContext,
+    input: {
+      readonly organizationScopeId: string;
+      readonly poolId: string;
+    },
+  ): Promise<readonly ProcurementBaseline[]>;
+  /**
+   * THE DERIVED SAVINGS VIEW (PROC-002): the deterministic,
+   * uncertainty-preserving derivation of one pool's realized savings
+   * against one explicit baseline at ONE explicit evaluation anchor.
+   * Pool-creator-only. NO savings value, confidence, supported flag
+   * or baseline-facts input exists (every caller field beyond
+   * identities is ignored — the arithmetic is server-owned), and this
+   * boundary carries NO economic surface. Mutates nothing; audits
+   * nothing (a derived 200 decision for every outcome — supported or
+   * not, the decision is the product).
+   */
+  evaluateProcurementSavings(
+    execution: ExecutionContext,
+    input: EvaluateProcurementSavingsInput,
+  ): Promise<ProcurementSavingsView>;
+  /**
+   * Record the AUTHORITATIVE savings lineage (PROC-002):
+   * pool-creator-only. The derivation is re-executed INSIDE the
+   * authoritative transaction from CURRENT records (in-tx pool +
+   * baseline; neutral-lookup evidence/observation facts at the ONE
+   * anchor set inside the transaction) — nothing caller-asserted
+   * values or supports the claim. FAILS CLOSED when the derivation
+   * is not supported (invalid, stale or insufficient evidence).
+   * Same-key replay is exactly-once; serialized by the per-pool
+   * lock. Commits atomically with the `procurement_savings.recorded`
+   * audit event. A verified savings claim is a MEASUREMENT DECISION
+   * — no economic state is created.
+   */
+  recordProcurementSavings(
+    execution: ExecutionContext,
+    input: RecordProcurementSavingsInput,
+  ): Promise<RecordProcurementSavingsResult>;
+  /** The pool's savings lineage records (pool-creator-only read). */
+  listPoolSavings(
+    execution: ExecutionContext,
+    input: {
+      readonly organizationScopeId: string;
+      readonly poolId: string;
+    },
+  ): Promise<readonly ProcurementSavings[]>;
+}
+
+export interface ProcurementSavingsServiceDeps {
+  readonly baselineRepository: ProcurementBaselineRepository;
+  readonly savingsRepository: ProcurementSavingsRepository;
+  readonly poolRepository: ProcurementPoolRepository;
+  readonly selectionRepository: CompetitiveSelectionRepository;
+  readonly membershipLookup: DemandMembershipLookup;
+  readonly evidenceLookup: ProcurementSavingsEvidenceLookup;
+  readonly outcomeLookup: ProcurementSavingsOutcomeLookup;
+  readonly idempotency: IdempotencyStore;
+  readonly auditWriter: TransactionalAuditWriter;
+  readonly logger: Logger;
+}
+
+// ---------------------------------------------------------------------------
 // The boundary port
 // ---------------------------------------------------------------------------
 
@@ -1641,6 +2187,10 @@ export interface DemandPort {
     readonly supplierOfferRecorded: "procurement_offer.recorded";
     readonly supplierOfferWithdrawn: "procurement_offer.withdrawn";
     readonly competitiveSelectionRecorded: "procurement_selection.recorded";
+    /** NET-W027 baseline/savings mutations (same boundary). */
+    readonly procurementBaselineCreated: "procurement_baseline.created";
+    readonly procurementBaselineInvalidated: "procurement_baseline.invalidated";
+    readonly procurementSavingsRecorded: "procurement_savings.recorded";
   };
 }
 
@@ -1659,4 +2209,7 @@ export type {
   ProcurementTimingWindow,
   ProcurementQuantityBucket,
   SupplierOfferConsentScope,
+  BaselineKind,
+  ConfidenceEstimate,
+  ProcurementBaselineMethod,
 };

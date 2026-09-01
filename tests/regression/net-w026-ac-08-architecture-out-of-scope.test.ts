@@ -98,6 +98,21 @@ const W026_FILES = [
   "src/demand/supplier-offer-service.ts",
 ];
 
+// NET-W027 UPDATE (2026-09): the SHARED /demand boundary files
+// (port.ts, module.ts) now carry the sanctioned NET-W027
+// savings/counterfactual contracts (work order
+// spec/work-orders/NET-W027.md — the SAME frozen /demand boundary
+// extended again; the NET-W006 BaselineKind vocabulary value
+// "counterfactual" and the W027 baseline/counterfactual record
+// semantics are IN SCOPE there by design). The historical W026
+// intent — W026's OWN files introduced no savings/counterfactual
+// semantics — is preserved by scoping the savings/counterfactual
+// vocabulary bans to the W026-OWNED files below; the shared files
+// keep every other ban (economic/lifecycle/import/benefit/AI).
+const W026_OWNED_FILES = W026_FILES.filter(
+  (rel) => rel !== "src/demand/port.ts" && rel !== "src/demand/module.ts",
+);
+
 const DOMAIN_DIRS = [
   "identity", "organizations", "participants", "opportunities",
   "contributions", "campaigns", "inventory", "creators", "demand",
@@ -328,10 +343,12 @@ describe("NET-W026-AC-08 architecture / out-of-scope", () => {
       expect(content).not.toMatch(
         /from ["']\.\.\/(outcomes|campaigns|inventory|settlement|reputation|disputes|creators|workflows|evidence|benefits|opportunities|contributions|identity|organizations|participants|adapters|api|bootstrap|measurement|llm|agents|payments|ledger)\//,
       );
-      // No verified-savings (W027) or Benefit-Pool (W028) semantics.
-      expect(content).not.toMatch(/\bsavingsVerification\b/);
-      expect(content).not.toMatch(/\bverifiedSavings\b/);
-      expect(content).not.toMatch(/\bcounterfactual\b/i);
+      // No verified-savings (W027) or Benefit-Pool (W028) semantics:
+      // the Benefit-Pool ban holds on ALL files (including the
+      // shared boundary files); the savings/counterfactual bans are
+      // scoped to the W026-OWNED files (see the NET-W027 UPDATE
+      // comment at W026_OWNED_FILES above — the shared /demand
+      // port/module now carry the sanctioned NET-W027 contracts).
       expect(content).not.toMatch(/\bbenefitPool\b/i);
       expect(content).not.toMatch(/\ballocateBenefit\b/);
       // No AI authority: no advisory-ranking machinery (a future
@@ -341,6 +358,16 @@ describe("NET-W026-AC-08 architecture / out-of-scope", () => {
       expect(content).not.toMatch(/\badvisoryScore\b/);
       expect(content).not.toMatch(/\bmodelRanking\b/);
       expect(content).not.toMatch(/\baiEligibility\b/);
+    }
+    // NET-W027 UPDATE: savings/counterfactual (W027) vocabulary is
+    // banned on the W026-OWNED files only (the shared /demand
+    // port/module now carry the sanctioned NET-W027 contracts — see
+    // the W026_OWNED_FILES comment above).
+    for (const rel of W026_OWNED_FILES) {
+      const content = await readFile(join(REPO, rel), "utf8");
+      expect(content).not.toMatch(/\bsavingsVerification\b/);
+      expect(content).not.toMatch(/\bverifiedSavings\b/);
+      expect(content).not.toMatch(/\bcounterfactual\b/i);
     }
   });
 

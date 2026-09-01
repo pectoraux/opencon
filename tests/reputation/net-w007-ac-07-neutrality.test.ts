@@ -82,7 +82,15 @@ describe("NET-W007-AC-07 provider/model neutrality", () => {
     expect(content.indicatedInputCount).toBe(1);
   });
 
-  test("model/self inputs ALONE can never reach a fully verified score (indicatedOnlyCap binds regardless of volume)", async () => {
+  // NET-W027 delivery note (2026-09): this 120-iteration loop
+  // (240 sequential authority awaits) crossed the 5s default
+  // per-test timeout on a slow shared CI runner (5002ms observed in
+  // the verify job at c80edac — green at the previous head and 5x
+  // green locally; a pre-existing latent flake, unrelated to W027).
+  // The explicit timeout makes the bound deterministic.
+  test(
+    "model/self inputs ALONE can never reach a fully verified score (indicatedOnlyCap binds regardless of volume)",
+    async () => {
     await createDefaultPolicy(harness);
     const ctx = actorCtx(harness, "ac07-model-capped");
     // 120 model + self inputs — unverified volume far beyond the cap
@@ -114,7 +122,9 @@ describe("NET-W007-AC-07 provider/model neutrality", () => {
     expect(helpfulness.score).toBe(10); // indicatedOnlyCap, NOT 30
     expect(helpfulness.score).toBeLessThan(100); // maxScore unreachable
     expect(helpfulness.decayedIndicatedWeight).toBe(30);
-  });
+    },
+    60000,
+  );
 
   test("a single verified source among model inputs upgrades the basis — verified evidence outranks model output", async () => {
     await createDefaultPolicy(harness);
