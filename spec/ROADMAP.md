@@ -44,13 +44,11 @@ Composition-root orchestration is allowed, but an orchestration function must no
 ## Development state
 
 ### Phase 1 — Foundation
-
 - **NET-W001 — Platform and modular-monolith foundation** — **COMPLETE**.
 - **NET-W002 — Identity, organizations and participant model** — **COMPLETE**.
 - **NET-W003 — Persistence, queues, objects, secrets and observability** — **COMPLETE**.
 
 ### Phase 2 — Protocol core
-
 - **NET-W004 — Opportunity and contribution lifecycle** — **COMPLETE**.
 - **NET-W005 — Evidence and Proof-of-Value** — **COMPLETE**.
 - **NET-W006 — Outcomes and measurement abstraction** — **COMPLETE**.
@@ -58,49 +56,42 @@ Composition-root orchestration is allowed, but an orchestration function must no
 - **NET-W008 — Participation Credits and economic ledger** — **COMPLETE**.
 
 ### Phase 3 — Trust
-
 - **NET-W009 — Fraud and risk engine** — **COMPLETE**.
 - **NET-W010 — Stake, challenges and disputes** — **COMPLETE**.
 
 ### Phase 4 — Farmable contribution market
-
 - **NET-W011 — Campaign domain** — **COMPLETE**.
 - **NET-W012 — Helpful contributions** — **COMPLETE**.
 - **NET-W013 — Quality, moderation and anti-spam controls** — **COMPLETE**.
 - **NET-W014 — Reward and settlement integration** — **COMPLETE**.
 
 ### Phase 5 — Creator network
-
 - **NET-W015 — Creator identity and preferences** — **COMPLETE**.
 - **NET-W016 — Creator matching** — **COMPLETE**.
 - **NET-W017 — UGC workflow and rights** — **COMPLETE**.
 - **NET-W018 — Sponsorship and disclosure** — **COMPLETE**.
 
 ### Phase 6 — Advertising network
-
-- **NET-W019 — Inventory and placements** — **COMPLETE**. Supply registration, ownership, placement context, provenance and derived settlement-readiness established.
-- **NET-W020 — Cross-promotion and clearing** — **COMPLETE**. Clearing orchestration established inside `/settlement`; the economic draw, clearing record, campaign bookkeeping and audit lineage share one authoritative transaction.
-- **NET-W021 — Campaign matching and optimization** — **COMPLETE**. Matching remains selection-not-authority; hard eligibility precedes deterministic ranking and bounded AI advisory.
-- **NET-W022 — Attribution and privacy measurement adapters** — **COMPLETE**. Browser/platform and iOS attribution facts normalize through `/measurement`; `/outcomes` remains measurement authority; provider secrets/raw payloads remain isolated.
-- **NET-W023 — OpenRTB and supply-chain adapters** — **COMPLETE**. All provider-specific OpenRTB/ads.txt/app-ads.txt/sellers.json/schain parsing lives in `/adapters`; supply-chain `verified` requires authenticated (HMAC trust channel via `SecretProvider`) + fresh + consistent evidence; the delivery-notice material path reuses the W022 measurement ingestion composite.
+- **NET-W019 — Inventory and placements** — **COMPLETE**.
+- **NET-W020 — Cross-promotion and clearing** — **COMPLETE**.
+- **NET-W021 — Campaign matching and optimization** — **COMPLETE**.
+- **NET-W022 — Attribution and privacy measurement adapters** — **COMPLETE**.
+- **NET-W023 — OpenRTB and supply-chain adapters** — **COMPLETE**.
 
 ### Phase 7 — Demand economy
-
-- **NET-W024 — Consumer Demand Pools** — **COMPLETE**. Privacy-preserving consumer demand aggregation inside `/demand`: tenant-scoped pools, private consented commitments, the frozen disclosure floor, derived qualified-aggregate supplier views (never stored, never caller-asserted); zero economic surface.
-- **NET-W025 — Business procurement pools** — **COMPLETE**. Privacy/competition-preserving business demand aggregation inside `/demand`, with dual server-enforced membership, frozen commitment and distinct-organization floors, deterministic qualification, and minimized supplier-facing demand. Merged in PR #51 as `bcaf81b82088688af701f1a90242cc61b1fdd094`.
-- **NET-W026 — Supplier offers and competitive selection** — **COMPLETE**. Supplier offers and deterministic competitive selection live inside `/demand`; hard eligibility is server-derived; W025 privacy remains intact; selection is procurement-only and non-economic. Merged in PR #53 as `6b8d8424587405aae7e0d8b8ea6bd5e48a5e0936`.
-- **NET-W027 — Verified savings and counterfactuals** — **CURRENT IMPLEMENTATION TARGET**. Establish evidence-backed baselines, counterfactuals and realized savings with explicit uncertainty, deterministic anchor-aware derivation and fail-closed evidence sufficiency.
+- **NET-W024 — Consumer Demand Pools** — **COMPLETE**.
+- **NET-W025 — Business procurement pools** — **COMPLETE**. Merged in PR #51 as `bcaf81b82088688af701f1a90242cc61b1fdd094`.
+- **NET-W026 — Supplier offers and competitive selection** — **COMPLETE**. Merged in PR #53 as `6b8d8424587405aae7e0d8b8ea6bd5e48a5e0936`.
+- **NET-W027 — Verified savings and counterfactuals** — **CURRENT IMPLEMENTATION TARGET**.
 - **NET-W028 — Benefit Pools** — **PLANNED**.
 
 ### Phase 8 — Decentralization
-
 - **NET-W029 — Cryptographic attestations and commitments** — **PLANNED**.
 - **NET-W030 — External settlement adapters** — **PLANNED**.
 - **NET-W031 — Portable reputation proofs** — **PLANNED**.
 - **NET-W032 — Decentralized validation/dispute layer** — **PLANNED**.
 
 ### Phase 9 — End-to-end proof
-
 - **NET-W033 — Complete contribution lifecycle** — **PLANNED**.
 - **NET-W034 — Complete advertising lifecycle** — **PLANNED**.
 - **NET-W035 — Complete creator lifecycle** — **PLANNED**.
@@ -121,53 +112,6 @@ W028/W033 → W036
 ```
 
 The precise dependency and readiness rules remain authoritative in `spec/dependency-graph.md` and `spec/work-items.md`.
-
-## W025 implementation contract
-
-### Authority model
-
-```text
-business demand commitments (tenant-scoped, buyer-organization-authorized, consented)
-        ↓
-/demand owns procurement pools + commitments + versioned neutral category/attribute vocabulary
-(no second demand/procurement authority — the W024 boundary extended, not duplicated)
-        ↓
-privacy / competition policy (deterministic derivation, frozen commitment floor
-AND frozen distinct-organization floor; bands/buckets/windows only — never exact
-quantities, unit prices, budgets or timing)
-        ↓
-deterministic qualified aggregate (derived, never stored, never caller-asserted)
-        ↓
-supplier-facing minimized demand view
-        ↓
-/settlement stays the sole economic authority (zero demand-side economic surface)
-```
-
-### W025 outcome
-
-NET-W025 is complete. Its authoritative work order and evidence ledger remain in `spec/work-orders/NET-W025.md` and `docs/net-w025-business-procurement-pools.md`; implementation merged to `main` at `bcaf81b82088688af701f1a90242cc61b1fdd094` after green CI and architect approval.
-
-## W026 implementation contract
-
-### Authority model
-
-```text
-NET-W025 qualified business demand
-        ↓
-supplier offers (tenant/pool scoped, durable, provenance + validity)
-        ↓
-server-derived hard eligibility
-        ↓
-deterministic competitive ranking / selection
-        ↓
-auditable selection result
-        ↓
-/settlement remains the SOLE economic authority
-```
-
-### W026 outcome
-
-NET-W026 is complete. The authoritative work order and evidence ledger remain in `spec/work-orders/NET-W026.md` and `docs/net-w026-supplier-offers-competitive-selection.md`; implementation merged to `main` at `6b8d8424587405aae7e0d8b8ea6bd5e48a5e0936` after green CI and architect approval.
 
 ## W027 implementation contract
 
