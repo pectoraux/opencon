@@ -4465,6 +4465,254 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // ------------------------------------------------------------------
+    // NET-W026 — Supplier offers and competitive selection (inside the
+    // SAME /demand boundary). Offers are private to their supplier
+    // (offers/mine is the ONLY offer read surface); selection surfaces
+    // are pool-creator-only (supplier commercial terms never cross to
+    // other pool participants); the derived selection view is a
+    // protected 200 decision; the selection record is authoritative
+    // lineage derived INSIDE the transaction.
+    // ------------------------------------------------------------------
+
+    // POST /api/demand/procurement/pools/:id/offers — record a
+    // supplier offer (protected; guard action
+    // demand.procurement.offers.create; the acting person BECOMES the
+    // supplier — there is no supplierPersonId input; the
+    // qualified-demand gate and the consent grant are
+    // server-derived/server-written).
+    if (
+      path.startsWith("/api/demand/procurement/pools/") &&
+      path.endsWith("/offers") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/demand/procurement/pools/".length,
+        -"/offers".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.offers.create",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createSupplierOffer(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          poolId: id,
+          attributes: obj.attributes,
+          ...(obj.validUntil !== undefined && obj.validUntil !== null
+            ? { validUntil: obj.validUntil as string }
+            : {}),
+          consent: obj.consent,
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/demand/procurement/offers/:id/withdrawal — withdraw
+    // the supplier offer (one-way, supplier-only; protected; guard
+    // action demand.procurement.offers.withdraw — the consent
+    // revocation).
+    if (
+      path.startsWith("/api/demand/procurement/offers/") &&
+      path.endsWith("/withdrawal") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/demand/procurement/offers/".length,
+        -"/withdrawal".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.offers.withdraw",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.withdrawSupplierOffer(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          offerId: id,
+          ...(obj.reason !== undefined && obj.reason !== null
+            ? { reason: obj.reason as string }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/demand/procurement/offers/mine — list the
+    // AUTHENTICATED ACTOR'S OWN offers (protected; guard action
+    // demand.procurement.offers.read). The ONLY offer read surface:
+    // the supplier is the server-resolved actor (there is no
+    // supplierPersonId input); individual supplier offers are never
+    // exposed through any other route.
+    if (
+      path === "/api/demand/procurement/offers/mine" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.offers.read",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.listMySupplierOffers(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          ...(obj.poolId !== undefined && obj.poolId !== null
+            ? { poolId: obj.poolId as string }
+            : {}),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/demand/procurement/pools/:id/competitive-selection —
+    // THE DERIVED SELECTION VIEW (protected; guard action
+    // demand.procurement.selections.evaluate; pool-creator-only): the
+    // deterministic hard-eligibility + ranking derivation at ONE
+    // explicit evaluation anchor. A 200 DECISION for every outcome
+    // (qualified or not, eligible offers or none — the decision is
+    // the product). There is NO offer-set/eligibility/ranking/
+    // selection input: every caller field beyond scope/pool identity
+    // is ignored.
+    if (
+      path.startsWith("/api/demand/procurement/pools/") &&
+      path.endsWith("/competitive-selection") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/demand/procurement/pools/".length,
+        -"/competitive-selection".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.selections.evaluate",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.evaluateCompetitiveSelection(
+          guarded.execution,
+          guarded.personId,
+          {
+            organizationScopeId: strField(obj, "organizationScopeId"),
+            poolId: id,
+          },
+        ),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/demand/procurement/pools/:id/selection-records —
+    // record the AUTHORITATIVE competitive selection lineage record
+    // (protected; guard action demand.procurement.selections.record;
+    // pool-creator-only): the selection is re-derived INSIDE the
+    // authoritative transaction from CURRENT records — nothing
+    // caller-asserted qualifies, ranks or selects. Fails closed when
+    // the pool is not currently qualified.
+    if (
+      path.startsWith("/api/demand/procurement/pools/") &&
+      path.endsWith("/selection-records") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/demand/procurement/pools/".length,
+        -"/selection-records".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.selections.record",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recordCompetitiveSelection(
+          guarded.execution,
+          guarded.personId,
+          {
+            organizationScopeId: strField(obj, "organizationScopeId"),
+            poolId: id,
+            idempotencyKey: strField(obj, "idempotencyKey"),
+          },
+        ),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/demand/procurement/pools/:id/selections — list the
+    // pool's selection lineage records (protected; guard action
+    // demand.procurement.selections.read; pool-creator-only — the
+    // service re-derives the creator gate server-side).
+    if (
+      path.startsWith("/api/demand/procurement/pools/") &&
+      path.endsWith("/selections") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/demand/procurement/pools/".length,
+        -"/selections".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.selections.read",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.listPoolSelections(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          poolId: id,
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
     // GET /api/demand/procurement/pools/:id — one procurement pool
     // (public; tenant-scoped; pool metadata only — no commitment
     // data; a cross-scope id is not found).

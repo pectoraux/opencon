@@ -215,7 +215,29 @@ const NET_W024_DOMAINS = ["demand"];
 // authority separation).
 const NET_W025_DOMAINS = ["demand"];
 
-// Domains still deferred past NET-W025 (must remain skeletons).
+// Domains implemented in NET-W026 (no longer skeletons — an
+// EXTENSION of the /demand boundary NET-W024/W025 activated, not a
+// new domain). The demand domain additionally carries the SUPPLIER
+// OFFER + COMPETITIVE SELECTION domain: authorized supplier offers
+// against currently qualified W025 demand (closed offer attribute
+// vocabulary from the SAME procurement bands/buckets/windows),
+// server-derived hard eligibility (pool qualification, offer
+// validity, named-region service, supplier authorization), the
+// DETERMINISTIC auditable selection lineage records, and
+// pool-creator-scoped selection surfaces. It STILL introduces NO
+// economically material behaviour (/settlement stays the economic
+// authority — a selection is a procurement decision, never an
+// economic one), NO lifecycle mutation (/workflows untouched: offer
+// withdrawal is a one-way field mutation, expiry is derived from
+// the recorded validity window) and NO membership/identity authority
+// (the authorized-supplier gate resolves through the same neutral
+// composition-root lookup over /organizations) — the W026 boundary
+// EXTENDS /demand, it does not create a second demand/procurement/
+// selection authority (NET-W026 work order §3 authority
+// separation).
+const NET_W026_DOMAINS = ["demand"];
+
+// Domains still deferred past NET-W026 (must remain skeletons).
 const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
   (d) =>
     !NET_W002_DOMAINS.includes(d) &&
@@ -229,7 +251,8 @@ const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
     !NET_W015_DOMAINS.includes(d) &&
     !NET_W019_DOMAINS.includes(d) &&
     !NET_W024_DOMAINS.includes(d) &&
-    !NET_W025_DOMAINS.includes(d),
+    !NET_W025_DOMAINS.includes(d) &&
+    !NET_W026_DOMAINS.includes(d),
 );
 
 // Patterns that would indicate economically/material domain logic,
@@ -507,6 +530,30 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
       // the NET-W025 work order §2).
       expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
       expect(moduleExport.describe?.() ?? "").toMatch(/NET-W025/);
+    }
+  });
+
+  test("NET-W026 domain modules are non-skeletal (tier domain, no 'skeleton' marker, reference NET-W026)", async () => {
+    for (const dir of NET_W026_DOMAINS) {
+      const modulePath = join(SRC, dir, "module.ts");
+      expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
+      const mod = await import(`../../src/${dir}/module.ts`);
+      const moduleExport = Object.values(mod)[0] as {
+        name: string;
+        tier: string;
+        describe?: () => string;
+      };
+      expect(moduleExport.tier).toBe("domain");
+      // NET-W026 EXTENDS the SAME /demand boundary AGAIN with
+      // supplier offers and competitive selection (authorized
+      // offers against currently qualified demand, server-derived
+      // hard eligibility, deterministic auditable selection lineage,
+      // W025 privacy intact; still NO economic command — a selection
+      // is a procurement decision, never an economic one — lifecycle
+      // still with /workflows, still no second demand/procurement/
+      // selection authority per the NET-W026 work order §3).
+      expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
+      expect(moduleExport.describe?.() ?? "").toMatch(/NET-W026/);
     }
   });
 

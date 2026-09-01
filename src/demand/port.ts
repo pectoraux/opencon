@@ -56,10 +56,12 @@ import type {
 import type {
   ProcurementBudgetBand,
   ProcurementCategoryKey,
+  ProcurementQuantityBucket,
   ProcurementRegionCode,
   ProcurementTimingWindow,
   ProcurementUnitPriceBand,
 } from "../core/procurement.ts";
+import type { SupplierOfferConsentScope } from "../core/procurement-offer.ts";
 
 // ---------------------------------------------------------------------------
 // NET-W024 records
@@ -950,6 +952,17 @@ export interface ProcurementCommitmentRepository {
    * reads; deterministically ordered by the service).
    */
   listActiveByPool(poolId: string): Promise<readonly ProcurementCommitment[]>;
+  /**
+   * In-tx active-commitment listing for the NET-W026
+   * qualified-demand re-derivation inside the authoritative
+   * transaction (the offer/selection TOCTOU closure: the pool's
+   * CURRENT qualification state is re-derived from tx-scanned
+   * records, never trusted from a pre-flight snapshot).
+   */
+  listActiveByPoolWithinTx(
+    poolId: string,
+    tx: AuthorityTransaction,
+  ): Promise<readonly ProcurementCommitment[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,6 +1084,530 @@ export interface ProcurementServiceDeps {
 }
 
 // ---------------------------------------------------------------------------
+// NET-W026 records (supplier offers + competitive selection — the SAME
+// boundary)
+// ---------------------------------------------------------------------------
+
+/**
+ * The server-written consent grant on a supplier offer: the
+ * supplier's explicit, versioned consent to COMPETITIVE-SELECTION
+ * disclosure (the only closed consent scope in NET-W026 — the
+ * offer's banded attributes may be compared and ranked inside the
+ * named pool's selection, and disclosed in the pool-creator-scoped
+ * selection results). The input may only NAME the scope; the grant
+ * (who + when + version) is recorded by the server from the
+ * server-resolved acting supplier (DEM-003 / PROC-003).
+ */
+export interface SupplierOfferConsentGrant {
+  readonly scope: SupplierOfferConsentScope;
+  readonly version: string;
+  readonly grantedAt: string;
+  /** The server-resolved supplier actor (the acting person). */
+  readonly grantedBy: string;
+}
+
+/**
+ * A SupplierOffer — the first-class, durable, tenant-scoped record of
+ * one supplier's competitive offer against one procurement pool
+ * (DEM-003; issue #52 invariant 1): a bounded, provider-neutral
+ * attribute set inside the pool's procurement category (the SAME
+ * closed band/bucket/window vocabularies the qualified demand
+ * contract discloses), with the SERVER-WRITTEN competitive-selection
+ * consent grant, an explicit validity window and full execution
+ * provenance. The acting person at submission BECOMES the supplier
+ * (there is no supplierPersonId INPUT on any command — supplier
+ * identity cannot be fabricated) and must hold ACTIVE membership in
+ * the tenant organization (server-enforced — the authorized-supplier
+ * gate), and the pool must be CURRENTLY QUALIFIED (re-derived
+ * server-side, never caller-asserted).
+ *
+ * The record is STATIC after creation except the one-way withdrawal
+ * (`withdrawnAt`) — supplier-only, audited. ONE ACTIVE (non-withdrawn)
+ * offer per (pool, supplier). Expiry is NOT a mutation: validity is
+ * DERIVED from the recorded window at each evaluation anchor. NO
+ * lifecycle subject kind, NO transition machinery (/workflows
+ * untouched). Exact buyer commitment identities and protected
+ * commitment records NEVER appear here (the offer references the
+ * POOL only).
+ */
+export interface SupplierOffer {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly poolId: string;
+  /** The supplier — the acting person at submission (server-resolved). */
+  readonly supplierPersonId: string;
+  /** The procurement category snapshot (the pool's category at submission). */
+  readonly categoryKey: ProcurementCategoryKey;
+  readonly categoryVersion: string;
+  /**
+   * The bounded, provider-neutral offer attributes —
+   * bands/buckets/windows ONLY, from the SAME closed vocabularies as
+   * the qualified demand contract (an exact price, quantity or
+   * delivery date is unrepresentable; PROC-003).
+   */
+  readonly attributes: {
+    readonly region: ProcurementRegionCode;
+    readonly unitPriceBand: ProcurementUnitPriceBand;
+    readonly timingWindow: ProcurementTimingWindow;
+    readonly quantityBucket: ProcurementQuantityBucket;
+  };
+  /** The server-written competitive-selection consent grant. */
+  readonly consent: SupplierOfferConsentGrant;
+  /** One-way withdrawal (null while the offer is active). */
+  readonly withdrawnAt: string | null;
+  readonly withdrawalReason: string | null;
+  /**
+   * The explicit validity window: validFrom is SERVER-SET to the
+   * submission instant; validUntil is the bounded OPTIONAL caller
+   * horizon (null = open until withdrawn). Selection eligibility is
+   * derived against this window at the evaluation anchor.
+   */
+  readonly validFrom: string;
+  readonly validUntil: string | null;
+  readonly recordFormat: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W026 inputs / results
+// ---------------------------------------------------------------------------
+
+export interface CreateSupplierOfferInput {
+  readonly organizationScopeId: string;
+  readonly poolId: string;
+  /**
+   * The bounded, provider-neutral offer attributes (region,
+   * unit-price band, delivery-timing window, capacity bucket — all
+   * REQUIRED, all from the closed NET-W025 vocabularies).
+   */
+  readonly attributes: {
+    readonly region: string;
+    readonly unitPriceBand: string;
+    readonly timingWindow: string;
+    readonly quantityBucket: string;
+  };
+  /** The bounded OPTIONAL validity horizon (null = open until withdrawn). */
+  readonly validUntil?: string | null;
+  /**
+   * The supplier may only NAME the closed consent scope
+   * ("competitive_selection"); the grant itself (who + when +
+   * version) is server-written. Any other scope value fails closed.
+   */
+  readonly consent: {
+    readonly scope: string;
+  };
+  readonly idempotencyKey: string;
+  // NOTE: there is deliberately NO supplierPersonId input — the
+  // supplier is the acting person, server-resolved (a caller cannot
+  // fabricate offer ownership; issue #52 invariant 1). There is
+  // deliberately NO eligibility/qualified/rank/score input — hard
+  // eligibility is server-derived only (issue #52 invariant 3).
+}
+
+export interface CreateSupplierOfferResult {
+  readonly offer: SupplierOffer;
+  /** false when the idempotency key replayed the committed record. */
+  readonly created: boolean;
+}
+
+export interface WithdrawSupplierOfferInput {
+  readonly organizationScopeId: string;
+  readonly offerId: string;
+  readonly reason?: string | null;
+  readonly idempotencyKey: string;
+}
+
+export interface RecordCompetitiveSelectionInput {
+  readonly organizationScopeId: string;
+  readonly poolId: string;
+  readonly idempotencyKey: string;
+  // NOTE: there is deliberately NO offer-set, eligibility, ranking or
+  // selected-offer input — the selection is re-derived INSIDE the
+  // authoritative transaction from CURRENT records (issue #52
+  // invariant 4: caller assertions cannot authorize selection).
+}
+
+export interface RecordCompetitiveSelectionResult {
+  readonly selection: CompetitiveSelection;
+  /** false when the idempotency key replayed the committed record. */
+  readonly created: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// The DERIVED competitive-selection view (DEM-003 / PROC-001 — never
+// stored, never caller-asserted) and the authoritative selection
+// lineage record
+// ---------------------------------------------------------------------------
+
+/**
+ * One hard-eligibility check of the derived competitive selection
+ * for ONE offer (machine-readable; issue #52 invariant 3). Every
+ * check re-derives from CURRENT durable records at the evaluation
+ * anchor — no caller-asserted eligibility exists anywhere.
+ */
+export interface SupplierOfferCheck {
+  readonly check:
+    | "offer_validity"
+    | "region_served"
+    | "supplier_authorized";
+  readonly satisfied: boolean;
+  /** Deterministic machine-readable detail (offer facts only). */
+  readonly detail: Record<string, unknown>;
+}
+
+/**
+ * The per-offer eligibility evaluation of the derived selection
+ * view: the offer identity, its supplier, and the re-derived hard
+ * checks. Offer facts only — never buyer data.
+ */
+export interface SupplierOfferEvaluation {
+  readonly offerId: string;
+  readonly supplierPersonId: string;
+  readonly eligible: boolean;
+  readonly checks: readonly SupplierOfferCheck[];
+}
+
+/**
+ * One pool-level check of the derived competitive selection
+ * (machine-readable): the qualified-demand gate (the re-derived
+ * NET-W025 qualification at the same anchor) and the eligible-offer
+ * presence check.
+ */
+export interface CompetitiveSelectionCheck {
+  readonly check: "pool_qualified" | "eligible_offers_present";
+  readonly satisfied: boolean;
+  /** Deterministic machine-readable detail (pool policy facts only). */
+  readonly detail: Record<string, unknown>;
+}
+
+/**
+ * One ranked offer of the derived selection: the explicit rank
+ * position plus the OFFER facts the ranking consumed (supplier,
+ * region, unit-price band, delivery-timing window, capacity bucket).
+ * Supplier/offer facts ONLY — buyer commitment data never crosses
+ * into the ranking (issue #52 invariant 5 / PROC-003).
+ */
+export interface CompetitiveSelectionRankEntry {
+  readonly rank: number;
+  readonly offerId: string;
+  readonly supplierPersonId: string;
+  readonly region: ProcurementRegionCode;
+  readonly unitPriceBand: ProcurementUnitPriceBand;
+  readonly timingWindow: ProcurementTimingWindow;
+  readonly quantityBucket: ProcurementQuantityBucket;
+}
+
+/**
+ * The DERIVED competitive-selection view (DEM-003 / PROC-001): the
+ * deterministic hard-eligibility evaluation + ranking of one pool's
+ * active supplier offers at ONE explicit evaluation anchor — a PURE
+ * derivation over (the durable pool, the re-derived qualified
+ * aggregate at the SAME anchor, the CURRENT active offers, the
+ * suppliers' re-resolved memberships). There is NO command that
+ * asserts, stores or waives eligibility, ranking or selection:
+ * `selectedOfferId` is the rank-1 eligible offer (null when the pool
+ * is unqualified or no offer is eligible), the ranking policy is the
+ * explicit versioned server-owned table, and the digest EXCLUDES the
+ * evaluation anchor (identical authoritative state ⇒ identical
+ * digest). `/settlement` remains the economic authority: this view is
+ * a procurement decision surface, never an economic one. Mutates
+ * nothing; audits nothing (a derived 200 decision).
+ */
+export interface CompetitiveSelectionView {
+  readonly poolId: string;
+  readonly organizationScopeId: string;
+  /**
+   * The explicit, versioned, server-owned selection policy snapshot
+   * (the ranking criteria, in evaluation order) that governed this
+   * derivation.
+   */
+  readonly selectionPolicy: {
+    readonly version: number;
+    readonly rankingCriteria: readonly string[];
+  };
+  /**
+   * The re-derived NET-W025 qualified-aggregate digest at the SAME
+   * anchor — links the selection to the exact minimized demand state
+   * it competed against (the aggregate facts themselves NEVER cross
+   * into the selection view).
+   */
+  readonly poolDigest: string;
+  /** The pool-level qualified-demand gate result at the anchor. */
+  readonly qualified: boolean;
+  readonly checks: readonly CompetitiveSelectionCheck[];
+  readonly offerEvaluations: readonly SupplierOfferEvaluation[];
+  /** The offer set: ALL active (non-withdrawn) offer ids, ascending. */
+  readonly consideredOfferIds: readonly string[];
+  /** The ELIGIBLE offer ids in RANKED order (the decision order). */
+  readonly eligibleOfferIds: readonly string[];
+  readonly ranking: readonly CompetitiveSelectionRankEntry[];
+  readonly selectedOfferId: string | null;
+  /**
+   * The deterministic digest over the canonical serialization of the
+   * decision facts (policy + pool digest + checks + evaluations +
+   * offer sets + ranking + selection) — EXCLUDING the evaluation
+   * anchor, so identical authoritative state yields the identical
+   * digest across evaluations (the W021/W024/W025 decision-digest
+   * precedent).
+   */
+  readonly digest: string;
+  /** The explicit evaluation anchor (recorded, never digested). */
+  readonly evaluatedAt: string;
+}
+
+/**
+ * A CompetitiveSelection — the first-class, durable, tenant-scoped
+ * AUTHORITATIVE selection-lineage record (PROC-001 / PROC-AC-03: the
+ * selection records the offer set and the selection rationale): one
+ * pool-creator-executed competitive selection, derived from CURRENT
+ * records INSIDE the authoritative transaction at ONE explicit
+ * anchor and persisted once (immutable thereafter — each record is a
+ * lineage event; re-tendering records a NEW record). The snapshot
+ * carries the full decision facts (checks, per-offer evaluations,
+ * offer sets, ranking, selected offer, digest) plus provenance. A
+ * selection is a PROCUREMENT DECISION — never an economic mutation
+ * (`/settlement` stays the sole economic authority; W027/W028
+ * semantics are excluded).
+ */
+export interface CompetitiveSelection {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly poolId: string;
+  /** The pool creator who executed the selection (server-resolved actor). */
+  readonly recordedBy: string;
+  readonly selectionPolicy: {
+    readonly version: number;
+    readonly rankingCriteria: readonly string[];
+  };
+  readonly poolDigest: string;
+  /** Always true on a persisted record (unqualified demand fails closed). */
+  readonly qualified: boolean;
+  /** The explicit evaluation anchor the record's derivation used. */
+  readonly evaluationAnchor: string;
+  readonly consideredOfferIds: readonly string[];
+  readonly eligibleOfferIds: readonly string[];
+  readonly offerEvaluations: readonly SupplierOfferEvaluation[];
+  readonly checks: readonly CompetitiveSelectionCheck[];
+  readonly ranking: readonly CompetitiveSelectionRankEntry[];
+  readonly selectedOfferId: string | null;
+  readonly digest: string;
+  readonly recordFormat: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W026 repositories
+// ---------------------------------------------------------------------------
+
+export interface SupplierOfferRepository {
+  save(
+    offer: SupplierOffer,
+    execution: ExecutionContext,
+  ): Promise<SupplierOffer>;
+  findById(id: string): Promise<SupplierOffer | null>;
+  createWithinTx(
+    offer: SupplierOffer,
+    tx: AuthorityTransaction,
+  ): Promise<SupplierOffer>;
+  /** In-tx fresh read (the composites' TOCTOU closure). */
+  getByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<SupplierOffer | null>;
+  /**
+   * In-tx active-offer lookup for the create-once constraint (ONE
+   * NON-WITHDRAWN offer per (pool, supplier) — a withdrawn offer
+   * never blocks re-offering).
+   */
+  findActiveByPoolAndSupplierWithinTx(
+    organizationScopeId: string,
+    poolId: string,
+    supplierPersonId: string,
+    tx: AuthorityTransaction,
+  ): Promise<SupplierOffer | null>;
+  /**
+   * One-way offer withdrawal (in-tx with the withdrawal audit event):
+   * an already-withdrawn offer is returned unchanged.
+   */
+  withdrawWithinTx(
+    offerId: string,
+    withdrawnAt: string,
+    reason: string | null,
+    tx: AuthorityTransaction,
+  ): Promise<SupplierOffer>;
+  listByOrganization(
+    organizationScopeId: string,
+    filters?: {
+      readonly poolId?: string;
+      readonly supplierPersonId?: string;
+      readonly withdrawn?: boolean;
+    },
+  ): Promise<readonly SupplierOffer[]>;
+  /**
+   * The active (non-withdrawn) offers of one pool — the authoritative
+   * input of the derived selection view (committed reads;
+   * deterministically ordered by the service).
+   */
+  listActiveByPool(poolId: string): Promise<readonly SupplierOffer[]>;
+  /**
+   * In-tx active-offer listing for the selection derivation inside
+   * the authoritative transaction (the selection TOCTOU closure).
+   */
+  listActiveByPoolWithinTx(
+    poolId: string,
+    tx: AuthorityTransaction,
+  ): Promise<readonly SupplierOffer[]>;
+}
+
+export interface CompetitiveSelectionRepository {
+  save(
+    selection: CompetitiveSelection,
+    execution: ExecutionContext,
+  ): Promise<CompetitiveSelection>;
+  findById(id: string): Promise<CompetitiveSelection | null>;
+  createWithinTx(
+    selection: CompetitiveSelection,
+    tx: AuthorityTransaction,
+  ): Promise<CompetitiveSelection>;
+  /** In-tx fresh read. */
+  getByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<CompetitiveSelection | null>;
+  /**
+   * The pool's selection lineage, newest-first by (createdAt, id) —
+   * immutable records (no mutation methods exist: a selection record
+   * is append-only lineage).
+   */
+  listByOrganization(
+    organizationScopeId: string,
+    filters?: {
+      readonly poolId?: string;
+    },
+  ): Promise<readonly CompetitiveSelection[]>;
+}
+
+// ---------------------------------------------------------------------------
+// The NET-W026 supplier-offer/selection service (same boundary: /demand)
+// ---------------------------------------------------------------------------
+
+export interface SupplierOfferService {
+  /**
+   * Record a supplier offer against a procurement pool (DEM-003):
+   * the acting person BECOMES the supplier (there is no
+   * supplierPersonId input — offer ownership cannot be fabricated)
+   * and must hold ACTIVE tenant membership (the authorized-supplier
+   * gate, server-resolved). The pool must resolve in tenant scope,
+   * be OPEN and be CURRENTLY QUALIFIED — the qualified aggregate is
+   * re-derived SERVER-SIDE pre-flight AND inside the authoritative
+   * transaction (never caller-asserted; an unqualified or closed pool
+   * fails closed). The consent grant is SERVER-WRITTEN (the input may
+   * only name the closed "competitive_selection" scope). ONE ACTIVE
+   * offer per (pool, supplier). Serialized by the per-pool lock.
+   * Commits atomically with the `procurement_offer.recorded` audit
+   * event.
+   */
+  createSupplierOffer(
+    execution: ExecutionContext,
+    input: CreateSupplierOfferInput,
+  ): Promise<CreateSupplierOfferResult>;
+  /**
+   * Withdraw the offer (one-way, supplier-only — the consent
+   * revocation): a withdrawn offer vanishes from every derived
+   * selection immediately (derived). Commits atomically with the
+   * `procurement_offer.withdrawn` audit event.
+   */
+  withdrawSupplierOffer(
+    execution: ExecutionContext,
+    input: WithdrawSupplierOfferInput,
+  ): Promise<SupplierOffer>;
+  /** Tenant-scoped offer reads (service-level diagnostics). */
+  getSupplierOffer(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    offerId: string,
+  ): Promise<SupplierOffer>;
+  listSupplierOffers(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    filters?: {
+      readonly poolId?: string;
+      readonly supplierPersonId?: string;
+      readonly withdrawn?: boolean;
+    },
+  ): Promise<readonly SupplierOffer[]>;
+  /**
+   * THE DERIVED SELECTION VIEW (DEM-003 / PROC-001): the
+   * deterministic hard-eligibility + ranking derivation of one
+   * pool's active offers at ONE explicit evaluation anchor.
+   * Pool-creator-only (the view exposes individual supplier offer
+   * terms — PROC-003: supplier commercial terms never cross to other
+   * pool participants). NO offer-set/eligibility/ranking/selection
+   * input exists (every caller field beyond scope/pool identity is
+   * ignored), and this boundary carries NO economic surface
+   * (/settlement stays the economic authority). Mutates nothing;
+   * audits nothing (a derived 200 decision for every outcome).
+   */
+  evaluateCompetitiveSelection(
+    execution: ExecutionContext,
+    input: {
+      readonly organizationScopeId: string;
+      readonly poolId: string;
+    },
+  ): Promise<CompetitiveSelectionView>;
+  /**
+   * Record the AUTHORITATIVE competitive selection lineage
+   * (PROC-AC-03: the selection records the offer set and the
+   * selection rationale). Pool-creator-only. The selection is
+   * re-derived INSIDE the authoritative transaction from CURRENT
+   * records (in-tx pool, commitments, offers; anchor set once inside
+   * the transaction) — nothing caller-asserted qualifies, ranks or
+   * selects. Fails closed when the pool is not CURRENTLY QUALIFIED
+   * (unqualified/closed demand cannot enter competitive selection).
+   * Same-key replay is exactly-once; serialized by the per-pool lock.
+   * Commits atomically with the `procurement_selection.recorded`
+   * audit event. A selection is a PROCUREMENT DECISION — no economic
+   * state is created.
+   */
+  recordCompetitiveSelection(
+    execution: ExecutionContext,
+    input: RecordCompetitiveSelectionInput,
+  ): Promise<RecordCompetitiveSelectionResult>;
+  /**
+   * The pool's selection lineage records (pool-creator-only read:
+   * the lineage exposes individual supplier offer terms — PROC-003).
+   */
+  listPoolSelections(
+    execution: ExecutionContext,
+    input: {
+      readonly organizationScopeId: string;
+      readonly poolId: string;
+    },
+  ): Promise<readonly CompetitiveSelection[]>;
+}
+
+export interface SupplierOfferServiceDeps {
+  readonly offerRepository: SupplierOfferRepository;
+  readonly selectionRepository: CompetitiveSelectionRepository;
+  readonly poolRepository: ProcurementPoolRepository;
+  readonly commitmentRepository: ProcurementCommitmentRepository;
+  readonly membershipLookup: DemandMembershipLookup;
+  readonly idempotency: IdempotencyStore;
+  readonly auditWriter: TransactionalAuditWriter;
+  readonly logger: Logger;
+}
+
+// ---------------------------------------------------------------------------
 // The boundary port
 // ---------------------------------------------------------------------------
 
@@ -1081,9 +1618,10 @@ export interface ProcurementServiceDeps {
  * neutral category/attribute vocabulary, deterministic
  * privacy-preserving aggregation with the frozen disclosure floor, and
  * the derived qualified-aggregate supplier view). NET-W025 extends the
- * SAME boundary with business procurement pools (the
- * `procurementService` audit vocabulary below); `/demand` remains the
- * single demand/procurement-aggregation authority.
+ * SAME boundary with business procurement pools and NET-W026 extends
+ * it with supplier offers and competitive selection (the
+ * `supplierOfferService` audit vocabulary below); `/demand` remains
+ * the single demand/procurement/selection authority.
  */
 export interface DemandPort {
   readonly boundary: "demand";
@@ -1099,6 +1637,10 @@ export interface DemandPort {
     readonly procurementPoolClosed: "procurement_pool.closed";
     readonly procurementCommitmentRecorded: "procurement_commitment.recorded";
     readonly procurementCommitmentWithdrawn: "procurement_commitment.withdrawn";
+    /** NET-W026 supplier-offer/selection mutations (same boundary). */
+    readonly supplierOfferRecorded: "procurement_offer.recorded";
+    readonly supplierOfferWithdrawn: "procurement_offer.withdrawn";
+    readonly competitiveSelectionRecorded: "procurement_selection.recorded";
   };
 }
 
@@ -1115,4 +1657,6 @@ export type {
   ProcurementBudgetBand,
   ProcurementUnitPriceBand,
   ProcurementTimingWindow,
+  ProcurementQuantityBucket,
+  SupplierOfferConsentScope,
 };
