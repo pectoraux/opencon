@@ -1,7 +1,7 @@
 # NET-W028 Evidence Ledger — Benefit Pools
 
-**Status:** IMPLEMENTED / UNDER VERIFICATION  
-**Issue:** #56  
+**Status:** MERGED  
+**Issue:** #56 (completed)  
 **Dependencies:** NET-W027 + NET-W008 merged/verified  
 **Architecture:** v1.0 frozen  
 **Implementation branch:** `feat/net-w028-benefit-pools`
@@ -123,6 +123,9 @@ Driver: `opencon-tmp/w028-mutation-driver.py` (outside the repository; cp-backup
 
 ## Delivery record
 
-- Implementation commit: (to be recorded at delivery)
-- PR: (to be recorded at delivery)
-- CI: (to be recorded at delivery)
+- Implementation commit: `e7e1b5a006424b4ba49375281dd0ddcf3659e128` (branch head; 23 files, +7445/−35)
+- PR: **#57** — squash-merged as `6e309e2af05a962e3417999ad8079da16d9ebc37` ("feat(benefits): NET-W028 — Benefit Pools (#57)")
+- CI: **GREEN 4/4 on BOTH events at e7e1b5a** (verify + integration with real PostgreSQL 17 + Redis 7 service containers, push + pull_request)
+- Verification-status comment: id 5495635081; architect review decision-of-record comment: id 5495655558 (architect == PR author under the single-account setup — the recorded decision is the authoritative review per the standing protocol)
+- Issue #56 closed as completed by the merge
+- Post-merge durable state: `spec/PROJECT-STATE.md` + `spec/ROADMAP.md` advanced to NET-W029 at the merge checkpoint
