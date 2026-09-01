@@ -3033,6 +3033,130 @@ export interface ApiCommands {
   ): Promise<readonly Record<string, unknown>[]>;
 
   // -----------------------------------------------------------------
+  // NET-W025 — Business procurement pools (privacy/competition-
+  // preserving aggregation inside the SAME /demand boundary; explicit
+  // buyer-organization/actor authorization; derived supplier-facing
+  // minimized demand views). Procurement pools and commitments carry
+  // NO lifecycle subject kind (/workflows untouched); the aggregate is
+  // a DERIVED view (never stored, never caller-asserted) and the
+  // boundary carries NO economic surface (/settlement stays the
+  // economic authority).
+  // -----------------------------------------------------------------
+
+  /**
+   * Create a business procurement pool (protected; guard action
+   * `demand.procurement.pools.create`): the acting person BECOMES the
+   * pool creator (there is no creatorPersonId input — pool ownership
+   * cannot be fabricated by client claims) and must hold an ACTIVE
+   * tenant organization membership (server-enforced). The
+   * qualification/competition policy (commitment threshold +
+   * distinct-organization threshold) is explicit, bounded and
+   * versioned on the record.
+   */
+  createProcurementPool(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ pool: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Close the procurement pool (protected; guard action
+   * `demand.procurement.pools.close`; creator-only): one-way; a
+   * closed pool accepts no new commitments and never qualifies
+   * (derived).
+   */
+  closeProcurementPool(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * Record a business demand commitment (protected; guard action
+   * `demand.procurement.commitments.create`): the acting person
+   * BECOMES the submitter (there is no submittedBy input —
+   * commitment ownership cannot be fabricated) and must hold ACTIVE
+   * membership in BOTH the tenant organization AND the named buyer
+   * organization (server-enforced; a failed buyer authorization is
+   * indistinguishable from a nonexistent organization). The consent
+   * grant is SERVER-WRITTEN (the input may only name the closed
+   * "aggregate_disclosure" scope). ONE active commitment per (pool,
+   * buyer organization).
+   */
+  createProcurementCommitment(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ commitment: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Withdraw the procurement commitment (protected; guard action
+   * `demand.procurement.commitments.withdraw`; submitter-only):
+   * one-way; the consent revocation — a withdrawn commitment
+   * vanishes from every derived aggregate immediately (derived).
+   */
+  withdrawProcurementCommitment(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * THE SUPPLIER-FACING DERIVATION (protected; guard action
+   * `demand.procurement.aggregates.evaluate`): the
+   * privacy/competition-preserving qualified aggregate of one
+   * procurement pool — a DERIVED 200 decision re-computed from
+   * CURRENT durable records at ONE explicit evaluation anchor. There
+   * is NO aggregate/threshold input (every caller field beyond
+   * scope/pool identity is ignored); aggregate facts exist only
+   * above BOTH frozen floors (the commitment floor AND the
+   * distinct-organization floor); below-floor groups are suppressed
+   * (counted, never named); exact quantities, unit prices, budgets
+   * and timing never appear (bands/buckets/windows only).
+   */
+  evaluateQualifiedProcurementDemand(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * List the AUTHENTICATED ACTOR'S OWN commitments (protected; guard
+   * action `demand.procurement.commitments.read`): the submitter is
+   * the server-resolved actor — there is no submittedBy input. This
+   * is the ONLY commitment read surface; individual business
+   * commitments are never exposed through any other route (privacy:
+   * competitor terms stay private; suppliers see minimized
+   * aggregates only).
+   */
+  listMyProcurementCommitments(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /**
+   * Fetch one procurement pool (public read; tenant-scoped; pool
+   * metadata only — no commitment data).
+   */
+  getProcurementPool(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    poolId: string,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * List an org's procurement pools (public read; pool metadata
+   * only).
+   */
+  listProcurementPools(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    categoryKey?: string,
+    closed?: boolean,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  // -----------------------------------------------------------------
   // NET-W012 — helpful contributions (Proof-of-Helpfulness).
   // -----------------------------------------------------------------
 

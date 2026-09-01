@@ -403,6 +403,19 @@ import type {
   DemandService,
   QualifiedDemandAggregate,
 } from "../demand/port.ts";
+// NET-W025 demand (business procurement pools — the SAME /demand
+// boundary extended, NOT a second demand/procurement authority).
+import {
+  createAuthorityProcurementCommitmentRepository,
+  createAuthorityProcurementPoolRepository,
+} from "../demand/authority-procurement-repositories.ts";
+import { createProcurementService } from "../demand/procurement-pool-service.ts";
+import type {
+  ProcurementCommitment,
+  ProcurementPool,
+  ProcurementService,
+  QualifiedProcurementAggregate,
+} from "../demand/port.ts";
 import type {
   ActivateRiskControlInput,
   AppealDisputeInput,
@@ -648,6 +661,12 @@ export interface Runtime {
   // aggregation, server-enforced consent/membership, derived
   // qualified-aggregate views — zero economic surface) service.
   readonly demandService: DemandService;
+  // NET-W025 demand (business procurement pools: competition-policy
+  // aggregation behind the frozen commitment + distinct-organization
+  // floors, buyer-organization-authorized commitments, derived
+  // supplier-facing minimized demand views — still zero economic
+  // surface; still the SAME /demand authority) service.
+  readonly procurementService: ProcurementService;
   // NET-W012 helpful contributions (Proof-of-Helpfulness) service.
   readonly helpfulnessService: HelpfulnessService;
   // NET-W013 quality/moderation/anti-spam services.
@@ -1014,6 +1033,19 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     authority: postgresAuthority,
     logger: { debug: (m, f) => logger.forModule("demand").debug(m, f) },
   });
+  // NET-W025 procurement repositories (PostgresAuthority-backed,
+  // append-only collections — the SAME /demand boundary's durable
+  // state for business procurement pools; the private business
+  // commitment records never cross into any other boundary).
+  const procurementPoolRepo = createAuthorityProcurementPoolRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("demand").debug(m, f) },
+  });
+  const procurementCommitmentRepo =
+    createAuthorityProcurementCommitmentRepository({
+      authority: postgresAuthority,
+      logger: { debug: (m, f) => logger.forModule("demand").debug(m, f) },
+    });
   const evidenceService = createEvidenceService({
     repository: evidenceRepo,
     authority: postgresAuthority,
@@ -2675,6 +2707,27 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   const demandService = createDemandService({
     poolRepository: demandPoolRepo,
     commitmentRepository: demandCommitmentRepo,
+    membershipLookup: demandMembershipLookup,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("demand"),
+  });
+
+  // ------------------------------------------------------------------
+  // NET-W025 procurement wiring (business procurement pools — the
+  // SAME /demand boundary, NOT a second authority).
+  //
+  // The procurement service reuses the SAME neutral membership
+  // lookup adapter (resolveMembership answers for ANY organization:
+  // the tenant gate AND the buyer-organization gate alike — the
+  // /organizations authority stays the single membership source,
+  // read-only through the composition root). The /demand boundary
+  // still has ZERO economic surface (/settlement untouched by
+  // NET-W025) and NO lifecycle machinery (/workflows untouched).
+  // ------------------------------------------------------------------
+  const procurementService = createProcurementService({
+    poolRepository: procurementPoolRepo,
+    commitmentRepository: procurementCommitmentRepo,
     membershipLookup: demandMembershipLookup,
     idempotency,
     auditWriter,
@@ -4347,6 +4400,74 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     // The derived supplier-facing view passes through as-is: it is
     // already the minimized aggregate contract (counts/ranges only;
     // no person/commitment identifiers; anchor + digest recorded).
+    return {
+      poolId: view.poolId,
+      organizationScopeId: view.organizationScopeId,
+      category: view.category,
+      policy: view.policy,
+      qualified: view.qualified,
+      checks: view.checks,
+      aggregate: view.aggregate,
+      digest: view.digest,
+      evaluatedAt: view.evaluatedAt,
+    };
+  }
+  function toProcurementPoolView(pool: ProcurementPool) {
+    return {
+      id: pool.id,
+      organizationScopeId: pool.organizationScopeId,
+      // EXPLICIT pool ownership (the acting person at creation;
+      // never caller-asserted).
+      createdBy: pool.createdBy,
+      name: pool.name,
+      categoryKey: pool.categoryKey,
+      categoryVersion: pool.categoryVersion,
+      policy: pool.policy,
+      closedAt: pool.closedAt,
+      closureReason: pool.closureReason,
+      recordFormat: pool.recordFormat,
+      createdAt: pool.createdAt,
+      updatedAt: pool.updatedAt,
+      idempotencyKey: pool.idempotencyKey,
+      executionId: pool.executionId,
+      correlationId: pool.correlationId,
+      causationId: pool.causationId,
+    };
+  }
+  function toProcurementCommitmentView(commitment: ProcurementCommitment) {
+    return {
+      id: commitment.id,
+      organizationScopeId: commitment.organizationScopeId,
+      poolId: commitment.poolId,
+      // The buyer organization + submitter are visible ONLY on the
+      // owner-scoped surfaces (this view is returned exclusively by
+      // the mutation results and the actor-scoped
+      // listMyProcurementCommitments command) — never in any
+      // supplier-facing aggregate.
+      buyerOrganizationId: commitment.buyerOrganizationId,
+      submittedBy: commitment.submittedBy,
+      categoryKey: commitment.categoryKey,
+      categoryVersion: commitment.categoryVersion,
+      attributes: commitment.attributes,
+      consent: commitment.consent,
+      withdrawnAt: commitment.withdrawnAt,
+      withdrawalReason: commitment.withdrawalReason,
+      recordFormat: commitment.recordFormat,
+      createdAt: commitment.createdAt,
+      updatedAt: commitment.updatedAt,
+      idempotencyKey: commitment.idempotencyKey,
+      executionId: commitment.executionId,
+      correlationId: commitment.correlationId,
+      causationId: commitment.causationId,
+    };
+  }
+  function toQualifiedProcurementAggregateView(
+    view: QualifiedProcurementAggregate,
+  ) {
+    // The derived supplier-facing view passes through as-is: it is
+    // already the minimized aggregate contract (counts +
+    // bands/buckets/windows only; no person/commitment/buyer-
+    // organization identifiers; anchor + digest recorded).
     return {
       poolId: view.poolId,
       organizationScopeId: view.organizationScopeId,
@@ -7725,6 +7846,111 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return pools.map(toDemandPoolView);
     },
 
+    // -- NET-W025 procurement commands ------------------------------------
+    async createProcurementPool(execution, _actorPersonId, input) {
+      const result = await procurementService.createProcurementPool(
+        execution,
+        input as unknown as import("../demand/port.ts").CreateProcurementPoolInput,
+      );
+      return {
+        pool: toProcurementPoolView(result.pool),
+        created: result.created,
+      };
+    },
+
+    async closeProcurementPool(execution, _actorPersonId, input) {
+      const pool = await procurementService.closeProcurementPool(
+        execution,
+        input as unknown as import("../demand/port.ts").CloseProcurementPoolInput,
+      );
+      return toProcurementPoolView(pool);
+    },
+
+    async createProcurementCommitment(execution, _actorPersonId, input) {
+      const result = await procurementService.createProcurementCommitment(
+        execution,
+        input as unknown as import("../demand/port.ts").CreateProcurementCommitmentInput,
+      );
+      return {
+        commitment: toProcurementCommitmentView(result.commitment),
+        created: result.created,
+      };
+    },
+
+    async withdrawProcurementCommitment(execution, _actorPersonId, input) {
+      const commitment = await procurementService.withdrawProcurementCommitment(
+        execution,
+        input as unknown as import("../demand/port.ts").WithdrawProcurementCommitmentInput,
+      );
+      return toProcurementCommitmentView(commitment);
+    },
+
+    async evaluateQualifiedProcurementDemand(
+      execution,
+      _actorPersonId,
+      input,
+    ) {
+      // THE SUPPLIER-FACING DERIVATION: no aggregate/threshold input
+      // exists — every caller field beyond scope/pool identity is
+      // ignored and the evaluation re-derives everything.
+      const view = await procurementService.evaluateQualifiedProcurementDemand(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId as string,
+          poolId: input.poolId as string,
+        },
+      );
+      return toQualifiedProcurementAggregateView(view);
+    },
+
+    async listMyProcurementCommitments(
+      execution,
+      actorPersonId,
+      input,
+    ) {
+      // The submitter is the SERVER-RESOLVED authenticated actor —
+      // there is no submittedBy input on this route. This is the
+      // ONLY commitment read surface (individual business
+      // commitments are never exposed through any other route).
+      const commitments = await procurementService.listProcurementCommitments(
+        execution,
+        input.organizationScopeId as string,
+        {
+          submittedBy: actorPersonId,
+          ...(input.poolId !== undefined && input.poolId !== null
+            ? { poolId: input.poolId as string }
+            : {}),
+        },
+      );
+      return commitments.map(toProcurementCommitmentView);
+    },
+
+    async getProcurementPool(execution, organizationScopeId, poolId) {
+      const pool = await procurementService.getProcurementPool(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        poolId,
+      );
+      return toProcurementPoolView(pool);
+    },
+
+    async listProcurementPools(
+      execution,
+      organizationScopeId,
+      categoryKey,
+      closed,
+    ) {
+      const pools = await procurementService.listProcurementPools(
+        getExecutionContext() ?? execution,
+        organizationScopeId,
+        {
+          ...(categoryKey !== undefined ? { categoryKey } : {}),
+          ...(closed !== undefined ? { closed } : {}),
+        },
+      );
+      return pools.map(toProcurementPoolView);
+    },
+
     // -- NET-W012 helpful-contribution commands -------------------------
     async defineHelpfulnessPolicy(execution, _actorPersonId, input) {
       const result = await helpfulnessService.defineHelpfulnessPolicy(
@@ -9005,6 +9231,8 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     crossPromotionClearingService,
     // NET-W024 demand (consumer demand pools) service.
     demandService,
+    // NET-W025 demand (business procurement pools) service.
+    procurementService,
     helpfulnessService,
     // NET-W013 quality/moderation/anti-spam services + LLM providers.
     qualityService,

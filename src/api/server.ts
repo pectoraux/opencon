@@ -4220,6 +4220,309 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // ------------------------------------------------------------------
+    // NET-W025 — Business procurement pools routes (the SAME /demand
+    // boundary). Pools are public tenant-scoped reads; every
+    // commitment read surface is ACTOR-SCOPED
+    // (listMyProcurementCommitments) — individual business
+    // commitments are never exposed on any other route; the
+    // qualified aggregate is a protected DERIVED 200 decision.
+    // ------------------------------------------------------------------
+
+    // POST /api/demand/procurement/pools — create a procurement pool
+    // (protected; guard action demand.procurement.pools.create; the
+    // acting person BECOMES the pool creator — there is no
+    // creatorPersonId input).
+    if (
+      path === "/api/demand/procurement/pools" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.pools.create",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createProcurementPool(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          name: strField(obj, "name"),
+          categoryKey: strField(obj, "categoryKey"),
+          qualificationPolicy: obj.qualificationPolicy,
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/demand/procurement/pools/:id/closure — close the
+    // procurement pool (one-way, creator-only; protected; guard
+    // action demand.procurement.pools.close).
+    if (
+      path.startsWith("/api/demand/procurement/pools/") &&
+      path.endsWith("/closure") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/demand/procurement/pools/".length,
+        -"/closure".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.pools.close",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.closeProcurementPool(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          poolId: id,
+          ...(obj.reason !== undefined && obj.reason !== null
+            ? { reason: obj.reason as string }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/demand/procurement/pools/:id/qualified-aggregate —
+    // THE SUPPLIER-FACING DERIVATION (protected; guard action
+    // demand.procurement.aggregates.evaluate): the
+    // privacy/competition-preserving qualified aggregate, re-derived
+    // from CURRENT durable records at one explicit evaluation
+    // anchor. A 200 DECISION for every outcome (qualified or not,
+    // disclosed or suppressed — the decision is the product). There
+    // is NO aggregate/threshold input: every caller field beyond
+    // scope/pool identity is ignored.
+    if (
+      path.startsWith("/api/demand/procurement/pools/") &&
+      path.endsWith("/qualified-aggregate") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/demand/procurement/pools/".length,
+        -"/qualified-aggregate".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.aggregates.evaluate",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.evaluateQualifiedProcurementDemand(
+          guarded.execution,
+          guarded.personId,
+          {
+            organizationScopeId: strField(obj, "organizationScopeId"),
+            poolId: id,
+          },
+        ),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/demand/procurement/commitments — record a business
+    // demand commitment (protected; guard action
+    // demand.procurement.commitments.create; the acting person
+    // BECOMES the submitter — there is no submittedBy input; the
+    // buyer-organization authorization + the consent grant are
+    // server-written/server-enforced).
+    if (
+      path === "/api/demand/procurement/commitments" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.commitments.create",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createProcurementCommitment(
+          guarded.execution,
+          guarded.personId,
+          {
+            organizationScopeId: strField(obj, "organizationScopeId"),
+            poolId: strField(obj, "poolId"),
+            buyerOrganizationId: strField(obj, "buyerOrganizationId"),
+            attributes: obj.attributes,
+            consent: obj.consent,
+            idempotencyKey: strField(obj, "idempotencyKey"),
+          },
+        ),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/demand/procurement/commitments/:id/withdrawal —
+    // withdraw the procurement commitment (one-way, submitter-only;
+    // protected; guard action demand.procurement.commitments.withdraw
+    // — the consent revocation).
+    if (
+      path.startsWith("/api/demand/procurement/commitments/") &&
+      path.endsWith("/withdrawal") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/demand/procurement/commitments/".length,
+        -"/withdrawal".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.commitments.withdraw",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.withdrawProcurementCommitment(
+          guarded.execution,
+          guarded.personId,
+          {
+            organizationScopeId: strField(obj, "organizationScopeId"),
+            commitmentId: id,
+            ...(obj.reason !== undefined && obj.reason !== null
+              ? { reason: obj.reason as string }
+              : {}),
+            idempotencyKey: strField(obj, "idempotencyKey"),
+          },
+        ),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/demand/procurement/commitments/mine — list the
+    // AUTHENTICATED ACTOR'S OWN commitments (protected; guard action
+    // demand.procurement.commitments.read). The ONLY commitment read
+    // surface: the submitter is the server-resolved actor (there is
+    // no submittedBy input); individual business commitments are
+    // never exposed through any other route.
+    if (
+      path === "/api/demand/procurement/commitments/mine" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.commitments.read",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.listMyProcurementCommitments(
+          guarded.execution,
+          guarded.personId,
+          {
+            organizationScopeId: strField(obj, "organizationScopeId"),
+            ...(obj.poolId !== undefined && obj.poolId !== null
+              ? { poolId: obj.poolId as string }
+              : {}),
+          },
+        ),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // GET /api/demand/procurement/pools/:id — one procurement pool
+    // (public; tenant-scoped; pool metadata only — no commitment
+    // data; a cross-scope id is not found).
+    if (
+      path.startsWith("/api/demand/procurement/pools/") &&
+      !path.includes("/closure") &&
+      !path.includes("/qualified-aggregate") &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const id = path.slice("/api/demand/procurement/pools/".length);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const view = await opts.commands.getProcurementPool(
+        ctx,
+        organizationScopeId,
+        id,
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // GET /api/demand/procurement/pools — an org's procurement pools
+    // (public; tenant-scoped; pool metadata only; optional
+    // categoryKey/closed filters).
+    if (
+      path === "/api/demand/procurement/pools" &&
+      method === "GET" &&
+      opts.commands
+    ) {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const organizationScopeId = url.searchParams.get("organizationScopeId");
+      if (!organizationScopeId) {
+        throw apiValidationError('query parameter "organizationScopeId" is required');
+      }
+      const categoryKey = url.searchParams.get("categoryKey") ?? undefined;
+      const closedParam = url.searchParams.get("closed");
+      const closed =
+        closedParam === null
+          ? undefined
+          : closedParam === "true"
+            ? true
+            : closedParam === "false"
+              ? false
+              : undefined;
+      const view = await opts.commands.listProcurementPools(
+        ctx,
+        organizationScopeId,
+        categoryKey,
+        closed,
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
     // GET /api/inventory/items/:id — one inventory item (public;
     // tenant-scoped; a cross-scope id is not found).
     if (
