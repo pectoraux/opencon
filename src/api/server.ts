@@ -4713,6 +4713,249 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // POST /api/demand/procurement/pools/:id/baselines — establish
+    // the explicit baseline/counterfactual record (protected; guard
+    // action demand.procurement.baselines.create; pool-creator-only;
+    // the kind/method/version/window/population/value/confidence/
+    // provenance/evidence contract is validated fail-closed and the
+    // evidence references resolve through the NEUTRAL /evidence
+    // lookup — scope + subject binding enforced).
+    if (
+      path.startsWith("/api/demand/procurement/pools/") &&
+      path.endsWith("/baselines") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/demand/procurement/pools/".length,
+        -"/baselines".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.baselines.create",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createProcurementBaseline(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          poolId: id,
+          baselineKind: strField(obj, "baselineKind"),
+          method: strField(obj, "method"),
+          methodVersion: strField(obj, "methodVersion"),
+          comparisonWindow: obj.comparisonWindow,
+          population: strField(obj, "population"),
+          baselineValue: obj.baselineValue,
+          confidence: obj.confidence,
+          provenance: obj.provenance,
+          evidenceIds: obj.evidenceIds,
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/demand/procurement/pools/:id/baselines/list — list
+    // the pool's baselines (protected; guard action
+    // demand.procurement.baselines.read; pool-creator-only — the
+    // service re-derives the creator gate server-side).
+    if (
+      path.startsWith("/api/demand/procurement/pools/") &&
+      path.endsWith("/baselines/list") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/demand/procurement/pools/".length,
+        -"/baselines/list".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.baselines.read",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.listPoolBaselines(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          poolId: id,
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/demand/procurement/baselines/:id/invalidation —
+    // invalidate the baseline (ONE-WAY, pool-creator-only; protected;
+    // guard action demand.procurement.baselines.invalidate; a closed
+    // invalidation-reason vocabulary — an invalidated baseline can
+    // never again support a savings derivation).
+    if (
+      path.startsWith("/api/demand/procurement/baselines/") &&
+      path.endsWith("/invalidation") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/demand/procurement/baselines/".length,
+        -"/invalidation".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.baselines.invalidate",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.invalidateProcurementBaseline(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          baselineId: id,
+          reason: strField(obj, "reason"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/demand/procurement/pools/:id/savings-evaluation —
+    // THE DERIVED SAVINGS VIEW (protected; guard action
+    // demand.procurement.savings.evaluate; pool-creator-only): the
+    // deterministic, uncertainty-preserving derivation at ONE
+    // explicit evaluation anchor — a DERIVED 200 decision for every
+    // outcome (supported or not, the decision is the product; there
+    // is NO savings value/confidence/supported input).
+    if (
+      path.startsWith("/api/demand/procurement/pools/") &&
+      path.endsWith("/savings-evaluation") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/demand/procurement/pools/".length,
+        -"/savings-evaluation".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.savings.evaluate",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.evaluateProcurementSavings(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          poolId: id,
+          baselineId: strField(obj, "baselineId"),
+          outcomeObservationIds: obj.outcomeObservationIds,
+          ...(obj.selectionId !== undefined && obj.selectionId !== null
+            ? { selectionId: obj.selectionId as string }
+            : {}),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/demand/procurement/pools/:id/savings-records —
+    // record the AUTHORITATIVE savings lineage (protected; guard
+    // action demand.procurement.savings.record; pool-creator-only):
+    // the derivation is re-executed INSIDE the authoritative
+    // transaction from CURRENT records and FAILS CLOSED when the
+    // evidence is invalid, stale or insufficient (a verified savings
+    // claim is a measurement decision, never an economic mutation).
+    if (
+      path.startsWith("/api/demand/procurement/pools/") &&
+      path.endsWith("/savings-records") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/demand/procurement/pools/".length,
+        -"/savings-records".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.savings.record",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recordProcurementSavings(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          poolId: id,
+          baselineId: strField(obj, "baselineId"),
+          outcomeObservationIds: obj.outcomeObservationIds,
+          ...(obj.selectionId !== undefined && obj.selectionId !== null
+            ? { selectionId: obj.selectionId as string }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/demand/procurement/pools/:id/savings — list the
+    // pool's savings lineage records (protected; guard action
+    // demand.procurement.savings.read; pool-creator-only — the
+    // service re-derives the creator gate server-side).
+    if (
+      path.startsWith("/api/demand/procurement/pools/") &&
+      path.endsWith("/savings") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/demand/procurement/pools/".length,
+        -"/savings".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "demand.procurement.savings.read",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.listPoolSavings(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          poolId: id,
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
     // GET /api/demand/procurement/pools/:id — one procurement pool
     // (public; tenant-scoped; pool metadata only — no commitment
     // data; a cross-scope id is not found).

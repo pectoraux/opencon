@@ -430,6 +430,24 @@ import type {
   SupplierOffer,
   SupplierOfferService,
 } from "../demand/port.ts";
+// NET-W027 demand (verified savings and counterfactuals — the SAME
+// /demand boundary extended AGAIN, NOT a second demand/procurement
+// authority; /outcomes stays the measurement authority and
+// /evidence stays the provenance/truth authority — both are
+// consumed read-only through NEUTRAL lookups wired below).
+import {
+  createAuthorityProcurementBaselineRepository,
+  createAuthorityProcurementSavingsRepository,
+} from "../demand/authority-savings-repositories.ts";
+import { createProcurementSavingsService } from "../demand/savings-service.ts";
+import type {
+  ProcurementBaseline,
+  ProcurementSavings,
+  ProcurementSavingsEvidenceLookup,
+  ProcurementSavingsOutcomeLookup,
+  ProcurementSavingsService,
+  ProcurementSavingsView,
+} from "../demand/port.ts";
 import type {
   ActivateRiskControlInput,
   AppealDisputeInput,
@@ -687,6 +705,14 @@ export interface Runtime {
   // selection lineage — still zero economic surface, W025 privacy
   // intact upstream; still the SAME /demand authority) service.
   readonly supplierOfferService: SupplierOfferService;
+  // NET-W027 demand (verified savings and counterfactuals:
+  // evidence-backed explicit baselines with preserved uncertainty,
+  // authoritative /outcomes observations + /evidence facts through
+  // neutral lookups, deterministic anchor-aware derivation that
+  // fails closed on invalid/stale/insufficient evidence — still
+  // zero economic surface; still the SAME /demand authority)
+  // service.
+  readonly procurementSavingsService: ProcurementSavingsService;
   // NET-W012 helpful contributions (Proof-of-Helpfulness) service.
   readonly helpfulnessService: HelpfulnessService;
   // NET-W013 quality/moderation/anti-spam services.
@@ -1078,6 +1104,21 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   });
   const competitiveSelectionRepo =
     createAuthorityCompetitiveSelectionRepository({
+      authority: postgresAuthority,
+      logger: { debug: (m, f) => logger.forModule("demand").debug(m, f) },
+    });
+  // NET-W027 baseline/savings repositories (PostgresAuthority-backed,
+  // append-only collections — the SAME /demand boundary's durable
+  // state for the explicit baselines (one-way invalidation) and the
+  // immutable savings lineage records; no economic state exists
+  // anywhere in these collections).
+  const procurementBaselineRepo =
+    createAuthorityProcurementBaselineRepository({
+      authority: postgresAuthority,
+      logger: { debug: (m, f) => logger.forModule("demand").debug(m, f) },
+    });
+  const procurementSavingsRepo =
+    createAuthorityProcurementSavingsRepository({
       authority: postgresAuthority,
       logger: { debug: (m, f) => logger.forModule("demand").debug(m, f) },
     });
@@ -2793,6 +2834,96 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     poolRepository: procurementPoolRepo,
     commitmentRepository: procurementCommitmentRepo,
     membershipLookup: demandMembershipLookup,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("demand"),
+  });
+
+  // ------------------------------------------------------------------
+  // NET-W027 savings/counterfactual wiring (verified savings and
+  // counterfactuals — the SAME /demand boundary, NOT a second
+  // authority).
+  //
+  // The savings service reuses the SAME neutral membership lookup
+  // adapter (the pool-creator + active-membership gates resolve
+  // through the /organizations authority) AND the SAME procurement
+  // pool/selection repositories (same-boundary state). The
+  // cross-boundary facts are consumed through the TWO NEUTRAL
+  // read-only lookups declared in the /demand port and wired here
+  // (the dependency-inversion pattern — /evidence stays the
+  // provenance/truth authority, /outcomes stays the normalized
+  // measurement authority; the adapters expose scope/subject/source
+  // facts, observed values/confidence/provenance/chain position —
+  // never measurement semantics). The /demand boundary still has
+  // ZERO economic surface (/settlement untouched by NET-W027: a
+  // verified savings claim is a measurement decision, never an
+  // economic one) and NO lifecycle machinery (/workflows untouched:
+  // baseline invalidation is a one-way field mutation; evidence
+  // staleness and observation supersession are DERIVED at the
+  // evaluation anchor).
+  // ------------------------------------------------------------------
+  const procurementSavingsEvidenceLookup: ProcurementSavingsEvidenceLookup =
+    {
+      async resolve(evidenceId) {
+        // Read-only facts over the /evidence authority's repository:
+        // scope, subject binding and source type ONLY.
+        const record = await evidenceRepo.findById(evidenceId);
+        if (!record) return null;
+        return {
+          id: record.id,
+          organizationScopeId: record.organizationScopeId,
+          subjectId: record.subjectReference.subjectId,
+          subjectType: record.subjectReference.subjectType,
+          sourceType: record.provenance.sourceType,
+        };
+      },
+    };
+  const procurementSavingsOutcomeLookup: ProcurementSavingsOutcomeLookup =
+    {
+      async resolve(observationId) {
+        // Read-only facts over the /outcomes authority's observation
+        // repository: scope, subject binding, outcome type, observed
+        // value + unit, confidence, provenance source type +
+        // collection time, and the correction-chain position (a
+        // superseded observation is not chain head — the /outcomes
+        // authority owns the chain semantics; the adapter only
+        // exposes the derived position fact).
+        const record =
+          await outcomeObservationRepo.findById(observationId);
+        if (!record) return null;
+        const corrections =
+          await outcomeObservationRepo.findByCorrectionOf(observationId);
+        const superseding = corrections
+          .map((correction) => correction.id)
+          .sort()[0] ?? null;
+        return {
+          id: record.id,
+          organizationScopeId: record.organizationScopeId,
+          subjectId: record.subjectReference.subjectId,
+          subjectType: record.subjectReference.subjectType,
+          outcomeType: record.outcomeType,
+          observedValue: {
+            value: record.observedValue.value,
+            unit: record.observedValue.unit,
+          },
+          confidence: record.confidence,
+          provenance: {
+            sourceType: record.provenance.sourceType,
+            collectedAt: record.provenance.collectedAt,
+          },
+          correctsObservationId: record.correctsObservationId,
+          supersededByObservationId: superseding,
+        };
+      },
+    };
+  const procurementSavingsService = createProcurementSavingsService({
+    baselineRepository: procurementBaselineRepo,
+    savingsRepository: procurementSavingsRepo,
+    poolRepository: procurementPoolRepo,
+    selectionRepository: competitiveSelectionRepo,
+    membershipLookup: demandMembershipLookup,
+    evidenceLookup: procurementSavingsEvidenceLookup,
+    outcomeLookup: procurementSavingsOutcomeLookup,
     idempotency,
     auditWriter,
     logger: logger.forModule("demand"),
@@ -4625,6 +4756,95 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       executionId: selection.executionId,
       correlationId: selection.correlationId,
       causationId: selection.causationId,
+    };
+  }
+  function toProcurementBaselineView(baseline: ProcurementBaseline) {
+    // The explicit baseline/counterfactual record (pool-creator-
+    // scoped surface: baseline analysis stays with the demand
+    // owner; the view carries the full explicit contract — kind,
+    // method + version, window, population, value + unit,
+    // confidence with preserved uncertainty, provenance, evidence
+    // references and the one-way invalidation fields).
+    return {
+      id: baseline.id,
+      organizationScopeId: baseline.organizationScopeId,
+      poolId: baseline.poolId,
+      createdBy: baseline.createdBy,
+      baselineKind: baseline.baselineKind,
+      method: baseline.method,
+      methodVersion: baseline.methodVersion,
+      comparisonWindow: baseline.comparisonWindow,
+      population: baseline.population,
+      baselineValue: baseline.baselineValue,
+      confidence: baseline.confidence,
+      provenance: baseline.provenance,
+      evidenceIds: baseline.evidenceIds,
+      invalidatedAt: baseline.invalidatedAt,
+      invalidationReason: baseline.invalidationReason,
+      recordFormat: baseline.recordFormat,
+      createdAt: baseline.createdAt,
+      updatedAt: baseline.updatedAt,
+      idempotencyKey: baseline.idempotencyKey,
+      executionId: baseline.executionId,
+      correlationId: baseline.correlationId,
+      causationId: baseline.causationId,
+    };
+  }
+  function toProcurementSavingsView(view: ProcurementSavingsView) {
+    // The derived pool-creator-scoped savings view passes through
+    // as-is: it is already the explicit contract (policy + baseline
+    // + checks + conservatively combined values/confidence +
+    // observation ids; anchor + digest recorded; uncertainty
+    // preserved; anchor EXCLUDED from the digest so identical
+    // authoritative state yields the identical digest). Savings
+    // surfaces are pool-creator-only (the guard action + the
+    // pool-creator gate are the transport/domain authorization).
+    return {
+      poolId: view.poolId,
+      organizationScopeId: view.organizationScopeId,
+      derivationPolicy: view.derivationPolicy,
+      baselineId: view.baselineId,
+      baselineKind: view.baselineKind,
+      supported: view.supported,
+      checks: view.checks,
+      baselineValue: view.baselineValue,
+      observedValue: view.observedValue,
+      savings: view.savings,
+      confidence: view.confidence,
+      observationIds: view.observationIds,
+      digest: view.digest,
+      evaluatedAt: view.evaluatedAt,
+    };
+  }
+  function toProcurementSavingsRecordView(savings: ProcurementSavings) {
+    // The persisted savings lineage record (immutable): the full
+    // derivation snapshot + provenance (the selection reference is
+    // NEUTRAL W026 lineage, never savings truth).
+    return {
+      id: savings.id,
+      organizationScopeId: savings.organizationScopeId,
+      poolId: savings.poolId,
+      baselineId: savings.baselineId,
+      selectionId: savings.selectionId,
+      recordedBy: savings.recordedBy,
+      derivationPolicy: savings.derivationPolicy,
+      baselineKind: savings.baselineKind,
+      baselineValue: savings.baselineValue,
+      observedValue: savings.observedValue,
+      savings: savings.savings,
+      confidence: savings.confidence,
+      observationIds: savings.observationIds,
+      checks: savings.checks,
+      supported: savings.supported,
+      evaluationAnchor: savings.evaluationAnchor,
+      digest: savings.digest,
+      recordFormat: savings.recordFormat,
+      createdAt: savings.createdAt,
+      updatedAt: savings.updatedAt,
+      idempotencyKey: savings.idempotencyKey,
+      executionId: savings.executionId,
+      correlationId: savings.correlationId,
+      causationId: savings.causationId,
     };
   }
   function toPlacementView(placement: PlacementRecord) {
@@ -8191,6 +8411,123 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return selections.map(toCompetitiveSelectionRecordView);
     },
 
+    // -- NET-W027 savings/counterfactual commands -----------------------
+    async createProcurementBaseline(execution, _actorPersonId, input) {
+      // The explicit baseline/counterfactual record (pool-creator-
+      // only; the kind/method/version/window/population/value/
+      // confidence/provenance/evidence contract is validated
+      // fail-closed; evidence references resolve through the NEUTRAL
+      // /evidence lookup — scope + subject binding enforced).
+      const result = await procurementSavingsService.createProcurementBaseline(
+        execution,
+        input as unknown as import("../demand/port.ts").CreateProcurementBaselineInput,
+      );
+      return {
+        baseline: toProcurementBaselineView(result.baseline),
+        created: result.created,
+      };
+    },
+
+    async invalidateProcurementBaseline(
+      execution,
+      _actorPersonId,
+      input,
+    ) {
+      // The ONE-WAY invalidation (pool-creator-only; closed-vocabulary
+      // reason; an invalidated baseline can never again support a
+      // savings derivation — derived fail-closed, never a status
+      // transition).
+      const baseline =
+        await procurementSavingsService.invalidateProcurementBaseline(
+          execution,
+          input as unknown as import("../demand/port.ts").InvalidateProcurementBaselineInput,
+        );
+      return toProcurementBaselineView(baseline);
+    },
+
+    async listPoolBaselines(execution, _actorPersonId, input) {
+      // The pool-creator-scoped baseline read (the service re-derives
+      // the creator gate server-side).
+      const baselines = await procurementSavingsService.listPoolBaselines(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId as string,
+          poolId: input.poolId as string,
+        },
+      );
+      return baselines.map(toProcurementBaselineView);
+    },
+
+    async evaluateProcurementSavings(
+      execution,
+      _actorPersonId,
+      input,
+    ) {
+      // THE DERIVED SAVINGS VIEW: no savings value, confidence,
+      // supported flag or baseline-facts input exists — every caller
+      // field beyond identities is ignored and the derivation
+      // re-derives everything (a derived 200 decision for every
+      // outcome — supported or not, the decision is the product).
+      const view = await procurementSavingsService.evaluateProcurementSavings(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId as string,
+          poolId: input.poolId as string,
+          baselineId: input.baselineId as string,
+          outcomeObservationIds: Array.isArray(input.outcomeObservationIds)
+            ? (input.outcomeObservationIds as string[])
+            : [],
+          ...(input.selectionId !== undefined && input.selectionId !== null
+            ? { selectionId: input.selectionId as string }
+            : {}),
+        },
+      );
+      return toProcurementSavingsView(view);
+    },
+
+    async recordProcurementSavings(
+      execution,
+      _actorPersonId,
+      input,
+    ) {
+      // THE AUTHORITATIVE SAVINGS LINEAGE RECORD: the derivation is
+      // re-executed INSIDE the authoritative transaction from CURRENT
+      // records and FAILS CLOSED when unsupported — nothing
+      // caller-asserted values or supports the claim.
+      const result = await procurementSavingsService.recordProcurementSavings(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId as string,
+          poolId: input.poolId as string,
+          baselineId: input.baselineId as string,
+          outcomeObservationIds: Array.isArray(input.outcomeObservationIds)
+            ? (input.outcomeObservationIds as string[])
+            : [],
+          ...(input.selectionId !== undefined && input.selectionId !== null
+            ? { selectionId: input.selectionId as string }
+            : {}),
+          idempotencyKey: input.idempotencyKey as string,
+        },
+      );
+      return {
+        savings: toProcurementSavingsRecordView(result.savings),
+        created: result.created,
+      };
+    },
+
+    async listPoolSavings(execution, _actorPersonId, input) {
+      // The pool-creator-scoped savings lineage read (the service
+      // re-derives the creator gate server-side).
+      const records = await procurementSavingsService.listPoolSavings(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId as string,
+          poolId: input.poolId as string,
+        },
+      );
+      return records.map(toProcurementSavingsRecordView);
+    },
+
     // -- NET-W012 helpful-contribution commands -------------------------
     async defineHelpfulnessPolicy(execution, _actorPersonId, input) {
       const result = await helpfulnessService.defineHelpfulnessPolicy(
@@ -9476,6 +9813,8 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     // NET-W026 demand (supplier offers + competitive selection)
     // service.
     supplierOfferService,
+    // NET-W027 demand (verified savings and counterfactuals) service.
+    procurementSavingsService,
     helpfulnessService,
     // NET-W013 quality/moderation/anti-spam services + LLM providers.
     qualityService,

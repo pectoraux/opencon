@@ -3260,6 +3260,109 @@ export interface ApiCommands {
   ): Promise<readonly Record<string, unknown>[]>;
 
   // -----------------------------------------------------------------
+  // NET-W027 — Verified savings and counterfactuals (inside the SAME
+  // /demand boundary; savings are claims about REALIZED OUTCOMES
+  // against explicit evidence-backed baselines — never offers, spend,
+  // reputation or caller arithmetic; uncertainty is preserved and
+  // the derivation is deterministic + anchor-aware; invalid, stale
+  // or insufficient evidence FAILS CLOSED for authoritative use;
+  // /settlement stays the sole economic authority and W028 Benefit
+  // Pools stay excluded; all savings/baseline surfaces are
+  // pool-creator-only; /outcomes stays the measurement authority and
+  // /evidence the provenance/truth authority — both consumed through
+  // neutral read-only lookups).
+  // -----------------------------------------------------------------
+
+  /**
+   * Establish the explicit baseline/counterfactual record for a
+   * procurement pool (protected; guard action
+   * `demand.procurement.baselines.create`; pool-creator-only): the
+   * kind/method/version/window/population/value/confidence/
+   * provenance/evidence contract is validated fail-closed (a
+   * counterfactual REQUIRES a quantified confidence interval), and
+   * every evidence reference resolves through the NEUTRAL /evidence
+   * lookup (scope + subject binding enforced — cross-tenant is
+   * indistinguishable from nonexistent). Evidence sufficiency is
+   * re-derived at every evaluation anchor, never stored.
+   */
+  createProcurementBaseline(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ baseline: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Invalidate the baseline (protected; guard action
+   * `demand.procurement.baselines.invalidate`; pool-creator-only):
+   * ONE-WAY with a closed-vocabulary reason — an invalidated baseline
+   * can never again support a savings derivation (fail-closed
+   * re-derivation, never a status transition).
+   */
+  invalidateProcurementBaseline(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * List the pool's baselines (protected; guard action
+   * `demand.procurement.baselines.read`; pool-creator-only — the
+   * service re-derives the creator gate server-side).
+   */
+  listPoolBaselines(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /**
+   * THE DERIVED SAVINGS VIEW (protected; guard action
+   * `demand.procurement.savings.evaluate`; pool-creator-only): the
+   * deterministic, uncertainty-preserving derivation at ONE explicit
+   * evaluation anchor — a DERIVED 200 decision for every outcome
+   * (supported or not, the decision is the product). There is NO
+   * savings value, confidence, supported flag or baseline-facts
+   * input (every caller field beyond identities is ignored; the
+   * arithmetic is server-owned); observation ids resolve through the
+   * NEUTRAL /outcomes lookup.
+   */
+  evaluateProcurementSavings(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * Record the AUTHORITATIVE savings lineage record (protected;
+   * guard action `demand.procurement.savings.record`;
+   * pool-creator-only): the derivation is re-executed INSIDE the
+   * authoritative transaction from CURRENT records at ONE explicit
+   * anchor and FAILS CLOSED when the evidence is invalid, stale or
+   * insufficient — nothing caller-asserted values or supports the
+   * claim. The persisted record is an immutable lineage snapshot
+   * (the W026 selection-record precedent). A verified savings claim
+   * is a MEASUREMENT DECISION — never an economic mutation.
+   */
+  recordProcurementSavings(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ savings: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * List the pool's savings lineage records (protected; guard action
+   * `demand.procurement.savings.read`; pool-creator-only — the
+   * service re-derives the creator gate server-side). Economically
+   * authoritative consumers must consume the DERIVED evaluation for
+   * current verdicts, never stale snapshots.
+   */
+  listPoolSavings(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  // -----------------------------------------------------------------
   // NET-W012 — helpful contributions (Proof-of-Helpfulness).
   // -----------------------------------------------------------------
 

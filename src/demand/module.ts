@@ -18,12 +18,20 @@ import { defineBoundaryModule } from "../core/domain-module.ts";
  * boundary again with supplier offers and competitive selection:
  * authorized supplier offers against currently qualified demand,
  * server-derived hard eligibility, deterministic auditable selection
- * lineage, and W025 privacy intact. Still zero economic surface;
- * still no second demand/procurement/selection authority.
+ * lineage, and W025 privacy intact. NET-W027 extends the SAME
+ * boundary again with verified savings and counterfactuals:
+ * evidence-backed explicit baselines (counterfactuals require
+ * quantified uncertainty), authoritative /outcomes observations
+ * consumed through neutral lookups, deterministic anchor-aware
+ * derivation that fails closed on invalid, stale or insufficient
+ * evidence, and immutable savings lineage. Still zero economic
+ * surface (a verified savings claim is a measurement decision,
+ * never an economic one); still no second demand/procurement
+ * authority.
  */
 export const demandModule = defineBoundaryModule({
   name: "demand",
   tier: "domain",
   summary:
-    "demand aggregation (NET-W024: consumer demand pools; NET-W025: business procurement pools; NET-W026: supplier offers and competitive selection)",
+    "demand aggregation (NET-W024: consumer demand pools; NET-W025: business procurement pools; NET-W026: supplier offers and competitive selection; NET-W027: verified savings and counterfactuals)",
 });

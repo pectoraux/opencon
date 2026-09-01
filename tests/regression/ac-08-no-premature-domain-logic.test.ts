@@ -237,7 +237,25 @@ const NET_W025_DOMAINS = ["demand"];
 // separation).
 const NET_W026_DOMAINS = ["demand"];
 
-// Domains still deferred past NET-W026 (must remain skeletons).
+// NET-W027 activates the verified-savings/counterfactual domain
+// INSIDE the SAME frozen /demand boundary (explicit evidence-backed
+// baselines with preserved uncertainty, authoritative /outcomes
+// observations + /evidence facts through neutral lookups,
+// deterministic anchor-aware derivation that fails closed on
+// invalid/stale/insufficient evidence, immutable savings lineage)
+// with NO economic mutation (/settlement stays the economic
+// authority — a verified savings claim is a measurement decision,
+// never an economic one), NO lifecycle mutation (/workflows
+// untouched: baseline invalidation is a one-way field mutation;
+// evidence staleness and observation supersession are DERIVED at
+// the evaluation anchor) and NO second measurement/provenance
+// authority (/outcomes and /evidence are consumed read-only through
+// neutral composition-root lookups) — the W027 boundary EXTENDS
+// /demand, it does not create a second procurement authority
+// (NET-W027 work order §3 authority separation).
+const NET_W027_DOMAINS = ["demand"];
+
+// Domains still deferred past NET-W027 (must remain skeletons).
 const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
   (d) =>
     !NET_W002_DOMAINS.includes(d) &&
@@ -252,7 +270,8 @@ const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
     !NET_W019_DOMAINS.includes(d) &&
     !NET_W024_DOMAINS.includes(d) &&
     !NET_W025_DOMAINS.includes(d) &&
-    !NET_W026_DOMAINS.includes(d),
+    !NET_W026_DOMAINS.includes(d) &&
+    !NET_W027_DOMAINS.includes(d),
 );
 
 // Patterns that would indicate economically/material domain logic,
@@ -554,6 +573,32 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
       // selection authority per the NET-W026 work order §3).
       expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
       expect(moduleExport.describe?.() ?? "").toMatch(/NET-W026/);
+    }
+  });
+
+  test("NET-W027 domain modules are non-skeletal (tier domain, no 'skeleton' marker, reference NET-W027)", async () => {
+    for (const dir of NET_W027_DOMAINS) {
+      const modulePath = join(SRC, dir, "module.ts");
+      expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
+      const mod = await import(`../../src/${dir}/module.ts`);
+      const moduleExport = Object.values(mod)[0] as {
+        name: string;
+        tier: string;
+        describe?: () => string;
+      };
+      expect(moduleExport.tier).toBe("domain");
+      // NET-W027 EXTENDS the SAME /demand boundary AGAIN with
+      // verified savings and counterfactuals (explicit
+      // evidence-backed baselines, neutral-lookup /outcomes +
+      // /evidence facts, deterministic fail-closed derivation,
+      // immutable savings lineage; still NO economic command — a
+      // verified savings claim is a measurement decision, never an
+      // economic one — lifecycle still with /workflows, /outcomes
+      // and /evidence still the measurement/provenance authorities,
+      // still no second procurement authority per the NET-W027 work
+      // order §3).
+      expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
+      expect(moduleExport.describe?.() ?? "").toMatch(/NET-W027/);
     }
   });
 
