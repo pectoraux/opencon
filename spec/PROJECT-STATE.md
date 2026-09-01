@@ -21,7 +21,7 @@
 - PR: #53 (squash-merged)
 - Merge SHA: `6b8d8424587405aae7e0d8b8ea6bd5e48a5e0936`
 - Status: MERGED
-- Authority: `/demand` remains the sole demand/procurement/selection authority. W026 extends the W025 boundary with tenant/pool-scoped supplier offers, server-derived hard eligibility, deterministic competitive selection and immutable selection lineage. `/settlement` remains the sole economic authority; `/workflows` remained untouched.
+- Authority: `/demand` remains the sole demand/procurement/selection authority. W026 extended the W025 boundary with tenant/pool-scoped supplier offers, server-derived hard eligibility, deterministic competitive selection and immutable selection lineage. `/settlement` remains the sole economic authority; `/workflows` remained untouched.
 - Important W026 review lesson: supplier offers and selection remain procurement decisions, never economic mutations; qualified-demand gates are re-derived from current W025 commitments, hard eligibility precedes ranking, supplier terms stay within authorized selection surfaces, and selection is deterministic/reproducible with an explicit anchor and stable tie-break.
 
 ### Previous completed milestones
@@ -56,7 +56,7 @@ Important lineage checkpoints:
 
 - GitHub issue: #54 — OPEN
 - Status: READY_FOR_IMPLEMENTATION
-- Branch: `feat/net-w027-verified-savings-counterfactuals` — prepared
+- Branch: `feat/net-w027-verified-savings-counterfactuals` — prepared from merged W026 baseline
 - Dependencies: NET-W006 and NET-W026 — VERIFIED/MERGED
 - Requirements: PROC-002
 - Work order: `spec/work-orders/NET-W027.md` — to be authored on activation
