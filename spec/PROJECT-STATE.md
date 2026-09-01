@@ -32,7 +32,7 @@ Important lineage checkpoints:
 
 - NET-W004: `/workflows` lifecycle authority
 - NET-W005: `/evidence` provenance/truth authority
-- NET-W006: `/outcomes` normalized measurement authority
+- NET-W006: `/outcomes` normalized measurement
 - NET-W007: deterministic multidimensional reputation
 - NET-W008: economic ledger / credits / cash / settlement primitives
 - NET-W009/010: risk/dispute authority
@@ -55,7 +55,7 @@ Important lineage checkpoints:
 
 - GitHub issue: #52 — OPEN
 - Status: READY_FOR_IMPLEMENTATION
-- Branch: to be prepared
+- Branch: `feat/net-w026-supplier-offers-competitive-selection`
 - Dependencies: NET-W025 and NET-W008 — VERIFIED/MERGED
 - Work order: `spec/work-orders/NET-W026.md`
 - Evidence document: `docs/net-w026-supplier-offers-competitive-selection.md`
@@ -154,4 +154,4 @@ Never merge merely because CI is green. Never create a second implementation PR 
 
 ## Current action
 
-Activate NET-W026 from GitHub issue #52 and `spec/work-orders/NET-W026.md`. Prepare exactly one implementation branch/PR. Build strictly on the merged W025 procurement boundary: supplier offers must consume only the minimized qualified demand contract, hard eligibility must be authoritative and deterministic, selection must be reproducible and auditable, buyer commitment privacy must remain intact, and no economic authority may be introduced outside `/settlement`. Do not introduce W027/W028 semantics or alter the frozen architecture.
+Activate NET-W026 from issue #52 and `spec/work-orders/NET-W026.md` on `feat/net-w026-supplier-offers-competitive-selection`. Prepare exactly one implementation PR. Build strictly on the merged W025 procurement boundary: supplier offers consume only the minimized qualified demand contract, hard eligibility is authoritative and deterministic, selection is reproducible and auditable, buyer commitment privacy remains intact, and no economic authority is introduced outside `/settlement`. Do not introduce W027/W028 semantics or alter the frozen architecture.
