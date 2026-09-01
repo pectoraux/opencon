@@ -1,10 +1,11 @@
 # NET-W026 Evidence Ledger — Supplier offers and competitive selection
 
-**Status:** IMPLEMENTED — verification complete, PR pending review  
+**Status:** IMPLEMENTED — PR #53 open, CI green, awaiting architect review  
 **Issue:** #52  
 **Dependency:** NET-W025 merged at `bcaf81b82088688af701f1a90242cc61b1fdd094`  
 **Architecture:** v1.0 frozen  
-**Implementation branch:** `feat/net-w026-supplier-offers-competitive-selection`
+**Implementation branch:** `feat/net-w026-supplier-offers-competitive-selection`  
+**Implementation PR:** #53 (`Closes #52`; head `41a3f3c18e496ff87d08e07c749b3dacce110cf8`; 1 commit, 22 files, +6161/−42)
 
 ## Evidence status
 
@@ -13,12 +14,12 @@
 | Canonical issue | #52 OPEN |
 | Canonical work order | `spec/work-orders/NET-W026.md` |
 | Implementation branch | `feat/net-w026-supplier-offers-competitive-selection` (prepared at `6e2fd45`, fast-forwarded to main) |
-| Implementation PR | To be created after this ledger update |
-| Architect review | Pending PR |
-| CI | Pending PR |
+| Implementation PR | **#53 OPEN** (mergeable_state: clean) |
+| Architect review | Pending (verification-status comment posted: id 5487891091) |
+| CI | **GREEN 4/4** — `verify` + `integration` (real PostgreSQL + Redis) succeeded on BOTH events at head `41a3f3c` |
 | Mutation suite | **7/7 caught** (privacy, region gate, supplier authorization, tenant scope, tie-break determinism, idempotency, qualified-demand gate — every mutated build failed its target AC suite; every restored build green) |
 | Local full verification | **1675 pass / 15 skip / 0 fail / 19038 expect() / 1690 tests / 214 files** (baseline 1625/1640/206 — +50 tests); `arch:check` + `authority:check` **294 files / 0 violations**; typecheck clean |
-| Real PostgreSQL/Redis integration | Configured CI job (postgres:17 + redis:7 service containers; unit tests skip locally without services) |
+| Real PostgreSQL/Redis integration | **GREEN** (CI `integration` job: postgres:17 + redis:7 service containers, both events) |
 
 ## Architectural guardrails (verified)
 
@@ -91,4 +92,4 @@ Driver: `opencon-tmp/w026-mutation-driver.mjs` (outside the repository; never co
 
 ## Review history
 
-- Pending architect review of the implementation PR.
+- 2026-09-01: PR #53 opened at head `41a3f3c` with the full verification record; CI green 4/4 (verify + real PostgreSQL/Redis integration, both events); mergeable_state clean; verification-status comment posted (id 5487891091). Awaiting architect review — unmerged per the standing protocol.
