@@ -1,10 +1,10 @@
 # NET-W030 Evidence Ledger — External settlement adapters
 
-**Status:** IMPLEMENTED / VERIFIED — submitted for architect review  
+**Status:** MERGED — PR #62, squash SHA `1d902e2148920ddd04e2b170509184d7b585cb3e`; issue #61 completed  
 **Issue:** #61  
 **Dependencies:** NET-W008 + NET-W029 merged/verified  
 **Architecture:** v1.0 frozen (byte-identical)  
-**Implementation branch:** `feat/net-w030-external-settlement-adapters`
+**Implementation branch:** `feat/net-w030-external-settlement-adapters` (squash-merged)
 
 ## Evidence plan → evidence delivered
 
@@ -78,6 +78,16 @@ The first push of this PR turned the CI `verify` job RED on BOTH events (1 fail:
 The mutation driver required three corrections during bring-up, all disclosed:
 1. A restore-ordering defect (cmp-before-restore, inherited from an early draft — NOT the W029 per-edit-backup bug) briefly left M1 active after a failed run; the file was restored by hand and the driver fixed (restore → cmp → delete). The subsequent full run is the recorded evidence.
 2. M3 and M6 were re-scoped after first-run "not caught" results — both revealed genuine defense-in-depth, not test gaps: removing the provider-vocabulary GATE is behavior-preserving (the adapter routing backstop rejects unknown providers with the same machine-readable reason), and randomizing the composite idempotency key is absorbed by the in-tx identity backstop under the test shim's sequential resolution. The re-scoped mutations target the same defect CLASSES observably (vocabulary widening; identity-backstop bypass), and both redundancy observations are recorded here deliberately.
+
+## Delivery record (post-merge)
+
+- **PR #62** — `feat(settlement): NET-W030 — External settlement adapters (closes #61)` — squash-merged as `1d902e2148920ddd04e2b170509184d7b585cb3e`.
+- **Final reviewed head:** `8bdb5251bec7795ef02bd5c7a074d8200f5c99a8` (implementation `38348f7` + the CI-red flake remediation `8bdb525` — see the post-submission remediation section above).
+- **Verification-status comment:** id `5501486864` (local gate 1916/15/0 / 1931 tests / 247 files; arch+authority 309/0; mutations 9/9 re-executed; secret scan clean).
+- **Architect review decision-of-record:** id `5501489998` — **APPROVED**, all 8 review areas PASS (authority placement; fact semantics; authentication/fail-closed ingestion; deterministic reconciliation; no economic bypass; tenancy/authorization; atomicity/audit; verification evidence), grounded in direct source inspection at the final head.
+- **CI at merge decision:** GREEN 4/4 on BOTH events at `8bdb525` (runs `33568081773` push / `33568085005` pull_request — verify + integration with real PostgreSQL 17 + Redis 7).
+- **Issue #61:** closed as completed via the squash-merge (`Closes #61`).
+- **Baseline advanced:** `bun run verify` 1858/15/0 (W029) → **1916/15/0** (1931 tests / 247 files); arch+authority 304 → **309 files / 0 violations**.
 
 ## Architectural invariants
 

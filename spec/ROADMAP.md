@@ -66,8 +66,9 @@ W019, W020, W021, W022, W023 — **COMPLETE**.
 
 ### Phase 8 — Decentralization
 - W029 — **COMPLETE**. PR #60 merged `cf53378e1c432dfd735e1b408010eece55d7612f`. The Phase-8 integrity layer: production signed attestations (Ed25519/ECDSA behind injected interfaces; closed versioned vocabularies; SecretProvider-only keys) + salted coverage commitments over the three authoritative record families, with deterministic fail-closed verification and PostgreSQL authority containment.
-- W030 — **CURRENT IMPLEMENTATION TARGET**. External settlement adapters: authenticated, idempotent, append-only external transaction FACTS recorded inside `/settlement` and deterministically reconciled against the internal ledger lineage — adapters provide transaction facts, never economic authority (architecture-lock §14 invariant 25).
-- W031, W032 — **PLANNED**.
+- W030 — **COMPLETE**. PR #62 merged `1d902e2148920ddd04e2b170509184d7b585cb3e`. The Phase-8 fact-ingestion/reconciliation layer: external settlement transactions as authenticated, idempotent, append-only FACTS inside `/settlement` (neutral adapter contracts; structural adapter implementation under `/adapters`; SecretProvider-only per-provider trust material, fail-closed, no dev fallback), deterministically reconciled against the internal ledger lineage — an external fact can never mint, consume or mutate internal value (architecture-lock §14 invariant 25).
+- W031 — **CURRENT IMPLEMENTATION TARGET**. Portable reputation proofs: verifiable reputation claims without raw private records — proofs derive from the authoritative `/reputation` state through the W029 signed-attestation machinery, disclose aggregate facts only under the aggregate disclosure gate, and verify deterministically with fail-closed machine-readable reasons.
+- W032 — **PLANNED**.
 
 ### Phase 9 — End-to-end proof
 W033, W034, W035, W036 — **PLANNED**.
@@ -86,44 +87,45 @@ W014/W018/W023/W028 → W033 → W034 → W035
 W028/W033 → W036
 ```
 
-## W030 implementation contract
+## W031 implementation contract
 
 ### Authority model
 
 ```text
-/settlement internal economic authority (W008/W014/W020)
-(ledger transactions, value records, credits, cash obligations)
-                    ↓ neutral internal lineage references
-/adapters provider-specific external settlement integrations
-(authenticated + fail-closed; the W023 discipline)
-                    ↓
-external settlement transaction FACTS (append-only, idempotent,
-provider-authenticated, tenant-scoped)
-                    ↓
-/settlement records the facts + DERIVES the deterministic reconciliation
-(matched / pending / mismatched — never an economic mutation)
-                    ↓
-PostgreSQL remains THE authoritative state
-(an external fact can never mint, consume or mutate internal value)
+/reputation internal reputation authority (W007 — UNCHANGED)
+(dimension state, authoritative inputs, snapshots, time decay)
+        ↓ neutral lookups (aggregate, opaque-reference facts only)
+/evidence W029 signed-attestation machinery (COMPOSED — no new crypto)
+(versioned algorithm/key vocabularies, SecretProvider-only keys,
+ deterministic fail-closed verification)
+        ↓
+portable reputation PROOFS (derived, tenant-scoped at issuance,
+ self-contained at presentation, aggregate disclosure only)
+        ↓
+verification is deterministic + fail-closed (machine-readable reasons)
+no raw private record, no cross-tenant data, no reputation transfer
+(reputation STAYS authoritative in PostgreSQL; proofs INFORM)
 ```
+
+`/reputation` remains the SOLE reputation authority; W031 adds proof DERIVATION, presentation and verification only, composing the existing W029 signed-attestation machinery (the composition root is the only join). No 18th domain.
 
 ### Non-negotiables
 
-1. External transaction facts attach to the EXISTING internal settlement lineage by canonical id; they never mint, consume or mutate internal economic state.
-2. `/settlement` remains the SOLE economic authority: adapters provide transaction FACTS (architecture-lock §14 invariant 25); no external execution of internal mutations; no second ledger.
-3. `/adapters` owns ALL provider-specific code; `/settlement` consumes ONLY the neutral `ExternalSettlementAdapter` contract wired at the composition root (the W023 discipline); no 17th domain.
-4. Adapter-delivered facts are AUTHENTICATED with SecretProvider-resolved material; unauthenticated, stale or malformed submissions fail closed — never silently recorded.
-5. Fact recording is idempotent per (organization scope, provider, external id): exactly-once, replay-safe, concurrency-safe.
-6. Reconciliation (matched/pending/mismatched) is DERIVED, deterministic and server-side with machine-readable reasons; mismatches are recorded + audited, never auto-corrected.
-7. Tenant and authorization failures remain fail-closed without existence oracles.
-8. Material mutations use the established composite idempotency, one-authoritative-transaction, transactional-audit and post-commit publication patterns.
-9. AI, if used, is advisory only; it cannot authorize ingestion or reconciliation outcomes.
-10. W031+ portable reputation proofs, W032+ decentralized validation and W033+ end-to-end flows remain excluded.
+1. Proofs are DERIVED views over the authoritative `/reputation` state — never a second reputation authority, never raw record transfer (PRIV-001..002).
+2. Proof issuance composes the W029 machinery: REP-004 evidence lineage via opaque references; no new signing surface, no new key-material class.
+3. Disclosure is AGGREGATE and scoped under the aggregate disclosure gate (dimension scores, grades, decayed values, evidence-reference counts) — no raw personal activity, payloads, or cross-tenant data (PRIV-003).
+4. Verification is deterministic, non-mutating, fail-closed with machine-readable reasons from a closed vocabulary.
+5. Proofs are tenant-scoped at issuance and self-contained at presentation (no existence oracles; verification never queries tenant-scoped state).
+6. Reputation remains non-purchasable (REP-002): no proof path accepts spend/wealth as reputation substance.
+7. Time decay applies at derivation (REP-003): disclosed scores are the authority's own deterministic decayed values, never presentation-side recomputations.
+8. Issuance uses composite idempotency, one authoritative transaction, transactional audit; presentation/verification mutates and audits nothing.
+9. AI, if used, is advisory only; it cannot authorize proof issuance or verification outcomes.
+10. W032+ decentralized validation and W033+ end-to-end flows remain excluded.
 11. `spec/architecture.md` and `spec/architecture-lock.md` remain unchanged.
 
 ### Required evidence
 
-AC coverage for SETTLE-001..003 + ADAPTER-008; fact-recording round-trips over the neutral adapter contract; authentication fail-closed paths; deterministic reconciliation with machine-readable reasons; no-economic-bypass containment; tenancy/authorization; idempotency/concurrency/atomicity and fault injection; traceability in both directions; targeted mutation checks; `bun run verify`; architecture/authority checks; secret scan; configured PostgreSQL/Redis integration.
+AC coverage for REP-003..004 + PRIV-001..003; proof-issuance round-trips over the composed W029 machinery; aggregate-disclosure containment (no raw records, no cross-tenant leakage); deterministic verification with fail-closed paths (tamper/revocation/staleness); non-purchasability containment; time-decay consistency; tenancy/authorization; idempotency/concurrency/atomicity; targeted mutation checks; `bun run verify`; architecture/authority checks; secret scan; configured PostgreSQL/Redis integration.
 
 ## Operating procedure
 
