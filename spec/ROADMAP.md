@@ -65,8 +65,9 @@ W019, W020, W021, W022, W023 — **COMPLETE**.
 - W028 — **COMPLETE**. PR #57 merged `6e309e2af05a962e3417999ad8079da16d9ebc37`. The last skeletal v1.0 domain activated: every frozen domain is now implemented.
 
 ### Phase 8 — Decentralization
-- W029 — **CURRENT IMPLEMENTATION TARGET**. Cryptographic attestations and commitments: signed evidence attestations and hash commitments over existing authoritative records, without changing centralized semantic authority (PostgreSQL stays authoritative; no consensus, no external execution).
-- W030, W031, W032 — **PLANNED**.
+- W029 — **COMPLETE**. PR #60 merged `cf53378e1c432dfd735e1b408010eece55d7612f`. The Phase-8 integrity layer: production signed attestations (Ed25519/ECDSA behind injected interfaces; closed versioned vocabularies; SecretProvider-only keys) + salted coverage commitments over the three authoritative record families, with deterministic fail-closed verification and PostgreSQL authority containment.
+- W030 — **CURRENT IMPLEMENTATION TARGET**. External settlement adapters: authenticated, idempotent, append-only external transaction FACTS recorded inside `/settlement` and deterministically reconciled against the internal ledger lineage — adapters provide transaction facts, never economic authority (architecture-lock §14 invariant 25).
+- W031, W032 — **PLANNED**.
 
 ### Phase 9 — End-to-end proof
 W033, W034, W035, W036 — **PLANNED**.
@@ -85,44 +86,44 @@ W014/W018/W023/W028 → W033 → W034 → W035
 W028/W033 → W036
 ```
 
-## W029 implementation contract
+## W030 implementation contract
 
 ### Authority model
 
 ```text
-existing authoritative records
-(/evidence evidence records, /reputation inputs, /settlement value records)
+/settlement internal economic authority (W008/W014/W020)
+(ledger transactions, value records, credits, cash obligations)
+                    ↓ neutral internal lineage references
+/adapters provider-specific external settlement integrations
+(authenticated + fail-closed; the W023 discipline)
                     ↓
-     /evidence attestation + commitment semantics
-     (the integrity layer over authoritative references)
+external settlement transaction FACTS (append-only, idempotent,
+provider-authenticated, tenant-scoped)
                     ↓
- signed attestations (versioned algorithms + key references)
- + hash commitments (payload-hiding, binding)
+/settlement records the facts + DERIVES the deterministic reconciliation
+(matched / pending / mismatched — never an economic mutation)
                     ↓
- deterministic server-side verification (fail closed)
-                    ↓
- PostgreSQL remains THE authoritative state
- (an attestation never mints, mutates or resurrects authority)
+PostgreSQL remains THE authoritative state
+(an external fact can never mint, consume or mutate internal value)
 ```
 
 ### Non-negotiables
 
-1. W029 attaches attestations/commitments to existing authoritative records; it never creates new semantic authority and never mutates authoritative state.
-2. Cryptography is an integrity/provenance layer, never a consensus layer: no blockchain, no network validation, no token economics (W030/W031/W032 remain excluded).
-3. `/evidence` remains the provenance/truth authority and the home of attestation/commitment semantics; `/reputation` and `/settlement` ports stay untouched (references cross through neutral read paths).
-4. Signature verification is deterministic, server-side and version-pinned; failures fail closed; algorithm/key-reference vocabularies are closed and frozen.
-5. Commitments hide sensitive payloads while binding to them; disclosure reveals only what the frozen privacy rules permit (PRIV-003).
-6. Keys resolve only through `SecretProvider`; no key material is ever committed; secret scan stays clean.
-7. PostgreSQL remains authoritative: an attestation can never resurrect revoked, invalidated or superseded authoritative state.
-8. Material attestation mutations use the established composite idempotency, concurrency, one-authoritative-transaction, transactional-audit and post-commit publication patterns.
-9. Tenant and authorization failures remain fail-closed without existence oracles.
-10. AI, if used, is advisory only; it cannot authorize attestations, commitments or verification outcomes.
-11. W030+ external settlement adapters and W033+ end-to-end flows remain excluded.
-12. `spec/architecture.md` and `spec/architecture-lock.md` remain unchanged.
+1. External transaction facts attach to the EXISTING internal settlement lineage by canonical id; they never mint, consume or mutate internal economic state.
+2. `/settlement` remains the SOLE economic authority: adapters provide transaction FACTS (architecture-lock §14 invariant 25); no external execution of internal mutations; no second ledger.
+3. `/adapters` owns ALL provider-specific code; `/settlement` consumes ONLY the neutral `ExternalSettlementAdapter` contract wired at the composition root (the W023 discipline); no 17th domain.
+4. Adapter-delivered facts are AUTHENTICATED with SecretProvider-resolved material; unauthenticated, stale or malformed submissions fail closed — never silently recorded.
+5. Fact recording is idempotent per (organization scope, provider, external id): exactly-once, replay-safe, concurrency-safe.
+6. Reconciliation (matched/pending/mismatched) is DERIVED, deterministic and server-side with machine-readable reasons; mismatches are recorded + audited, never auto-corrected.
+7. Tenant and authorization failures remain fail-closed without existence oracles.
+8. Material mutations use the established composite idempotency, one-authoritative-transaction, transactional-audit and post-commit publication patterns.
+9. AI, if used, is advisory only; it cannot authorize ingestion or reconciliation outcomes.
+10. W031+ portable reputation proofs, W032+ decentralized validation and W033+ end-to-end flows remain excluded.
+11. `spec/architecture.md` and `spec/architecture-lock.md` remain unchanged.
 
 ### Required evidence
 
-AC coverage for EVID-006 + PRIV-003; attestation signing/verification round-trips; tamper detection (mutated payload/key/algorithm fails closed); commitment binding + privacy preservation; tenancy/authorization; idempotency/concurrency/atomicity and fault injection; PostgreSQL-authority containment; targeted mutation checks; `bun run verify`; architecture/authority checks; secret scan; configured PostgreSQL/Redis integration.
+AC coverage for SETTLE-001..003 + ADAPTER-008; fact-recording round-trips over the neutral adapter contract; authentication fail-closed paths; deterministic reconciliation with machine-readable reasons; no-economic-bypass containment; tenancy/authorization; idempotency/concurrency/atomicity and fault injection; traceability in both directions; targeted mutation checks; `bun run verify`; architecture/authority checks; secret scan; configured PostgreSQL/Redis integration.
 
 ## Operating procedure
 

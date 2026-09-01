@@ -1,7 +1,7 @@
 # NET-W029 Evidence Ledger — Cryptographic attestations and commitments
 
-**Status:** ACTIVE (implementation complete — verification green; awaiting architect review + merge)  
-**Issue:** #58  
+**Status:** MERGED  
+**Issue:** #58 (completed)  
 **Dependencies:** NET-W005 + NET-W007 + NET-W008 merged/verified  
 **Architecture:** v1.0 frozen  
 **Implementation branch:** `feat/net-w029-cryptographic-attestations`
@@ -120,11 +120,10 @@ Driver: `opencon-tmp/w029-mutation-driver.py` (outside the repository; cp-backup
 
 ## Delivery record
 
-(to be completed at PR delivery)
-
-- Implementation head: `<filled at push>`
-- PR: `<filled at open>`
-- CI: `<filled at green>`
-- Verification-status comment: `<filled at post>`
-- Architect review decision-of-record: `<filled at review>`
-- Post-merge durable state: `spec/PROJECT-STATE.md` + `spec/ROADMAP.md` advanced at the merge checkpoint
+- Implementation head: `f5853606d2802b4f204f5361ea377b2376073417` (branch head; 27 files, +4976/−14, including the corrective commit restoring the canonical work order content after the prior runtime's write-path incident)
+- PR: **#60** — squash-merged as `cf53378e1c432dfd735e1b408010eece55d7612f` ("feat(evidence): NET-W029 — Cryptographic attestations and commitments (closes #58) (#60)")
+- CI: **GREEN 4/4 on BOTH events at f585360** (verify + integration with real PostgreSQL 17 + Redis 7 service containers, push + pull_request)
+- Verification-status comment: id 5497304478; architect review decision-of-record comment: id 5497330563 (architect == PR author under the single-account setup — the recorded decision is the authoritative review per the standing protocol)
+- Issue #58 closed as completed by the merge
+- Driver/tooling defect (recorded): the first mutation-driver run left the first edit of each multi-edit mutation active (a per-edit backup overwrote the clean snapshot); the driver was corrected to back up each distinct file once before any edit, and the recorded 9/9 + final-green + clean-tree evidence is from the corrected driver against verified-clean source
+- Post-merge durable state: `spec/PROJECT-STATE.md` + `spec/ROADMAP.md` + `docs/LLM-ARCHITECT-HANDOFF.md` advanced to NET-W030 at the merge checkpoint

@@ -18,22 +18,22 @@ The repository, not prior conversation, is the source of truth.
 
 ## Current checkpoint
 
-NET-W001 through **NET-W028 are complete** (every frozen v1.0 domain is now implemented).
+NET-W001 through **NET-W029 are complete** (every frozen v1.0 domain is implemented and the Phase-8 integrity layer is in place).
 
 Latest merge:
-- NET-W028 issue #56
-- PR #57
-- merge SHA `6e309e2af05a962e3417999ad8079da16d9ebc37`
+- NET-W029 issue #58
+- PR #60
+- merge SHA `cf53378e1c432dfd735e1b408010eece55d7612f`
 
-The current implementation target is **NET-W029 — Cryptographic attestations and commitments**.
+The current implementation target is **NET-W030 — External settlement adapters**.
 
-- GitHub issue: #58 — READY_FOR_IMPLEMENTATION
+- GitHub issue: #61 — READY_FOR_IMPLEMENTATION
 - Status: CURRENT IMPLEMENTATION TARGET
-- Prepared branch: `feat/net-w029-cryptographic-attestations`
-- Requirements: EVID-006, PRIV-003
-- Dependencies: NET-W005, NET-W007, NET-W008 — merged/verified
-- Decision record: `spec/work-orders/NET-W029.md`
-- Evidence artifact: `docs/net-w029-cryptographic-attestations.md`
+- Prepared branch: `feat/net-w030-external-settlement-adapters`
+- Requirements: SETTLE-001..003, ADAPTER-008
+- Dependencies: NET-W008, NET-W029 — merged/verified
+- Decision record: `spec/work-orders/NET-W030.md`
+- Evidence artifact: `docs/net-w030-external-settlement-adapters.md`
 
 ## Frozen authority map
 
@@ -66,50 +66,59 @@ Key safeguards retained for W029+:
 - conservation arithmetic uses scaled integers with explicit remainders;
 - the W027 savings re-derivation is the current-verdict surface W028 consumed.
 
-## W029 acceptance shape
+## W029 completed shape
+
+W029 extended the W005 `/evidence` foundation with the Phase-8 integrity layer: production signed attestations (real Ed25519/ECDSA P-256 via node:crypto behind injected versioned interfaces; closed versioned algorithm + key-reference vocabularies with a frozen pairing map; SecretProvider-only keys with fail-closed selection and construction-time key validation), salted-sha256 coverage commitments over the three authoritative record families (evidence, reputation inputs, settlement value records) through neutral in-tx lookups, the deterministic `attestation/v2` canonical input rebuilt from STORED digests, fail-closed verification with a closed machine-readable reason vocabulary, and one-way revocation.
+
+Key safeguards retained for W030+:
+- the lifecycle/substantive-content dichotomy: covered commitments bind substantive content; lifecycle invalidation (REVERSED) fails closed through the explicit current-state gate;
+- the W005 (v1) and W029 (v2) signing surfaces are independent — existing deployment boot contracts are preserved;
+- key material is validated at construction, never at first use.
+
+## W030 acceptance shape
 
 ```text
-existing authoritative records
-(evidence records; reputation inputs; settlement value records)
-        ↓ neutral reference (canonical ids, committed digests)
-/evidence attestation + commitment semantics (the W005 boundary, extended)
+/settlement internal economic authority (W008/W014/W020)
+        ↓ neutral internal lineage references
+/adapters provider-specific external settlement integrations
+(authenticated + fail-closed; the W023 discipline)
         ↓
-signed attestations (versioned algorithms + SecretProvider key references)
-+ hash commitments (payload-hiding, binding)
+external settlement transaction FACTS (append-only, idempotent,
+provider-authenticated, tenant-scoped)
         ↓
-deterministic server-side verification (fail closed)
+/settlement records the facts + DERIVES the deterministic reconciliation
+(matched / pending / mismatched — never an economic mutation)
         ↓
 PostgreSQL remains THE authoritative state
+(an external fact can never mint, consume or mutate internal value)
 ```
 
-## W029 non-negotiables
+## W030 non-negotiables
 
-1. Attestations/commitments attach to existing authoritative records; they never mint new semantic authority or mutate authoritative state.
-2. Cryptography is an integrity/provenance layer, never a consensus layer: no blockchain, no network validation, no token economics.
-3. `/evidence` remains the home of attestation/commitment semantics (the W005 contracts are the foundation — extend, never rewrite); `/reputation` and `/settlement` ports stay untouched.
-4. Signature verification is deterministic, server-side, version-pinned; failures fail closed; algorithm/key vocabularies are closed and frozen.
-5. Commitments hide sensitive payloads while binding to them; disclosure reveals only what the frozen privacy rules permit (PRIV-003).
-6. Keys resolve only through `SecretProvider`; no key material is ever committed; secret scan stays clean.
-7. PostgreSQL remains authoritative: an attestation can never resurrect revoked/invalidated/superseded authoritative state.
-8. Material mutations use the established composite idempotency, concurrency, one-authoritative-transaction, transactional-audit and post-commit publication patterns.
-9. Cross-tenant and unauthorized access fails closed without existence oracles.
-10. AI/model output, if used, is advisory only and cannot authorize attestations, commitments or verification outcomes.
-11. W030+ external settlement adapters, W031+ portable reputation proofs, W032+ decentralized validation and W033+ end-to-end flows remain excluded.
-12. Frozen `spec/architecture.md` and `spec/architecture-lock.md` remain unchanged.
+1. External transaction facts attach to the existing internal settlement lineage by canonical id; they never mint, consume or mutate internal economic state.
+2. `/settlement` remains the SOLE economic authority: adapters provide transaction FACTS (architecture-lock §14 invariant 25); no external execution of internal mutations; no second ledger.
+3. `/adapters` owns ALL provider-specific code; `/settlement` consumes ONLY the neutral `ExternalSettlementAdapter` contract wired at the composition root; no 17th domain.
+4. Adapter-delivered facts are AUTHENTICATED with SecretProvider-resolved material; unauthenticated, stale or malformed submissions fail closed — never silently recorded.
+5. Fact recording is idempotent per (organization scope, provider, external id): exactly-once, replay-safe, concurrency-safe.
+6. Reconciliation (matched/pending/mismatched) is DERIVED, deterministic and server-side with machine-readable reasons; mismatches are recorded + audited, never auto-corrected.
+7. Tenant and authorization failures remain fail-closed without existence oracles.
+8. Material mutations use the established composite idempotency, one-authoritative-transaction, transactional-audit and post-commit publication patterns.
+9. AI/model output, if used, is advisory only and cannot authorize ingestion or reconciliation outcomes.
+10. W031+ portable reputation proofs, W032+ decentralized validation and W033+ end-to-end flows remain excluded.
+11. Frozen `spec/architecture.md` and `spec/architecture-lock.md` remain unchanged.
 
 ## Required acceptance coverage
 
 The implementation must include tests for:
 
-- attestation/commitment records over the three authoritative record families (evidence, reputation inputs, settlement value records);
-- signed attestations with versioned algorithm/key vocabularies and SecretProvider-resolved keys;
-- signing/verification round-trips and deterministic reproducibility;
-- tamper detection: mutated payload/statement/covered-set/signature/algorithm/key fails closed with machine-readable reason;
-- commitment binding + privacy preservation (no plaintext on the record; PRIV-003);
+- external transaction fact records (append-only, immutable, idempotent per (scope, provider, external id), tenant-scoped);
+- authenticated adapter ingestion over the neutral contract (unauthenticated/stale/malformed fail closed);
+- deterministic reconciliation: matched/pending/mismatched with machine-readable reasons; mismatches recorded + audited, never auto-corrected;
+- no-economic-bypass containment: an external fact can never create/consume/reverse/mutate internal value, credits, cash or reward state;
+- traceability in both directions (internal lineage ⇄ external facts);
 - tenancy and authorization fail-closed semantics;
 - idempotency, concurrency and composite atomicity with commit-failure injection;
-- authority containment: an attestation never resurrects invalidated state; PostgreSQL stays authoritative; no consensus/external execution;
-- targeted mutation checks for tamper detection, determinism, privacy and authority containment;
+- targeted mutation checks for authentication, determinism, idempotency and authority containment;
 - `bun run verify`, architecture/authority checks, secret scan and configured PostgreSQL/Redis integration;
 - frozen architecture and architecture-lock unchanged.
 

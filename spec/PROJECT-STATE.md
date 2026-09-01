@@ -15,19 +15,19 @@
 
 ### Last merged work item
 
-**NET-W028 — Benefit Pools**
+**NET-W029 — Cryptographic attestations and commitments**
 
-- GitHub issue: #56 — completed
-- PR: #57 — squash-merged
-- Merge SHA: `6e309e2af05a962e3417999ad8079da16d9ebc37`
+- GitHub issue: #58 — completed
+- PR: #60 — squash-merged
+- Merge SHA: `cf53378e1c432dfd735e1b408010eece55d7612f`
 - Status: MERGED
-- Authority: W028 activates the existing frozen `/benefits` boundary (the sixteenth and LAST skeletal v1.0 domain — every frozen domain is now implemented) with Benefit Pools: funding references resolve server-side to authoritative upstream value only (MATURE unconsumed `/settlement` value records + W027 verified savings consumed as re-derived facts), versioned immutable allocation policies under the organization-independent lineage mutex, deterministic scaled-integer conservation-preserving allocation, privacy-preserving member views, and the economic mutation routed exclusively through the existing `/settlement` reward-allocation draw `WithinTx` primitive on ONE authoritative transaction. `/settlement` remains the sole economic authority.
-- Verification at reviewed head: `bun run verify` 1783 pass / 15 skip / 0 fail (1798 tests / 231 files); `arch:check` + `authority:check` 301 files / 0 violations; CI green 4/4 on BOTH events (verify + real PostgreSQL/Redis integration); 9/9 targeted mutation checks caught.
-- Review lesson: benefit pools are allocation ORCHESTRATORS over already-authoritative value, never a second ledger: funding is references-only (amounts re-derived in-tx at every anchor), the drawable/entitlement dichotomy keeps every posting inside `/settlement` (verified savings post nothing), and the settlement reward policy must mirror the member declarations exactly so the locked accounts are always the posted accounts.
+- Authority: W029 EXTENDED the existing frozen `/evidence` boundary (the W005 attestation/commitment foundation — never rewritten) with production-grade signed attestations: real Ed25519 / ECDSA P-256 via `node:crypto` behind the injected versioned signer/verifier interfaces (constructed ONLY in the composition root with construction-time key validation), closed versioned algorithm + key-reference vocabularies with a frozen pairing map, keys resolved exclusively through the SecretProvider (fail-closed selection; default `hmac-sha256` keeps existing deployments booting), coverage over the three authoritative record families (evidence, reputation inputs, settlement value records) through neutral in-tx lookups, the deterministic `attestation/v2` canonical-input discipline rebuilt from STORED salted commitments (no plaintext — PRIV-003), fail-closed verification with a closed machine-readable reason vocabulary (tamper detection + REVERSED-state containment), composite idempotency + one authoritative transaction + transactional audit, and one-way revocation. PostgreSQL remains authoritative; no consensus, no external execution.
+- Verification at reviewed head: `bun run verify` 1858 pass / 15 skip / 0 fail (1873 tests / 239 files); `arch:check` + `authority:check` 304 files / 0 violations; CI green 4/4 on BOTH events (verify + real PostgreSQL/Redis integration); 9/9 targeted mutation checks caught (corrected driver — the first run's per-edit backup defect is recorded in the ledger).
+- Review lesson: the lifecycle/substantive-content dichotomy for covered records — commitments bind SUBSTANTIVE content while mutable lifecycle bookkeeping (state/version/maturedAt/consumedBy/reversal) and per-write lineage stamps are excluded, so legitimate lifecycle progression never invalidates a sound attestation while invalidation (REVERSED) fails closed with the precise reason. Key material is validated at construction (type + sign/verify probe), never at first use. Two independent signing surfaces (v1 W005 / v2 W029) preserve existing deployment boot contracts.
 
 ### Previous completed milestones
 
-NET-W001 through NET-W028 are complete and merged.
+NET-W001 through NET-W029 are complete and merged.
 
 Important lineage checkpoints:
 - NET-W004: `/workflows` lifecycle authority
@@ -52,33 +52,34 @@ Important lineage checkpoints:
 - NET-W026: supplier offers and deterministic competitive selection
 - NET-W027: verified savings and counterfactuals
 - NET-W028: benefit pools (the last frozen v1.0 domain activated)
+- NET-W029: cryptographic attestations and commitments (the Phase-8 integrity layer)
 
 ## Next implementation target
 
-**NET-W029 — Cryptographic attestations and commitments**
+**NET-W030 — External settlement adapters**
 
-- GitHub issue: #58 — READY_FOR_IMPLEMENTATION
+- GitHub issue: #61 — READY_FOR_IMPLEMENTATION
 - Status: CURRENT IMPLEMENTATION TARGET
-- Branch: `feat/net-w029-cryptographic-attestations` — prepare from this checkpoint
-- Dependencies: NET-W005, NET-W007, NET-W008 — MERGED/VERIFIED
-- Requirements: EVID-006, PRIV-003
-- Work order: `spec/work-orders/NET-W029.md`
-- Evidence ledger: `docs/net-w029-cryptographic-attestations.md`
+- Branch: `feat/net-w030-external-settlement-adapters` — prepare from this checkpoint
+- Dependencies: NET-W008, NET-W029 — MERGED/VERIFIED
+- Requirements: SETTLE-001..003, ADAPTER-008
+- Work order: `spec/work-orders/NET-W030.md`
+- Evidence ledger: `docs/net-w030-external-settlement-adapters.md`
 
-Definition of done: signed attestations and commitments can prove integrity of evidence/reputation/settlement references without changing centralized semantic authority — PostgreSQL remains authoritative, verification is deterministic and reproducible, and no decentralized consensus or external payment execution is introduced.
+Definition of done: external settlement transactions arrive as authenticated, idempotent, append-only FACTS inside `/settlement`, deterministically reconciled against the internal ledger lineage with machine-readable reasons — traceable in both directions, and structurally unable to bypass, create, consume or mutate internal economic authority (the adapters provide transaction facts; `/settlement` retains semantic authority — architecture-lock §14 invariant 25).
 
-## W029 architecture checklist
+## W030 architecture checklist
 
-1. Attestations/commitments attach to existing authoritative records (evidence/reputation/settlement); they never mint new semantic authority or mutate authoritative state.
-2. Cryptography is a provenance/integrity layer, not a consensus layer: no blockchain, no network validation, no token economics (W032/W030 remain out of scope).
-3. `/evidence` remains the provenance/truth authority; `/reputation` the reputation authority; `/settlement` the sole economic authority. Attestations reference records by canonical id through neutral read paths.
-4. Signature verification is deterministic and server-side; verification failures fail closed; algorithms/key references are versioned and pinned.
-5. Commitments (hash commitments) hide sensitive payloads while binding to them; disclosure/verification reveals only what the frozen privacy rules permit (PRIV-003).
-6. Keys resolve only through `SecretProvider` (never committed); secret scan stays clean.
-7. PostgreSQL remains authoritative for every record; an attestation can never resurrect revoked/invalidated authoritative state.
-8. Existing composite idempotency, concurrency, one-authoritative-transaction and transactional-audit patterns apply to material attestation mutations.
-9. AI/model outputs remain advisory-only and cannot authorize attestations, commitments or their verification.
-10. W030+ external settlement adapters, W031+ portable reputation proofs, W032+ decentralized validation and W033+ end-to-end flows remain excluded.
+1. External transaction facts are first-class, append-only, immutable-after-recording `/settlement` records referenced by canonical id; they never mint, consume or mutate internal economic state.
+2. `/settlement` remains the SOLE economic authority: adapters provide transaction FACTS (architecture-lock §14 invariant 25); no external execution of internal mutations.
+3. `/adapters` owns ALL provider-specific code; `/settlement` consumes ONLY the neutral `ExternalSettlementAdapter` contract wired at the composition root (the W023 discipline).
+4. Adapter-delivered facts are AUTHENTICATED with SecretProvider-resolved material; unauthenticated, stale or malformed submissions fail closed (the W023 authenticated + fresh-verification lesson).
+5. Fact recording is idempotent per (organization scope, provider, external id); replays are exactly-once.
+6. Reconciliation (matched/pending/mismatched) is DERIVED, deterministic and server-side with machine-readable reasons; mismatches are recorded + audited, never auto-corrected.
+7. Tenant and authorization failures remain fail-closed without existence oracles.
+8. Existing composite idempotency, one-authoritative-transaction and transactional-audit patterns apply to fact recording.
+9. AI/model outputs remain advisory-only and cannot authorize ingestion or reconciliation outcomes.
+10. W031+ portable reputation proofs, W032+ decentralized validation and W033+ end-to-end flows remain excluded.
 11. Frozen `spec/architecture.md` and `spec/architecture-lock.md` remain byte-identical.
 
 ## Review lessons that must persist
@@ -103,6 +104,9 @@ Audit publication is post-commit. A durable commit failure must discard the audi
 
 ### AI boundaries
 AI is advisory only and may not authorize eligibility, rights, tenancy, risk, settlement-readiness, lifecycle, privacy or economics.
+
+### Attestation coverage and lifecycle binding
+Covered-record commitments bind SUBSTANTIVE content only: mutable lifecycle bookkeeping (state/version/maturedAt/consumedBy/reversal) and per-write lineage stamps are excluded from the canonical facts, so legitimate lifecycle progression never invalidates a sound attestation while invalidation (REVERSED) fails closed through the explicit current-state gate with the precise machine-readable reason.
 
 ### Secrets and authenticated verification
 Production secrets resolve only through `SecretProvider` and fail closed. Caller-supplied consistency is not authenticated truth; trusted verification requires an authenticated channel and mandatory freshness when freshness governs authority.
@@ -157,4 +161,4 @@ Never merge merely because CI is green. Never create a second implementation PR 
 
 ## Current action
 
-Implement **NET-W029** from its READY_FOR_IMPLEMENTATION issue on `feat/net-w029-cryptographic-attestations`. Before coding, read `AGENTS.md`, this file, `spec/ROADMAP.md`, `spec/architecture.md`, `spec/architecture-lock.md`, `spec/work-items.md`, and `spec/work-orders/NET-W029.md`. Keep attestation/commitment semantics as an integrity layer over existing authoritative records — never new semantic authority, never consensus, never external execution. PostgreSQL stays authoritative; keys resolve through `SecretProvider`; verification is deterministic and fails closed. Author one-to-one AC evidence, mutation checks, real-provider integration, exactly one implementation PR, and do not merge until green verification and architect approval are both present.
+Implement **NET-W030** from its READY_FOR_IMPLEMENTATION issue on `feat/net-w030-external-settlement-adapters`. Before coding, read `AGENTS.md`, this file, `spec/ROADMAP.md`, `spec/architecture.md`, `spec/architecture-lock.md`, `spec/work-items.md`, and `spec/work-orders/NET-W030.md`. Keep external settlement adapters as FACT providers (the W023 adapter discipline): `/settlement` retains the sole economic authority, provider-specific code stays in `/adapters`, ingestion is authenticated and fail-closed, recording is idempotent, reconciliation is derived and deterministic — an external fact can never bypass, create, consume or mutate internal economic state. Author one-to-one AC evidence, mutation checks, real-provider integration, exactly one implementation PR, and do not merge until green verification and architect approval are both present.
