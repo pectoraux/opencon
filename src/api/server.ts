@@ -726,6 +726,117 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // -- NET-W030 external settlement adapters (issue #61) -------------
+
+    // POST /api/settlement/external-facts — ingest an external
+    // settlement transaction fact (protected; guard action
+    // externalSettlementFact.record — the adapter routing, the trust
+    // envelope verification, the freshness gate and the exactly-once
+    // recording all happen INSIDE the settlement authority;
+    // unauthenticated/stale/malformed submissions fail closed with
+    // machine-readable reasons; the fact is never economic authority).
+    if (
+      path === "/api/settlement/external-facts" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "externalSettlementFact.record", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseExternalSettlementFactInput(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.recordExternalSettlementFact(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/settlement/external-facts/by-transaction — reverse
+    // traceability: every recorded fact referencing an internal ledger
+    // transaction (protected; guard action
+    // externalSettlementFact.read; tenant-scoped).
+    if (
+      path === "/api/settlement/external-facts/by-transaction" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "externalSettlementFact.read", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.listExternalSettlementFactsByTransaction(guarded.execution, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          internalTransactionId: strField(obj, "internalTransactionId"),
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/settlement/external-facts/:id/read — fetch a recorded
+    // fact (protected; guard action externalSettlementFact.read;
+    // tenant-scoped — cross-tenant and nonexistent are
+    // indistinguishable 404s, no existence oracle).
+    if (
+      path.startsWith("/api/settlement/external-facts/") &&
+      path.endsWith("/read") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/settlement/external-facts/".length, -"/read".length);
+      const guarded = await guardMutation(ctx, req, "externalSettlementFact.read", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.getExternalSettlementFact(guarded.execution, id, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+        }),
+      );
+      if (!view) {
+        await send(res, 404, {
+          error: "not_found",
+          message: `external settlement fact not found: ${id}`,
+        });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/settlement/external-facts/:id/reconciliation — the
+    // DERIVED deterministic reconciliation verdict (protected; guard
+    // action externalSettlementFact.reconcile — matched/pending/
+    // mismatched with machine-readable reasons, re-derived from the
+    // CURRENT ledger lineage; never stored, never auto-corrected).
+    if (
+      path.startsWith("/api/settlement/external-facts/") &&
+      path.endsWith("/reconciliation") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/settlement/external-facts/".length,
+        -"/reconciliation".length,
+      );
+      const guarded = await guardMutation(ctx, req, "externalSettlementFact.reconcile", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.evaluateExternalSettlementReconciliation(guarded.execution, id, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
     // POST /api/proofs-of-value — create a proof of value (protected).
     if (path === "/api/proofs-of-value" && method === "POST" && opts.commands) {
       const commands = opts.commands;
@@ -6914,6 +7025,27 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       verifierId: strField(obj, "verifierId"),
       statement: strField(obj, "statement"),
       evidenceIds: obj.evidenceIds as string[],
+    };
+  }
+
+  // -- NET-W030 external-settlement request-body parsers ----------------
+
+  function parseExternalSettlementFactInput(
+    body: unknown,
+  ): import("./port.ts").ApiRecordExternalSettlementFactInput {
+    if (!body || typeof body !== "object") {
+      throw apiValidationError("request body must be a JSON object");
+    }
+    const obj = body as Record<string, unknown>;
+    const payload = obj.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw apiValidationError('field "payload" must be a JSON object (the raw provider notification)');
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      provider: strField(obj, "provider"),
+      payload: payload as Record<string, unknown>,
+      idempotencyKey: strField(obj, "idempotencyKey"),
     };
   }
 

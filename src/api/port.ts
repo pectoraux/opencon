@@ -407,6 +407,84 @@ export interface ApiRevokeSignedAttestationInput {
   readonly idempotencyKey: string;
 }
 
+// ---------------------------------------------------------------------
+// NET-W030 — external settlement adapters (issue #61). The /settlement
+// boundary EXTENDED: external settlement transactions arrive as
+// AUTHENTICATED, IDEMPOTENT, append-only FACTS (provider-reported, never
+// authority) with the DERIVED deterministic reconciliation (matched /
+// pending / mismatched — machine-readable reasons, never auto-corrected).
+// ---------------------------------------------------------------------
+
+/** The public view of a recorded external settlement transaction fact (NET-W030). */
+export interface ApiExternalSettlementFactView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly provider: string;
+  readonly providerVersion: string;
+  readonly externalId: string;
+  readonly internalTransactionId: string;
+  /** AS REPORTED by the provider — a transaction fact, never authority. */
+  readonly reportedAmount: number;
+  readonly reportedUnit: string;
+  readonly observedAt: string;
+  readonly recordedAt: string;
+  /** Append-only correction linkage (the corrected fact's id). */
+  readonly correctionOf: string | null;
+  readonly idempotencyKey: string;
+  readonly recordFormat: string;
+}
+
+/** Inputs to ingest an external settlement transaction fact (NET-W030). */
+export interface ApiRecordExternalSettlementFactInput {
+  readonly organizationScopeId: string;
+  /** The delivering provider (closed vocabulary — adapter routing). */
+  readonly provider: string;
+  /** The raw provider notification payload (opaque to the transport). */
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly idempotencyKey: string;
+}
+
+/** The result of an ingestion (the recorded fact + the derived reconciliation). */
+export interface ApiRecordExternalSettlementFactResult {
+  readonly fact: ApiExternalSettlementFactView;
+  /** false when the identity replayed the committed record. */
+  readonly created: boolean;
+  readonly reconciliation: ApiExternalSettlementReconciliationView;
+}
+
+/** One machine-readable reconciliation check outcome (NET-W030). */
+export interface ApiExternalSettlementReconciliationCheckView {
+  readonly check: string;
+  readonly satisfied: boolean;
+  readonly reason: string;
+  readonly detail: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * The DERIVED deterministic reconciliation verdict for one fact
+ * (NET-W030): matched / pending / mismatched with machine-readable
+ * reasons; re-derived from the CURRENT authoritative ledger lineage on
+ * every evaluation — never stored, never auto-corrected.
+ */
+export interface ApiExternalSettlementReconciliationView {
+  readonly factId: string;
+  readonly organizationScopeId: string;
+  readonly provider: string;
+  readonly externalId: string;
+  readonly internalTransactionId: string;
+  readonly verdict: "matched" | "pending" | "mismatched";
+  readonly reason: string;
+  readonly checks: readonly ApiExternalSettlementReconciliationCheckView[];
+  readonly internalTransaction: {
+    readonly id: string;
+    readonly kind: string;
+    readonly recordedAt: string;
+    /** The derived per-unit debit total of the referenced transaction. */
+    readonly unitAmount: number;
+  } | null;
+  readonly derivedAt: string;
+}
+
 /** The public view of a proof of value (NET-W005 AC-06). */
 export interface ApiProofOfValueView {
   readonly id: string;
@@ -1592,6 +1670,61 @@ export interface ApiCommands {
     id: string,
     input: ApiRevokeSignedAttestationInput,
   ): Promise<ApiSignedAttestationView>;
+
+  /**
+   * Ingest an external settlement transaction fact (NET-W030,
+   * authenticated ingestion; guard action
+   * `externalSettlementFact.record`): routes the raw provider payload
+   * through the neutral adapter, verifies the trust envelope
+   * (SecretProvider material — unauthenticated/stale/malformed fail
+   * closed with machine-readable reasons), and records the fact
+   * exactly-once per (organization scope, provider, external id) with
+   * the in-tx derived reconciliation audited atomically. The fact is
+   * NEVER economic authority — no ledger entry, no mutation.
+   */
+  recordExternalSettlementFact(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiRecordExternalSettlementFactInput,
+  ): Promise<ApiRecordExternalSettlementFactResult>;
+
+  /**
+   * Fetch an external settlement fact (NET-W030, tenant-scoped read;
+   * guard action `externalSettlementFact.read`): cross-tenant and
+   * nonexistent are indistinguishable (null → 404; no existence
+   * oracle).
+   */
+  getExternalSettlementFact(
+    execution: ExecutionContext,
+    id: string,
+    input: { readonly organizationScopeId: string },
+  ): Promise<ApiExternalSettlementFactView | null>;
+
+  /**
+   * Derive the reconciliation verdict for one fact (NET-W030, derived
+   * decision; guard action `externalSettlementFact.reconcile`):
+   * deterministic, server-side matched/pending/mismatched with
+   * machine-readable reasons, re-derived from the CURRENT ledger
+   * lineage — never stored, never auto-corrected.
+   */
+  evaluateExternalSettlementReconciliation(
+    execution: ExecutionContext,
+    id: string,
+    input: { readonly organizationScopeId: string },
+  ): Promise<ApiExternalSettlementReconciliationView>;
+
+  /**
+   * Reverse traceability (NET-W030; guard action
+   * `externalSettlementFact.read`): every recorded fact referencing
+   * an internal ledger transaction (tenant-scoped).
+   */
+  listExternalSettlementFactsByTransaction(
+    execution: ExecutionContext,
+    input: { readonly organizationScopeId: string; readonly internalTransactionId: string },
+  ): Promise<{
+    readonly internalTransactionId: string;
+    readonly facts: readonly ApiExternalSettlementFactView[];
+  }>;
 
   /** Create a proof of value (NET-W005 AC-06, protected mutation). */
   createProofOfValue(

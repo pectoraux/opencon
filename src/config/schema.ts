@@ -86,6 +86,16 @@ export const ConfigSchema = z.object({
   // SecretProvider at composition time. Never logged, persisted, or
   // echoed into audit/error payloads (PRIV-002).
   SELLER_AUTHORIZATION_TRUST_KEY: z.string().optional(),
+  // NET-W030: per-provider external-settlement trust keys (HMAC-SHA256)
+  // for the external settlement adapter channel (ADAPTER-008; issue
+  // #61). Classified secrets, resolved ONLY through the SecretProvider
+  // at composition time. When present, the respective provider's
+  // submissions are authenticated; when absent, ingestion for that
+  // provider fails closed (`unauthenticated` — nothing is ever
+  // recorded; the W022 "no secret → fail closed" wiring rule). The
+  // map is closed over the frozen provider vocabulary. Never logged,
+  // persisted, or echoed into audit/error payloads (PRIV-002).
+  EXTERNAL_SETTLEMENT_REFERENCE_TRUST_KEY: z.string().optional(),
 
   // Observability
   LOG_LEVEL: LogLevelSchema.default("info"),
@@ -121,6 +131,7 @@ export const CONFIG_FIELD_CLASSIFICATIONS: readonly FieldClassification[] = [
   { key: "MEASUREMENT_IOS_ATTRIBUTION_KEY", classification: "secret", required: false },
   { key: "MEASUREMENT_OPENRTB_DELIVERY_KEY", classification: "secret", required: false },
   { key: "SELLER_AUTHORIZATION_TRUST_KEY", classification: "secret", required: false },
+  { key: "EXTERNAL_SETTLEMENT_REFERENCE_TRUST_KEY", classification: "secret", required: false },
   { key: "LOG_LEVEL", classification: "optional", required: false },
   { key: "LOG_PRETTY", classification: "optional", required: false },
 ] as const;

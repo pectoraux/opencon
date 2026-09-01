@@ -114,7 +114,10 @@ describe("NET-W029-AC-03 deterministic verification + tamper detection", () => {
     const s = await seed();
     await tamperSignedAttestation(harness, s.attestationId, (r) => ({
       ...r,
-      signature: `0${r.signature.slice(1)}`,
+      // Flip one hex nibble (a minimal, GUARANTEED-different tamper — a
+      // fixed prepend character is a no-op whenever the signature already
+      // starts with that character, which flakes ~1/16 runs).
+      signature: `${r.signature[0] === "0" ? "1" : "0"}${r.signature.slice(1)}`,
     }));
     const verdict = await verify(s.attestationId);
     expect(verdict.valid).toBe(false);
@@ -217,7 +220,12 @@ describe("NET-W029-AC-03 deterministic verification + tamper detection", () => {
       ...r,
       coverage: r.coverage.map((entry) => ({
         ...entry,
-        commitment: { ...entry.commitment, digest: `f${entry.commitment.digest.slice(1)}` },
+        commitment: {
+          ...entry.commitment,
+          // Same guaranteed-different-nibble discipline: a fixed `f`
+          // prepend is a no-op on a digest that already starts with `f`.
+          digest: `${entry.commitment.digest[0] === "f" ? "0" : "f"}${entry.commitment.digest.slice(1)}`,
+        },
       })),
     }));
     const verdict = await verify(s.attestationId);

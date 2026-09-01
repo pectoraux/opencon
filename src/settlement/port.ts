@@ -491,6 +491,18 @@ export interface EconomicLedgerRepository {
   ): Promise<readonly EconomicLedgerEntry[]>;
   // Transactions.
   findTransaction(id: string): Promise<EconomicLedgerTransaction | null>;
+  /**
+   * NET-W030 (additive): in-tx transaction read. Ledger transactions
+   * are immutable after creation, so a committed read can never be
+   * stale — the twin exists so derived evaluations (the W030
+   * reconciliation derivation) re-derive INSIDE the authoritative
+   * transaction with the same discipline as every other in-tx
+   * re-derivation.
+   */
+  findTransactionWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<EconomicLedgerTransaction | null>;
   listTransactionsBySubject(
     subject: EconomicLedgerSubjectRef,
   ): Promise<readonly EconomicLedgerTransaction[]>;
@@ -1168,6 +1180,12 @@ export interface SettlementPort {
     readonly stakeForfeited: "stake.forfeited";
     // NET-W020 (additive): the cross-promotion clearing execution record.
     readonly crossPromotionClearingRecorded: "cross_promotion_clearing.recorded";
+    // NET-W030 (additive): the external settlement fact ingestion record
+    // (metadata carries the in-tx derived reconciliation verdict) and the
+    // mismatch-observation event (a derived `mismatched` verdict is
+    // recorded + audited — never auto-corrected).
+    readonly externalSettlementFactRecorded: "external_settlement_fact.recorded";
+    readonly externalSettlementMismatchObserved: "external_settlement_fact.mismatch_observed";
   };
 }
 
@@ -1753,6 +1771,457 @@ export interface CrossPromotionClearingServiceDeps {
     info(message: string, fields?: Record<string, unknown>): void;
     debug(message: string, fields?: Record<string, unknown>): void;
   };
+}
+
+// ---------------------------------------------------------------------------
+// NET-W030 — External settlement adapters (issue #61).
+//
+// The settlement boundary EXTENDED (additive — never a rewrite) with
+// the external-settlement FACT layer: external payment/settlement
+// transactions arrive as AUTHENTICATED, IDEMPOTENT, append-only FACTS
+// recorded INSIDE this boundary (SETTLE-001..003, ADAPTER-008;
+// architecture-lock §14 invariant 25: "payment adapters provide
+// transaction facts; `/settlement` retains semantic authority").
+//
+//   /settlement  = the SOLE economic authority (W008/W014/W020
+//                  primitives are the ONLY economic commands —
+//                  unchanged; an external fact can NEVER mint,
+//                  consume, reverse or mutate internal value)
+//   /adapters    = provider-specific payload parsing (the W023
+//                  discipline: concrete adapters under
+//                  src/adapters/settlement/ implement the NEUTRAL
+//                  contract declared here STRUCTURALLY — the adapter
+//                  tier may not import this boundary; the
+//                  composition root is the ONLY join)
+//   this layer   = authenticated + fail-closed ingestion, exactly-once
+//                  fact recording, DERIVED deterministic
+//                  reconciliation (matched / pending / mismatched
+//                  with machine-readable reasons — never
+//                  auto-corrected), traceability in both directions
+//
+// Reconciliation is DERIVED on every evaluation (the W020
+// evaluateClearingEligibility discipline): there is NO command that
+// asserts, stores or waives a reconciliation verdict, and NO stored
+// reconciliation lifecycle. Facts are immutable after recording;
+// corrections are NEW fact records referencing the corrected one.
+// ---------------------------------------------------------------------------
+
+/** The record format marker for NET-W030 external settlement facts. */
+export const EXTERNAL_SETTLEMENT_FACT_RECORD_FORMAT = "NET-W030:1" as const;
+
+/**
+ * The CLOSED, VERSIONED external-settlement provider vocabulary
+ * (work order §3.1). `reference` is the provider-neutral reference
+ * implementation adapter (src/adapters/settlement/); a concrete
+ * payment-network integration is a NEW vocabulary entry, never an
+ * in-place rewrite. Adapters re-assert their own provider identity on
+ * every normalization (provider-identity spoofing guard — the W023
+ * discipline).
+ */
+export const EXTERNAL_SETTLEMENT_PROVIDERS = ["reference"] as const;
+
+export type ExternalSettlementProvider =
+  (typeof EXTERNAL_SETTLEMENT_PROVIDERS)[number];
+
+export function isExternalSettlementProvider(
+  value: string,
+): value is ExternalSettlementProvider {
+  return (EXTERNAL_SETTLEMENT_PROVIDERS as readonly string[]).includes(value);
+}
+
+/**
+ * The CLOSED, VERSIONED integrity-envelope algorithm vocabulary. The
+ * trust envelope is provider-NEUTRAL HMAC-SHA256 over the canonical
+ * submission facts — the same primitive family as the W022/W023
+ * authenticated channels. Verification material resolves ONLY
+ * through the SecretProvider at the composition root.
+ */
+export const EXTERNAL_SETTLEMENT_INTEGRITY_ALGORITHMS = [
+  "hmac-sha256/v1",
+] as const;
+
+export type ExternalSettlementIntegrityAlgorithm =
+  (typeof EXTERNAL_SETTLEMENT_INTEGRITY_ALGORITHMS)[number];
+
+export function isExternalSettlementIntegrityAlgorithm(
+  value: string,
+): value is ExternalSettlementIntegrityAlgorithm {
+  return (EXTERNAL_SETTLEMENT_INTEGRITY_ALGORITHMS as readonly string[]).includes(
+    value,
+  );
+}
+
+/**
+ * Freshness window for adapter-delivered observations (work order
+ * §3.2: "unauthenticated, stale, malformed or unverifiable
+ * submissions fail closed"). An observation older than this window
+ * is STALE and is never recorded; `observedAt` is the
+ * provider-attested observation time (the W023 freshness semantics —
+ * an absent/unparseable observedAt fails closed as malformed).
+ */
+export const EXTERNAL_SETTLEMENT_MAX_AGE_MS = 15 * 60 * 1000;
+
+/**
+ * The CLOSED ingestion-rejection reason vocabulary (machine-readable;
+ * work order §3.2). Every failed ingestion surfaces EXACTLY one of
+ * these reasons in the error context — never a payload value, secret
+ * or signature (PRIV-002).
+ */
+export const EXTERNAL_SETTLEMENT_INGESTION_REJECTION_REASONS = [
+  "unsupported_provider",
+  "unsupported_algorithm",
+  "malformed_submission",
+  "unauthenticated",
+  "stale",
+  "conflicting_fact",
+  "correction_target_not_found",
+] as const;
+
+export type ExternalSettlementRejectionReason =
+  (typeof EXTERNAL_SETTLEMENT_INGESTION_REJECTION_REASONS)[number];
+
+/**
+ * The CLOSED reconciliation-verdict vocabulary (work order §3.3):
+ * `matched` (the recorded fact's attested amount agrees with the
+ * internal ledger lineage per unit), `pending` (the internal lineage
+ * does not resolve — recorded yet or out-of-scope, indistinguishable
+ * by design), `mismatched` (the lineage resolves and disagrees). The
+ * verdict is DERIVED server-side; a mismatch is recorded + audited,
+ * never auto-corrected.
+ */
+export const EXTERNAL_SETTLEMENT_RECONCILIATION_VERDICTS = [
+  "matched",
+  "pending",
+  "mismatched",
+] as const;
+
+export type ExternalSettlementReconciliationVerdict =
+  (typeof EXTERNAL_SETTLEMENT_RECONCILIATION_VERDICTS)[number];
+
+/**
+ * The CLOSED reconciliation reason vocabulary (machine-readable;
+ * pinned exactly by the NET-W030 AC-08 regression).
+ */
+export const EXTERNAL_SETTLEMENT_RECONCILIATION_REASONS = [
+  "internal_lineage_not_found",
+  "amount_matched",
+  "amount_mismatched",
+  "unit_absent_in_lineage",
+] as const;
+
+export type ExternalSettlementReconciliationReason =
+  (typeof EXTERNAL_SETTLEMENT_RECONCILIATION_REASONS)[number];
+
+/**
+ * The provider's trust envelope over the EXACT attested submission
+ * facts: algorithm (closed vocabulary), hex HMAC-SHA256 signature,
+ * and the envelope's signing time. The envelope attests the
+ * canonical facts {provider, externalId, internalTransactionId,
+ * reportedAmount, reportedUnit, observedAt, correctionOf} — NEVER a
+ * secret or internal material (PRIV-002: the signature and key
+ * material never appear in logs, audit events, or error contexts).
+ */
+export interface ExternalSettlementIntegrityBlock {
+  readonly algorithm: string;
+  readonly signature: string;
+  readonly signedAt: string;
+}
+
+/**
+ * The neutral, adapter-normalized external transaction facts (the
+ * adapter tier's OUTPUT). `reportedAmount`/`reportedUnit` are AS
+ * REPORTED BY THE PROVIDER — a transaction fact, NEVER authority:
+ * the authoritative amount is the ledger entries of the referenced
+ * internal transaction. `observedAt` is the provider-attested
+ * observation time; `correctionOf` is the append-only correction
+ * linkage (a NEW fact record referencing the corrected one — facts
+ * are immutable after recording).
+ */
+export interface ExternalSettlementTransactionFacts {
+  readonly provider: string;
+  readonly providerVersion: string;
+  readonly externalId: string;
+  readonly internalTransactionId: string;
+  readonly reportedAmount: number;
+  readonly reportedUnit: string;
+  readonly observedAt: string;
+  readonly correctionOf: string | null;
+  readonly integrity: ExternalSettlementIntegrityBlock;
+}
+
+/** The raw provider submission routed to an adapter by provider id. */
+export interface RawExternalSettlementSubmission {
+  readonly providerId: string;
+  readonly payload: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * The NEUTRAL external-settlement adapter contract (work order §2):
+ * provider-specific payload parsing ONLY. Declared HERE (the
+ * consuming domain's port — the W029 composition-root crypto
+ * discipline); concrete adapters under src/adapters/settlement/
+ * implement it STRUCTURALLY without importing this boundary (the
+ * tier matrix forbids adapter→domain); the composition root is the
+ * ONLY join. An adapter performs NO I/O, NO mutation and NO
+ * authentication (the trust envelope is verified downstream against
+ * SecretProvider-resolved material).
+ */
+export interface ExternalSettlementProviderAdapter {
+  readonly info: {
+    readonly kind: "external_settlement";
+    readonly provider: string;
+    readonly version: string;
+  };
+  initialize(): Promise<void>;
+  healthCheck(): Promise<{ ok: boolean; detail?: string }>;
+  /**
+   * Normalize ONE raw provider submission into the neutral facts.
+   * The adapter MUST re-assert its own provider identity (a
+   * submission addressed to another provider never normalizes here)
+   * and MUST NOT trust the payload for routing decisions.
+   */
+  normalizeTransaction(
+    submission: RawExternalSettlementSubmission,
+  ): Promise<ExternalSettlementTransactionFacts>;
+}
+
+/**
+ * ExternalSettlementAuthenticator — the injected verifier of the
+ * provider trust envelope. The REAL implementation (HMAC-SHA256,
+ * timing-safe comparison) is constructed ONLY in the composition
+ * root with per-provider material resolved exclusively through the
+ * SecretProvider (the W029 construction-root crypto discipline).
+ * PURE and NON-THROWING: `false` means the submission is
+ * UNAUTHENTICATED and ingestion fails closed (never silently
+ * recorded). No key material ever crosses this interface.
+ */
+export interface ExternalSettlementAuthenticator {
+  verify(
+    submission: {
+      readonly provider: string;
+      readonly externalId: string;
+      readonly internalTransactionId: string;
+      readonly reportedAmount: number;
+      readonly reportedUnit: string;
+      readonly observedAt: string;
+      readonly correctionOf: string | null;
+      readonly integrity: ExternalSettlementIntegrityBlock;
+    },
+  ): boolean;
+}
+
+/**
+ * An ExternalSettlementFactRecord — a first-class, append-only,
+ * immutable-after-recording external settlement transaction fact
+ * (work order §3.1). Recording is idempotent per (organization
+ * scope, provider, external id); the identity is EXACTLY-ONCE (a
+ * second submission of the same identity with the same substance
+ * replays the committed record; a different substance is a
+ * CONFLICT — never a second record, never a mutation).
+ *
+ * The record carries the provider's REPORTED amount — a fact, not
+ * authority. It posts NO ledger entries, touches NO account, mints/
+ * consumes/reverses NOTHING: the only economic primitives remain the
+ * EXISTING /settlement commands (architecture-lock §14 invariant
+ * 25). Reconciliation verdicts are DERIVED from the referenced
+ * internal ledger lineage on every evaluation — never stored here.
+ */
+export interface ExternalSettlementFactRecord {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  /** The delivering provider (closed vocabulary). */
+  readonly provider: string;
+  /** The delivering adapter's declared version (bookkeeping). */
+  readonly providerVersion: string;
+  /** The provider's canonical external transaction id. */
+  readonly externalId: string;
+  /** The internal ledger transaction lineage the fact attests to. */
+  readonly internalTransactionId: string;
+  /** Positive, ≤ 6 decimals, AS REPORTED — never authority. */
+  readonly reportedAmount: number;
+  readonly reportedUnit: EconomicUnitType;
+  /** The provider-attested observation time (ISO-8601). */
+  readonly observedAt: string;
+  /** The recording time (ISO-8601). */
+  readonly recordedAt: string;
+  /** Append-only correction linkage (the corrected fact's id). */
+  readonly correctionOf: string | null;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+  readonly recordFormat: string;
+}
+
+export interface ExternalSettlementFactRepository {
+  findById(id: string): Promise<ExternalSettlementFactRecord | null>;
+  /** In-tx twin (immutability makes committed reads sound; the twin keeps the discipline). */
+  findByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<ExternalSettlementFactRecord | null>;
+  /** The exactly-once identity lookup (organization scope, provider, external id). */
+  findByIdentity(
+    organizationScopeId: string,
+    provider: string,
+    externalId: string,
+  ): Promise<ExternalSettlementFactRecord | null>;
+  /** In-tx twin — the create-once identity backstop inside the authoritative transaction. */
+  findByIdentityWithinTx(
+    organizationScopeId: string,
+    provider: string,
+    externalId: string,
+    tx: AuthorityTransaction,
+  ): Promise<ExternalSettlementFactRecord | null>;
+  /** Ordered listing for a tenant (recordedAt, id). */
+  listByOrganization(
+    organizationScopeId: string,
+  ): Promise<readonly ExternalSettlementFactRecord[]>;
+  /** Reverse traceability: every fact referencing an internal transaction. */
+  listByInternalTransaction(
+    organizationScopeId: string,
+    internalTransactionId: string,
+  ): Promise<readonly ExternalSettlementFactRecord[]>;
+  /**
+   * Create-once (immutable facts): there is NO save/update — a fact
+   * record can never be rewritten after recording. Corrections are
+   * NEW records.
+   */
+  createWithinTx(
+    record: ExternalSettlementFactRecord,
+    tx: AuthorityTransaction,
+  ): Promise<ExternalSettlementFactRecord>;
+}
+
+/** One machine-readable reconciliation check outcome (work order §3.3). */
+export interface ExternalSettlementReconciliationCheck {
+  readonly check: string;
+  readonly satisfied: boolean;
+  readonly reason: string;
+  readonly detail: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * The DERIVED reconciliation verdict for ONE recorded fact (work
+ * order §3.3). Deterministic and server-side: re-derived from the
+ * CURRENT authoritative ledger lineage + the recorded fact on every
+ * evaluation — never stored, never asserted by a command. The
+ * resolved internal transaction is included for forward
+ * traceability; `internalTransaction` is null when the lineage does
+ * not resolve in the requesting tenant's scope (recorded-yet and
+ * cross-scope are indistinguishable — no existence oracle).
+ */
+export interface ExternalSettlementReconciliationView {
+  readonly factId: string;
+  readonly organizationScopeId: string;
+  readonly provider: string;
+  readonly externalId: string;
+  readonly internalTransactionId: string;
+  readonly verdict: "matched" | "pending" | "mismatched";
+  readonly reason: string;
+  readonly checks: readonly ExternalSettlementReconciliationCheck[];
+  readonly internalTransaction: {
+    readonly id: string;
+    readonly kind: string;
+    readonly recordedAt: string;
+    /** The derived per-unit debit total of the referenced transaction. */
+    readonly unitAmount: number;
+  } | null;
+  readonly derivedAt: string;
+}
+
+export interface RecordExternalSettlementFactInput {
+  readonly organizationScopeId: string;
+  /** The delivering provider (closed vocabulary — routing). */
+  readonly provider: string;
+  /** The raw provider notification payload (opaque to the transport). */
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly idempotencyKey: string;
+}
+
+export interface RecordExternalSettlementFactResult {
+  readonly fact: ExternalSettlementFactRecord;
+  /** false when the identity replayed the committed record. */
+  readonly created: boolean;
+  /** The in-tx derived reconciliation at recording time (audited with the fact). */
+  readonly reconciliation: ExternalSettlementReconciliationView;
+}
+
+export interface ExternalSettlementService {
+  /**
+   * THE authenticated ingestion + fact recording command (work order
+   * §3.1/§3.2): route to the provider's adapter → normalize →
+   * validate the closed vocabularies and shapes → verify the trust
+   * envelope (injected authenticator — SecretProvider material,
+   * fail closed) → enforce freshness → serialize on the
+   * organization-scoped identity mutex → apply idempotently in ONE
+   * authoritative transaction (the create-once identity backstop,
+   * the correction-target resolution, the in-tx reconciliation
+   * derivation, the record create and the transactional audit
+   * buffer — all on the apply context's transaction). A failure of
+   * ANY gate fails closed BEFORE anything is recorded. The command
+   * posts NO ledger entries and mutates NO economic state — an
+   * external fact is a FACT, never authority.
+   */
+  recordExternalSettlementFact(
+    execution: ExecutionContext,
+    input: RecordExternalSettlementFactInput,
+  ): Promise<RecordExternalSettlementFactResult>;
+  /**
+   * Tenant-scoped read (cross-tenant and nonexistent are
+   * indistinguishable — null; no existence oracle).
+   */
+  getExternalSettlementFact(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    factId: string,
+  ): Promise<ExternalSettlementFactRecord | null>;
+  /** Tenant-scoped listing (recordedAt, id order). */
+  listExternalSettlementFacts(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+  ): Promise<readonly ExternalSettlementFactRecord[]>;
+  /** Reverse traceability: facts referencing an internal transaction (tenant-scoped). */
+  listExternalSettlementFactsByTransaction(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    internalTransactionId: string,
+  ): Promise<readonly ExternalSettlementFactRecord[]>;
+  /**
+   * THE DERIVED RECONCILIATION VIEW (work order §3.3): re-derived
+   * from CURRENT authoritative records on every evaluation. There is
+   * NO command that asserts, stores or waives a verdict; a mismatch
+   * is recorded + audited (the mismatch-observation audit event),
+   * never auto-corrected.
+   */
+  evaluateExternalSettlementReconciliation(
+    execution: ExecutionContext,
+    input: {
+      readonly organizationScopeId: string;
+      readonly factId: string;
+    },
+  ): Promise<ExternalSettlementReconciliationView>;
+}
+
+export interface ExternalSettlementServiceDeps {
+  readonly repository: ExternalSettlementFactRepository;
+  readonly ledgerRepository: EconomicLedgerRepository;
+  /** The neutral adapter list (wired at the composition root ONLY). */
+  readonly adapters: readonly ExternalSettlementProviderAdapter[];
+  /** The trust-envelope verifier (composition root, SecretProvider material). */
+  readonly authenticator: ExternalSettlementAuthenticator;
+  readonly idempotency: IdempotencyStore;
+  readonly auditWriter: TransactionalAuditWriter;
+  readonly logger: {
+    info(message: string, fields?: Record<string, unknown>): void;
+    debug(message: string, fields?: Record<string, unknown>): void;
+  };
+  /**
+   * Injectable clock for the freshness gate (defaults to Date.now).
+   * Freshness governs recording authority, so the gate must be
+   * testable-injectable (deterministic AC evidence).
+   */
+  readonly now?: () => number;
 }
 
 export type {

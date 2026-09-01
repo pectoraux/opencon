@@ -125,6 +125,17 @@ export function createAuthorityEconomicLedgerRepository(
       return rec ? rec.value : null;
     },
 
+    // NET-W030 (additive): the in-tx transaction read (immutable
+    // records — the twin keeps the in-tx re-derivation discipline for
+    // the external-settlement reconciliation derivation).
+    async findTransactionWithinTx(id, tx) {
+      const rec = await tx.get<EconomicLedgerTransaction>(
+        TRANSACTIONS_COLLECTION,
+        id,
+      );
+      return rec ? rec.value : null;
+    },
+
     async listTransactionsBySubject(subject) {
       const records = await authority.scan<EconomicLedgerTransaction>(
         TRANSACTIONS_COLLECTION,
