@@ -69,7 +69,7 @@ Attestations and commitments are immutable records; revocation/invalidation sema
 
 ## 6. Acceptance/evidence requirements
 
-One-to-one AC coverage for EVID-006 + PRIV-003 plus architecture/out-of-scope regression coverage. Required evidence: signing/verification round-trips over all three record families; tamper detection (mutated payload/statement/covered-set/signature/algorithm/key fails closed); commitment binding + privacy preservation; tenancy/authorization; idempotency/concurrency/atomicity and fault injection; PostgreSQL-authority containment (an attestation never resurrects invalidated state); mutation tests; `bun run verify`; architecture/authority checks; secret scan; configured real PostgreSQL/Redis integration.
+One-to-one AC coverage for EVID-006 + PRIV-003 plus architecture/out-of-scope regression coverage. Required evidence: signing/verification round-trips over all three record families; tamper detection (mutated payload/statement/covered-set/signature/algorithm/key fails closed); commitment binding + privacy preservation; tenancy/authorization; idempotency/concurrency/atomicity and fault injection; PostgreSQL-authority containment (an attestation never resurrects invalidated state); mutation checks; `bun run verify`; architecture/authority checks; secret scan; configured real PostgreSQL/Redis integration.
 
 ## 7. Explicit non-goals
 
