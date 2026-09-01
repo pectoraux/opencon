@@ -62,10 +62,11 @@ W019, W020, W021, W022, W023 — **COMPLETE**.
 - W025 — **COMPLETE**. PR #51 merged `bcaf81b82088688af701f1a90242cc61b1fdd094`.
 - W026 — **COMPLETE**. PR #53 merged `6b8d8424587405aae7e0d8b8ea6bd5e48a5e0936`.
 - W027 — **COMPLETE**. PR #55 merged `d78a9b8bbb8e4319e73e75e1ca4bc8229b2ed300`.
-- W028 — **CURRENT IMPLEMENTATION TARGET**. Benefit Pools inside `/benefits` using authoritative upstream value and `/settlement` as the sole economic authority.
+- W028 — **COMPLETE**. PR #57 merged `6e309e2af05a962e3417999ad8079da16d9ebc37`. The last skeletal v1.0 domain activated: every frozen domain is now implemented.
 
 ### Phase 8 — Decentralization
-W029, W030, W031, W032 — **PLANNED**.
+- W029 — **CURRENT IMPLEMENTATION TARGET**. Cryptographic attestations and commitments: signed evidence attestations and hash commitments over existing authoritative records, without changing centralized semantic authority (PostgreSQL stays authoritative; no consensus, no external execution).
+- W030, W031, W032 — **PLANNED**.
 
 ### Phase 9 — End-to-end proof
 W033, W034, W035, W036 — **PLANNED**.
@@ -84,45 +85,44 @@ W014/W018/W023/W028 → W033 → W034 → W035
 W028/W033 → W036
 ```
 
-## W028 implementation contract
+## W029 implementation contract
 
 ### Authority model
 
 ```text
-verified authoritative upstream value / realized savings
+existing authoritative records
+(/evidence evidence records, /reputation inputs, /settlement value records)
                     ↓
-          Benefit Pool funding reference
+     /evidence attestation + commitment semantics
+     (the integrity layer over authoritative references)
                     ↓
-       /benefits — pool + allocation semantics
+ signed attestations (versioned algorithms + key references)
+ + hash commitments (payload-hiding, binding)
                     ↓
-   deterministic member eligibility + weights
+ deterministic server-side verification (fail closed)
                     ↓
-       allocation plan / benefit lineage
-                    ↓
- /settlement — SOLE economic mutation authority
+ PostgreSQL remains THE authoritative state
+ (an attestation never mints, mutates or resurrects authority)
 ```
 
 ### Non-negotiables
 
-1. W028 stays inside the existing `/benefits` frozen boundary; no new domain.
-2. Pool funding must resolve server-side to authoritative upstream value; caller-supplied amounts are never authority.
-3. No value is created: allocation cannot exceed funded value.
-4. Rounding and remainders are deterministic, explicit and conserved.
-5. Allocation policy is explicit, versioned/immutable and lineage-safe.
-6. Eligibility and weights are derived from authoritative inputs, not caller assertions.
-7. Material economic effects re-derive current funding/eligibility/capacity; stale snapshots cannot authorize new value movement.
-8. Member and pool views preserve privacy and do not expose protected procurement commitments unnecessarily.
-9. Tenant and authorization failures are fail-closed and do not reveal existence.
-10. Coupled mutations use existing idempotency, concurrency, one-authoritative-transaction, transactional-audit and post-commit publication patterns. Use `...WithinTx` settlement primitives.
-11. `/settlement` remains the only authority for balances, credits, cash, rewards and economic postings.
-12. AI, if used, is advisory only; it cannot authorize funding, eligibility, privacy or allocation.
-13. `/workflows` remains lifecycle authority; W028 must not create local workflow machinery.
-14. W029+ and W033+ work remain excluded.
-15. `spec/architecture.md` and `spec/architecture-lock.md` remain unchanged.
+1. W029 attaches attestations/commitments to existing authoritative records; it never creates new semantic authority and never mutates authoritative state.
+2. Cryptography is an integrity/provenance layer, never a consensus layer: no blockchain, no network validation, no token economics (W030/W031/W032 remain excluded).
+3. `/evidence` remains the provenance/truth authority and the home of attestation/commitment semantics; `/reputation` and `/settlement` ports stay untouched (references cross through neutral read paths).
+4. Signature verification is deterministic, server-side and version-pinned; failures fail closed; algorithm/key-reference vocabularies are closed and frozen.
+5. Commitments hide sensitive payloads while binding to them; disclosure reveals only what the frozen privacy rules permit (PRIV-003).
+6. Keys resolve only through `SecretProvider`; no key material is ever committed; secret scan stays clean.
+7. PostgreSQL remains authoritative: an attestation can never resurrect revoked, invalidated or superseded authoritative state.
+8. Material attestation mutations use the established composite idempotency, concurrency, one-authoritative-transaction, transactional-audit and post-commit publication patterns.
+9. Tenant and authorization failures remain fail-closed without existence oracles.
+10. AI, if used, is advisory only; it cannot authorize attestations, commitments or verification outcomes.
+11. W030+ external settlement adapters and W033+ end-to-end flows remain excluded.
+12. `spec/architecture.md` and `spec/architecture-lock.md` remain unchanged.
 
 ### Required evidence
 
-AC coverage for BEN-001..004; funding authority; conservation/rounding; deterministic allocation; policy versioning; privacy/tenancy/authorization; idempotency/concurrency/atomicity and fault injection; settlement-only economic mutation; targeted mutation checks; `bun run verify`; architecture/authority checks; secret scan; configured PostgreSQL/Redis integration.
+AC coverage for EVID-006 + PRIV-003; attestation signing/verification round-trips; tamper detection (mutated payload/key/algorithm fails closed); commitment binding + privacy preservation; tenancy/authorization; idempotency/concurrency/atomicity and fault injection; PostgreSQL-authority containment; targeted mutation checks; `bun run verify`; architecture/authority checks; secret scan; configured PostgreSQL/Redis integration.
 
 ## Operating procedure
 
