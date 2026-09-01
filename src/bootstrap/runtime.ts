@@ -285,7 +285,7 @@ import { createAuthorityConversionRepository } from "../settlement/authority-con
 import { createAuthorityStakeRepository } from "../settlement/authority-stake-repository.ts";
 import { createEconomicValueService } from "../settlement/value-service.ts";
 import { createCreditService } from "../settlement/credit-service.ts";
-import { createRewardPolicyService, createRewardService } from "../settlement/reward-service.ts";
+import { createRewardPolicyService, createRewardService, allocationAccountIds } from "../settlement/reward-service.ts";
 import { createCashService } from "../settlement/cash-service.ts";
 import { createConversionService } from "../settlement/conversion-service.ts";
 import { createStakeService } from "../settlement/stake-service.ts";
@@ -448,6 +448,22 @@ import type {
   ProcurementSavingsService,
   ProcurementSavingsView,
 } from "../demand/port.ts";
+import {
+  createAuthorityBenefitPoolAllocationRepository,
+  createAuthorityBenefitPoolPolicyRepository,
+  createAuthorityBenefitPoolRepository,
+} from "../benefits/authority-benefit-repositories.ts";
+import { createBenefitPoolService } from "../benefits/benefit-pool-service.ts";
+import type {
+  BenefitEconomicDrawPort,
+  BenefitMembershipLookup,
+  BenefitPoolService,
+  BenefitRewardPolicyLookup,
+  BenefitSavingsFundingLookup,
+  BenefitValueFundingFacts,
+  BenefitValueFundingLookup,
+} from "../benefits/port.ts";
+import { valueRecordLockKey } from "../settlement/posting.ts";
 import type {
   ActivateRiskControlInput,
   AppealDisputeInput,
@@ -713,6 +729,11 @@ export interface Runtime {
   // zero economic surface; still the SAME /demand authority)
   // service.
   readonly procurementSavingsService: ProcurementSavingsService;
+  // NET-W028 benefits (Benefit Pools) service — the /benefits
+  // boundary's allocation orchestrator; every economic mutation
+  // routes through /settlement's existing reward-allocation draw
+  // (via the neutral draw port below), never a second ledger.
+  readonly benefitPoolService: BenefitPoolService;
   // NET-W012 helpful contributions (Proof-of-Helpfulness) service.
   readonly helpfulnessService: HelpfulnessService;
   // NET-W013 quality/moderation/anti-spam services.
@@ -2927,6 +2948,208 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     idempotency,
     auditWriter,
     logger: logger.forModule("demand"),
+  });
+
+  // ------------------------------------------------------------------
+  // NET-W028 Benefit Pools wiring (the /benefits boundary).
+  //
+  // The /benefits domain imports core contracts only; EVERY
+  // cross-domain fact arrives read-only through the neutral
+  // structural lookups wired HERE (the W024–W027
+  // dependency-inversion precedent):
+  //  - membership over the /organizations authority (the same
+  //    demand membership lookup);
+  //  - value-record facts over the /settlement economic authority's
+  //    OWN repository (committed + in-tx fresh reads);
+  //  - the CURRENT savings verdict over the /demand savings
+  //    authority's re-derivation (the record's OWN derivation
+  //    inputs, evaluated with the record's own recorder identity —
+  //    read-only; a lapsed creator membership, an invalidated
+  //    baseline or stale evidence makes funding fail closed);
+  //  - reward-policy facts over the /settlement policy authority;
+  //  - THE ECONOMIC DRAW over the /settlement RewardService's
+  //    same-domain `...WithinTx` form (the W020 remediation
+  //    pattern) + the EXACT lock-key set the draw's standalone form
+  //    would acquire — /settlement stays the SOLE economic authority.
+  // ------------------------------------------------------------------
+  const benefitPoolPolicyRepo = createAuthorityBenefitPoolPolicyRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("benefits").debug(m, f) },
+  });
+  const benefitPoolRepo = createAuthorityBenefitPoolRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("benefits").debug(m, f) },
+  });
+  const benefitPoolAllocationRepo =
+    createAuthorityBenefitPoolAllocationRepository({
+      authority: postgresAuthority,
+      logger: { debug: (m, f) => logger.forModule("benefits").debug(m, f) },
+    });
+  const benefitsMembershipLookup: BenefitMembershipLookup = {
+    async isActiveMember(organizationScopeId, personId) {
+      const state = await demandMembershipLookup.resolveMembership(
+        personId,
+        organizationScopeId,
+      );
+      return state === "active";
+    },
+  };
+  function toBenefitValueFacts(record: {
+    readonly id: string;
+    readonly organizationScopeId: string;
+    readonly state: string;
+    readonly amount: number;
+    readonly beneficiaryPersonId: string;
+    readonly consumedBy: unknown;
+    readonly reversal: unknown;
+  }): BenefitValueFundingFacts {
+    return {
+      valueRecordId: record.id,
+      organizationScopeId: record.organizationScopeId,
+      state: record.state,
+      amount: record.amount,
+      beneficiaryPersonId: record.beneficiaryPersonId,
+      consumed: record.consumedBy !== null && record.consumedBy !== undefined,
+      reversed: record.reversal !== null && record.reversal !== undefined,
+    };
+  }
+  const benefitsValueFundingLookup: BenefitValueFundingLookup = {
+    async resolve(valueRecordId) {
+      const record = await economicValueRepo.findById(valueRecordId);
+      return record === null ? null : toBenefitValueFacts(record);
+    },
+    async resolveWithinTx(valueRecordId, tx) {
+      const record = await economicValueRepo.findByIdWithinTx(valueRecordId, tx);
+      return record === null ? null : toBenefitValueFacts(record);
+    },
+  };
+  const benefitsSavingsFundingLookup: BenefitSavingsFundingLookup = {
+    async resolveCurrent(savingsId) {
+      const record = await procurementSavingsRepo.findById(savingsId);
+      if (!record) return null;
+      // The CURRENT re-derivation: the record's OWN derivation inputs,
+      // evaluated with the record's own recorder identity (read-only —
+      // the derivation mutates and audits nothing; a lapsed creator
+      // membership, a missing pool or an invalidated baseline makes
+      // the funding fail closed — supported:false).
+      const derivationCtx = createExecutionContext({
+        correlationId: "benefits-savings-funding-lookup",
+        actor: { id: record.recordedBy, kind: "person" },
+      });
+      try {
+        const view = await procurementSavingsService.evaluateProcurementSavings(
+          derivationCtx,
+          {
+            organizationScopeId: record.organizationScopeId,
+            poolId: record.poolId,
+            baselineId: record.baselineId,
+            outcomeObservationIds: [...record.observationIds],
+            selectionId: record.selectionId,
+          },
+        );
+        return {
+          savingsId: record.id,
+          organizationScopeId: record.organizationScopeId,
+          procurementPoolId: record.poolId,
+          supported: view.supported,
+          savingsValue: view.savings === null ? null : view.savings.value,
+          unit: view.savings === null ? null : view.savings.unit,
+          digest: view.digest,
+          derivationPolicyVersion: view.derivationPolicy.version,
+          recordFormat: record.recordFormat,
+        };
+      } catch {
+        // The current re-derivation refused — funding fails closed.
+        return {
+          savingsId: record.id,
+          organizationScopeId: record.organizationScopeId,
+          procurementPoolId: record.poolId,
+          supported: false,
+          savingsValue: null,
+          unit: null,
+          digest: null,
+          derivationPolicyVersion: record.derivationPolicy.version,
+          recordFormat: record.recordFormat,
+        };
+      }
+    },
+  };
+  const benefitsRewardPolicyLookup: BenefitRewardPolicyLookup = {
+    async resolveLatest(policyId) {
+      const policy = await rewardPolicyRepo.findLatestVersion(policyId, undefined);
+      if (!policy) return null;
+      return {
+        policyId: policy.policyId,
+        version: policy.version,
+        organizationScopeId: policy.organizationScopeId,
+        allocations: policy.allocations.map((allocation) => ({
+          beneficiaryPersonId: allocation.beneficiaryPersonId,
+          weight: allocation.weight,
+        })),
+      };
+    },
+  };
+  const benefitsEconomicDrawPort: BenefitEconomicDrawPort = {
+    async allocateRewardDrawWithinTx(execution, input, ctx) {
+      // The EXISTING /settlement reward-allocation primitive on the
+      // CALLER'S authoritative transaction (never the
+      // transaction-owning command): the balanced allocation
+      // postings, the draw record, the exactly-once value consumption
+      // and the buffered audit event stage on the pool allocation's
+      // transaction — /settlement stays the sole economic authority.
+      const allocation = await rewardService.allocateRewardsWithinTx(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId,
+          sourceValueRecordId: input.sourceValueRecordId,
+          policyId: input.policyId,
+          ...(input.version !== undefined ? { version: input.version } : {}),
+          idempotencyKey: input.idempotencyKey,
+        },
+        ctx,
+      );
+      return {
+        drawResultId: allocation.id,
+        transactionId: allocation.transactionId,
+        sourceValueRecordId: allocation.sourceValueRecordId,
+        policyId: allocation.policyId,
+        policyVersion: allocation.policyVersion,
+        totalAllocated: allocation.totalAllocated,
+        shares: allocation.shares.map((share) => ({
+          beneficiaryPersonId: share.beneficiaryPersonId,
+          amount: share.amount,
+          weight: share.weight,
+        })),
+      };
+    },
+    drawLockKeys(input) {
+      // The EXACT lock set the draw's standalone form would acquire
+      // (the value-record lock + the allocation account set) so the
+      // composite holds them ACROSS its authoritative transaction.
+      return {
+        recordLockKey: valueRecordLockKey(input.sourceValueRecordId),
+        accountIds: allocationAccountIds(
+          input.organizationScopeId,
+          input.sourceBeneficiaryPersonId,
+          input.memberPersonIds,
+        ),
+      };
+    },
+  };
+  const benefitPoolService = createBenefitPoolService({
+    policyRepository: benefitPoolPolicyRepo,
+    poolRepository: benefitPoolRepo,
+    allocationRepository: benefitPoolAllocationRepo,
+    lookups: {
+      membership: benefitsMembershipLookup,
+      valueFunding: benefitsValueFundingLookup,
+      savingsFunding: benefitsSavingsFundingLookup,
+      rewardPolicy: benefitsRewardPolicyLookup,
+      economicDraw: benefitsEconomicDrawPort,
+    },
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("benefits"),
   });
 
   // ------------------------------------------------------------------
@@ -8528,6 +8751,111 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return records.map(toProcurementSavingsRecordView);
     },
 
+    // -- NET-W028 benefit-pool commands -----------------------------
+    async createBenefitPoolPolicy(execution, _actorPersonId, input) {
+      // The versioned allocation policy (append-only; the
+      // organization-independent lineage mutex prevents cross-tenant
+      // forks; the declaration set is validated fail-closed).
+      const result = await benefitPoolService.createPolicyVersion(
+        execution,
+        input as unknown as import("../benefits/port.ts").CreateBenefitPoolPolicyInput,
+      );
+      return {
+        policy: result.policy as unknown as Record<string, unknown>,
+        created: result.created,
+      };
+    },
+
+    async listBenefitPolicyVersions(execution, _actorPersonId, input) {
+      // The in-scope policy lineage read.
+      const policies = await benefitPoolService.listPolicyVersions(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+        policyId: input.policyId as string,
+      });
+      return policies as unknown as readonly Record<string, unknown>[];
+    },
+
+    async createBenefitPool(execution, _actorPersonId, input) {
+      // The tenant-scoped pool record (funding REFERENCES only —
+      // there is deliberately NO funded-amount input anywhere;
+      // funding resolves server-side at every use).
+      const result = await benefitPoolService.createBenefitPool(
+        execution,
+        input as unknown as import("../benefits/port.ts").CreateBenefitPoolInput,
+      );
+      return {
+        pool: result.pool as unknown as Record<string, unknown>,
+        created: result.created,
+      };
+    },
+
+    async closeBenefitPool(execution, _actorPersonId, input) {
+      // The ONE-WAY closure (pool-creator-only; a closed pool can
+      // never re-open or allocate again).
+      const pool = await benefitPoolService.closeBenefitPool(
+        execution,
+        input as unknown as import("../benefits/port.ts").CloseBenefitPoolInput,
+      );
+      return pool as unknown as Record<string, unknown>;
+    },
+
+    async listBenefitPools(execution, _actorPersonId, input) {
+      // The creator-scoped pool listing.
+      const pools = await benefitPoolService.listBenefitPools(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+      });
+      return pools as unknown as readonly Record<string, unknown>[];
+    },
+
+    async evaluatePoolAllocation(execution, _actorPersonId, input) {
+      // THE DERIVED ALLOCATION VIEW: a derived 200 decision — the
+      // current funding + eligibility + plan derivation (no command
+      // asserts, stores or waives eligibility).
+      const view = await benefitPoolService.evaluatePoolAllocation(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+        poolId: input.poolId as string,
+      });
+      return view as unknown as Record<string, unknown>;
+    },
+
+    async allocatePoolBenefits(execution, _actorPersonId, input) {
+      // THE ATOMIC ALLOCATION OPERATION: funding + eligibility
+      // re-derived IN the authoritative transaction, the deterministic
+      // plan, conservation, and (for economic draws) the /settlement
+      // reward-allocation draw WithinTx — everything commits together
+      // or nothing does.
+      const result = await benefitPoolService.allocatePoolBenefits(
+        execution,
+        input as unknown as import("../benefits/port.ts").AllocatePoolBenefitsInput,
+      );
+      return {
+        allocation: result.allocation as unknown as Record<string, unknown>,
+        created: result.created,
+      };
+    },
+
+    async listPoolAllocations(execution, _actorPersonId, input) {
+      // The pool-creator-scoped allocation lineage read.
+      const allocations = await benefitPoolService.listPoolAllocations(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId as string,
+          poolId: input.poolId as string,
+        },
+      );
+      return allocations as unknown as readonly Record<string, unknown>[];
+    },
+
+    async getMemberBenefitView(execution, _actorPersonId, input) {
+      // THE PRIVACY-PRESERVING MEMBER VIEW: the acting member sees
+      // THEIR OWN shares and totals ONLY.
+      const view = await benefitPoolService.getMemberBenefitView(execution, {
+        organizationScopeId: input.organizationScopeId as string,
+        poolId: input.poolId as string,
+      });
+      return view as unknown as Record<string, unknown>;
+    },
+
     // -- NET-W012 helpful-contribution commands -------------------------
     async defineHelpfulnessPolicy(execution, _actorPersonId, input) {
       const result = await helpfulnessService.defineHelpfulnessPolicy(
@@ -9815,6 +10143,8 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     supplierOfferService,
     // NET-W027 demand (verified savings and counterfactuals) service.
     procurementSavingsService,
+    // NET-W028 benefits (Benefit Pools) service.
+    benefitPoolService,
     helpfulnessService,
     // NET-W013 quality/moderation/anti-spam services + LLM providers.
     qualityService,

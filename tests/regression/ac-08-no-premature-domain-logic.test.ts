@@ -255,7 +255,27 @@ const NET_W026_DOMAINS = ["demand"];
 // (NET-W027 work order §3 authority separation).
 const NET_W027_DOMAINS = ["demand"];
 
-// Domains still deferred past NET-W027 (must remain skeletons).
+// NET-W028 activates the Benefit Pools domain INSIDE the frozen
+// /benefits boundary (the sixteenth-of-sixteen frozen v1.0 domain
+// declared skeletal since NET-W001): pools funded ONLY by
+// already-authoritative upstream value (settlement economic value
+// records + demand verified savings — resolved server-side through
+// neutral lookups, never caller-asserted), immutable versioned
+// allocation policies with organization-independent lineage safety,
+// deterministic conservation-preserving allocation plans with
+// explicit remainder handling, privacy-preserving member views, and
+// THE economic mutation routed exclusively through the /settlement
+// reward-allocation draw on ONE authoritative transaction — NO
+// second ledger, NO new balances/accounts/credits/cash/reward
+// primitives, NO lifecycle machinery (/workflows untouched: closure
+// is a one-way field mutation), NO AI authority surface (the
+// NET-W028 work order §3 authority separation). The historical
+// `allocateBenefit` forbidden pattern stays forbidden verbatim: the
+// sanctioned W028 surface is BenefitPoolAllocation /
+// allocatePoolBenefits, never a bare allocateBenefit primitive.
+const NET_W028_DOMAINS = ["benefits"];
+
+// Domains still deferred past NET-W028 (must remain skeletons).
 const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
   (d) =>
     !NET_W002_DOMAINS.includes(d) &&
@@ -271,7 +291,8 @@ const SKELETON_DOMAIN_DIRS = DOMAIN_DIRS.filter(
     !NET_W024_DOMAINS.includes(d) &&
     !NET_W025_DOMAINS.includes(d) &&
     !NET_W026_DOMAINS.includes(d) &&
-    !NET_W027_DOMAINS.includes(d),
+    !NET_W027_DOMAINS.includes(d) &&
+    !NET_W028_DOMAINS.includes(d),
 );
 
 // Patterns that would indicate economically/material domain logic,
@@ -599,6 +620,30 @@ describe("NET-W001-AC-08 no premature domain logic", () => {
       // order §3).
       expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
       expect(moduleExport.describe?.() ?? "").toMatch(/NET-W027/);
+    }
+  });
+
+  test("NET-W028 domain modules are non-skeletal (tier domain, no 'skeleton' marker, reference NET-W028)", async () => {
+    for (const dir of NET_W028_DOMAINS) {
+      const modulePath = join(SRC, dir, "module.ts");
+      expect(existsSync(modulePath), `${dir}/module.ts should exist`).toBe(true);
+      const mod = await import(`../../src/${dir}/module.ts`);
+      const moduleExport = Object.values(mod)[0] as {
+        name: string;
+        tier: string;
+        describe?: () => string;
+      };
+      expect(moduleExport.tier).toBe("domain");
+      // NET-W028 ACTIVATES the frozen /benefits boundary (the last
+      // skeletal v1.0 domain) with Benefit Pools: authoritative-
+      // value-only funding, versioned policies, deterministic
+      // conservation-preserving allocation, privacy-preserving member
+      // views, and the economic mutation routed EXCLUSIVELY through
+      // the /settlement reward-allocation draw WithinTx — no second
+      // ledger, no new economic primitives, no lifecycle machinery
+      // (per the NET-W028 work order §3).
+      expect(moduleExport.describe?.() ?? "").not.toMatch(/skeleton/i);
+      expect(moduleExport.describe?.() ?? "").toMatch(/NET-W028/);
     }
   });
 

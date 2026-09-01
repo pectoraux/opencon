@@ -78,9 +78,19 @@ const NET_W004_DOMAINS = ["opportunities", "contributions", "workflows"];
 // NET-W004 intent — NET-W004 itself introduced NO demand behaviour —
 // is preserved (the demand domain arrives only with the NET-W024
 // work item + its own AC-08 regression).
-const DEFERRED_DOMAINS = [
-  "benefits",
-];
+// NET-W028 UPDATE: benefits is implemented by NET-W028 (the Benefit
+// Pools domain — pools funded ONLY by already-authoritative upstream
+// value, immutable versioned allocation policies, deterministic
+// conservation-preserving allocation, privacy-preserving member views,
+// economic mutation routed exclusively through the /settlement
+// reward-allocation draw on ONE authoritative transaction) and left
+// this list the same way; the NET-W004 intent — NET-W004 itself
+// introduced NO benefits behaviour — is preserved (the benefits
+// domain arrives only with the NET-W028 work item + its own AC-08
+// regression). benefits was the sixteenth and LAST skeletal v1.0
+// domain: with NET-W028 every frozen v1.0 domain is implemented and
+// this deferred list is now permanently empty.
+const DEFERRED_DOMAINS: string[] = [];
 
 async function listTsFiles(dir: string, out: string[] = []): Promise<string[]> {
   if (!existsSync(dir)) return out;

@@ -4956,6 +4956,328 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // -----------------------------------------------------------------
+    // NET-W028 — Benefit Pools (/api/benefits/*).
+    // -----------------------------------------------------------------
+
+    // POST /api/benefits/policies — create a benefit allocation
+    // policy version (protected; guard action benefits.policy.create;
+    // append-only versioned lineage under the organization-
+    // independent mutex — a lineage can never fork).
+    if (
+      path === "/api/benefits/policies" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "benefits.policy.create",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createBenefitPoolPolicy(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          policyId: strField(obj, "policyId"),
+          version: obj.version,
+          benefitType: strField(obj, "benefitType"),
+          eligibilityCriteria: obj.eligibilityCriteria,
+          memberDeclarations: obj.memberDeclarations,
+          remainderDisposition: strField(obj, "remainderDisposition"),
+          ...(obj.rewardPolicyId !== undefined && obj.rewardPolicyId !== null
+            ? { rewardPolicyId: obj.rewardPolicyId }
+            : {}),
+          ...(obj.description !== undefined ? { description: obj.description } : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/benefits/policies/:id/list — list the policy lineage
+    // versions (protected; guard action benefits.policy.read).
+    if (
+      path.startsWith("/api/benefits/policies/") &&
+      path.endsWith("/list") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/benefits/policies/".length,
+        -"/list".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "benefits.policy.read",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.listBenefitPolicyVersions(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          policyId: id,
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/benefits/pools — create the Benefit Pool (protected;
+    // guard action benefits.pool.create; funding REFERENCES only —
+    // there is deliberately NO funded-amount input anywhere).
+    if (
+      path === "/api/benefits/pools" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "benefits.pool.create",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createBenefitPool(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          policyId: strField(obj, "policyId"),
+          ...(obj.policyVersion !== undefined && obj.policyVersion !== null
+            ? { policyVersion: obj.policyVersion }
+            : {}),
+          fundingRefs: obj.fundingRefs,
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/benefits/pools/:id/closure — close the pool (ONE-WAY;
+    // protected; guard action benefits.pool.close; pool-creator-only
+    // — a closed pool can never re-open or allocate again).
+    if (
+      path.startsWith("/api/benefits/pools/") &&
+      path.endsWith("/closure") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/benefits/pools/".length,
+        -"/closure".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "benefits.pool.close",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.closeBenefitPool(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          poolId: id,
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/benefits/pools/list — list the acting member's
+    // benefit pools (protected; guard action benefits.pool.read;
+    // creator-scoped).
+    if (
+      path === "/api/benefits/pools/list" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "benefits.pool.read",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.listBenefitPools(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/benefits/pools/:id/allocation/evaluate — THE DERIVED
+    // ALLOCATION VIEW (protected; guard action
+    // benefits.allocation.evaluate; pool-creator-only — a derived 200
+    // decision: the current funding + eligibility + plan derivation).
+    if (
+      path.startsWith("/api/benefits/pools/") &&
+      path.endsWith("/allocation/evaluate") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/benefits/pools/".length,
+        -"/allocation/evaluate".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "benefits.allocation.evaluate",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.evaluatePoolAllocation(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          poolId: id,
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/benefits/pools/:id/allocations — THE ATOMIC
+    // ALLOCATION OPERATION (protected; guard action
+    // benefits.allocation.execute; pool-creator-only — ONE
+    // exactly-once economic unit: funding + eligibility re-derived
+    // in-tx, the deterministic plan, conservation, and the
+    // /settlement reward-allocation draw WithinTx).
+    if (
+      path.startsWith("/api/benefits/pools/") &&
+      path.endsWith("/allocations") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/benefits/pools/".length,
+        -"/allocations".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "benefits.allocation.execute",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.allocatePoolBenefits(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          poolId: id,
+          ...(obj.valueRecordId !== undefined && obj.valueRecordId !== null
+            ? { valueRecordId: obj.valueRecordId }
+            : {}),
+          ...(obj.amount !== undefined && obj.amount !== null
+            ? { amount: obj.amount }
+            : {}),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/benefits/pools/:id/allocations/list — the pool's
+    // allocation lineage (protected; guard action
+    // benefits.allocation.read; pool-creator-only).
+    if (
+      path.startsWith("/api/benefits/pools/") &&
+      path.endsWith("/allocations/list") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/benefits/pools/".length,
+        -"/allocations/list".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "benefits.allocation.read",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.listPoolAllocations(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          poolId: id,
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/benefits/pools/:id/member-view — THE PRIVACY-
+    // PRESERVING MEMBER VIEW (protected; guard action
+    // benefits.member.read; the acting member sees THEIR OWN shares
+    // and totals ONLY).
+    if (
+      path.startsWith("/api/benefits/pools/") &&
+      path.endsWith("/member-view") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice(
+        "/api/benefits/pools/".length,
+        -"/member-view".length,
+      );
+      const guarded = await guardMutation(
+        ctx,
+        req,
+        "benefits.member.read",
+        "*",
+        res,
+      );
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.getMemberBenefitView(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          poolId: id,
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
     // GET /api/demand/procurement/pools/:id — one procurement pool
     // (public; tenant-scoped; pool metadata only — no commitment
     // data; a cross-scope id is not found).
