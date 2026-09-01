@@ -3157,6 +3157,109 @@ export interface ApiCommands {
   ): Promise<readonly Record<string, unknown>[]>;
 
   // -----------------------------------------------------------------
+  // NET-W026 — Supplier offers and competitive selection (inside the
+  // SAME /demand boundary; offers compete only against currently
+  // qualified W025 demand; hard eligibility is server-derived;
+  // selection is deterministic, auditable and NEVER an economic
+  // mutation — /settlement stays the sole economic authority). Offer
+  // withdrawal is a one-way field mutation and expiry is derived
+  // (/workflows untouched); selection surfaces are pool-creator-only
+  // (supplier commercial terms never cross to other pool
+  // participants).
+  // -----------------------------------------------------------------
+
+  /**
+   * Record a supplier offer against a qualified procurement pool
+   * (protected; guard action `demand.procurement.offers.create`): the
+   * acting person BECOMES the supplier (there is no supplierPersonId
+   * input — offer ownership cannot be fabricated by client claims)
+   * and must hold an ACTIVE tenant membership (the authorized-
+   * supplier gate, server-enforced). The pool must be OPEN and
+   * CURRENTLY QUALIFIED (re-derived server-side, never
+   * caller-asserted). The consent grant is SERVER-WRITTEN (the input
+   * may only name the closed "competitive_selection" scope). ONE
+   * active offer per (pool, supplier).
+   */
+  createSupplierOffer(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ offer: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * Withdraw the supplier offer (protected; guard action
+   * `demand.procurement.offers.withdraw`; supplier-only): one-way; a
+   * withdrawn offer vanishes from every derived selection
+   * immediately (derived).
+   */
+  withdrawSupplierOffer(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * List the AUTHENTICATED ACTOR'S OWN offers (protected; guard
+   * action `demand.procurement.offers.read`): the supplier is the
+   * server-resolved actor — there is no supplierPersonId input. This
+   * is the ONLY offer read surface; individual supplier offers are
+   * never exposed through any other route (privacy: supplier
+   * commercial terms stay private — PROC-003).
+   */
+  listMySupplierOffers(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  /**
+   * THE DERIVED SELECTION VIEW (protected; guard action
+   * `demand.procurement.selections.evaluate`; pool-creator-only): the
+   * deterministic hard-eligibility + ranking derivation of one pool's
+   * active offers at ONE explicit evaluation anchor — a DERIVED 200
+   * decision for every outcome (qualified or not, eligible offers or
+   * none — the decision is the product). There is NO
+   * offer-set/eligibility/ranking/selection input (every caller field
+   * beyond scope/pool identity is ignored); buyer commitment data
+   * never crosses into the selection view (W025 privacy intact).
+   */
+  evaluateCompetitiveSelection(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+
+  /**
+   * Record the AUTHORITATIVE competitive selection lineage record
+   * (protected; guard action `demand.procurement.selections.record`;
+   * pool-creator-only): the selection is re-derived INSIDE the
+   * authoritative transaction from CURRENT records (in-tx pool,
+   * commitments, offers) at ONE explicit anchor — nothing
+   * caller-asserted qualifies, ranks or selects. Fails closed when
+   * the pool is not currently qualified. The persisted record
+   * snapshots the offer set and the selection rationale (PROC-AC-03)
+   * and is immutable lineage. A selection is a PROCUREMENT DECISION —
+   * never an economic mutation.
+   */
+  recordCompetitiveSelection(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<{ selection: Record<string, unknown>; created: boolean }>;
+
+  /**
+   * List the pool's selection lineage records (protected; guard
+   * action `demand.procurement.selections.read`; pool-creator-only —
+   * the service re-derives the creator gate server-side). The
+   * lineage exposes individual supplier offer terms — PROC-003.
+   */
+  listPoolSelections(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: Record<string, unknown>,
+  ): Promise<readonly Record<string, unknown>[]>;
+
+  // -----------------------------------------------------------------
   // NET-W012 — helpful contributions (Proof-of-Helpfulness).
   // -----------------------------------------------------------------
 

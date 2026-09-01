@@ -416,6 +416,20 @@ import type {
   ProcurementService,
   QualifiedProcurementAggregate,
 } from "../demand/port.ts";
+// NET-W026 demand (supplier offers + competitive selection — the
+// SAME /demand boundary extended AGAIN, NOT a second demand/
+// procurement/selection authority).
+import {
+  createAuthorityCompetitiveSelectionRepository,
+  createAuthoritySupplierOfferRepository,
+} from "../demand/authority-supplier-offer-repositories.ts";
+import { createSupplierOfferService } from "../demand/supplier-offer-service.ts";
+import type {
+  CompetitiveSelection,
+  CompetitiveSelectionView,
+  SupplierOffer,
+  SupplierOfferService,
+} from "../demand/port.ts";
 import type {
   ActivateRiskControlInput,
   AppealDisputeInput,
@@ -667,6 +681,12 @@ export interface Runtime {
   // supplier-facing minimized demand views — still zero economic
   // surface; still the SAME /demand authority) service.
   readonly procurementService: ProcurementService;
+  // NET-W026 demand (supplier offers + competitive selection:
+  // authorized offers against currently qualified demand,
+  // server-derived hard eligibility, deterministic auditable
+  // selection lineage — still zero economic surface, W025 privacy
+  // intact upstream; still the SAME /demand authority) service.
+  readonly supplierOfferService: SupplierOfferService;
   // NET-W012 helpful contributions (Proof-of-Helpfulness) service.
   readonly helpfulnessService: HelpfulnessService;
   // NET-W013 quality/moderation/anti-spam services.
@@ -1043,6 +1063,21 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   });
   const procurementCommitmentRepo =
     createAuthorityProcurementCommitmentRepository({
+      authority: postgresAuthority,
+      logger: { debug: (m, f) => logger.forModule("demand").debug(m, f) },
+    });
+  // NET-W026 supplier-offer/selection repositories
+  // (PostgresAuthority-backed, append-only collections — the SAME
+  // /demand boundary's durable state for supplier offers and the
+  // authoritative selection lineage records; the private supplier
+  // offer records never cross into any other boundary; selection
+  // records are immutable append-only lineage).
+  const supplierOfferRepo = createAuthoritySupplierOfferRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("demand").debug(m, f) },
+  });
+  const competitiveSelectionRepo =
+    createAuthorityCompetitiveSelectionRepository({
       authority: postgresAuthority,
       logger: { debug: (m, f) => logger.forModule("demand").debug(m, f) },
     });
@@ -2726,6 +2761,35 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
   // NET-W025) and NO lifecycle machinery (/workflows untouched).
   // ------------------------------------------------------------------
   const procurementService = createProcurementService({
+    poolRepository: procurementPoolRepo,
+    commitmentRepository: procurementCommitmentRepo,
+    membershipLookup: demandMembershipLookup,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("demand"),
+  });
+
+  // ------------------------------------------------------------------
+  // NET-W026 supplier-offer/selection wiring (supplier offers +
+  // competitive selection — the SAME /demand boundary, NOT a second
+  // authority).
+  //
+  // The supplier-offer service reuses the SAME neutral membership
+  // lookup adapter (the authorized-supplier gate is an ACTIVE tenant
+  // membership, resolved through the /organizations authority) AND
+  // the SAME procurement pool/commitment repositories (the
+  // qualified-demand gate re-derives the W025 aggregate from the
+  // /demand boundary's own records — the demand authority is
+  // /demand itself, never a caller). The /demand boundary still has
+  // ZERO economic surface (/settlement untouched by NET-W026: a
+  // selection is a procurement decision, never an economic one) and
+  // NO lifecycle machinery (/workflows untouched: offer withdrawal
+  // is a one-way field mutation; expiry is derived from the recorded
+  // validity window).
+  // ------------------------------------------------------------------
+  const supplierOfferService = createSupplierOfferService({
+    offerRepository: supplierOfferRepo,
+    selectionRepository: competitiveSelectionRepo,
     poolRepository: procurementPoolRepo,
     commitmentRepository: procurementCommitmentRepo,
     membershipLookup: demandMembershipLookup,
@@ -4478,6 +4542,89 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       aggregate: view.aggregate,
       digest: view.digest,
       evaluatedAt: view.evaluatedAt,
+    };
+  }
+  function toSupplierOfferView(offer: SupplierOffer) {
+    return {
+      id: offer.id,
+      organizationScopeId: offer.organizationScopeId,
+      poolId: offer.poolId,
+      // The supplier is visible ONLY on the owner-scoped surfaces
+      // (this view is returned exclusively by the mutation results
+      // and the actor-scoped listMySupplierOffers command) — never
+      // in any buyer-side or competitor-facing surface.
+      supplierPersonId: offer.supplierPersonId,
+      categoryKey: offer.categoryKey,
+      categoryVersion: offer.categoryVersion,
+      attributes: offer.attributes,
+      consent: offer.consent,
+      withdrawnAt: offer.withdrawnAt,
+      withdrawalReason: offer.withdrawalReason,
+      validFrom: offer.validFrom,
+      validUntil: offer.validUntil,
+      recordFormat: offer.recordFormat,
+      createdAt: offer.createdAt,
+      updatedAt: offer.updatedAt,
+      idempotencyKey: offer.idempotencyKey,
+      executionId: offer.executionId,
+      correlationId: offer.correlationId,
+      causationId: offer.causationId,
+    };
+  }
+  function toCompetitiveSelectionView(view: CompetitiveSelectionView) {
+    // The derived pool-creator-scoped selection view passes through
+    // as-is: it is already the supplier/offer-facts-only contract
+    // (supplier + bands/buckets/windows + pool digest; NO buyer
+    // commitment data, NO aggregate facts, NO exact buyer terms;
+    // anchor + digest recorded). Offer facts (supplier identity +
+    // bands) are the explicit W026 selection contract — they never
+    // cross to non-creator surfaces (the guard action + the
+    // pool-creator gate are the transport/domain authorization).
+    return {
+      poolId: view.poolId,
+      organizationScopeId: view.organizationScopeId,
+      selectionPolicy: view.selectionPolicy,
+      poolDigest: view.poolDigest,
+      qualified: view.qualified,
+      checks: view.checks,
+      offerEvaluations: view.offerEvaluations,
+      consideredOfferIds: view.consideredOfferIds,
+      eligibleOfferIds: view.eligibleOfferIds,
+      ranking: view.ranking,
+      selectedOfferId: view.selectedOfferId,
+      digest: view.digest,
+      evaluatedAt: view.evaluatedAt,
+    };
+  }
+  function toCompetitiveSelectionRecordView(
+    selection: CompetitiveSelection,
+  ) {
+    // The persisted selection lineage record (immutable): the full
+    // decision snapshot + provenance (PROC-AC-03 — the selection
+    // records the offer set and the selection rationale).
+    return {
+      id: selection.id,
+      organizationScopeId: selection.organizationScopeId,
+      poolId: selection.poolId,
+      recordedBy: selection.recordedBy,
+      selectionPolicy: selection.selectionPolicy,
+      poolDigest: selection.poolDigest,
+      qualified: selection.qualified,
+      evaluationAnchor: selection.evaluationAnchor,
+      consideredOfferIds: selection.consideredOfferIds,
+      eligibleOfferIds: selection.eligibleOfferIds,
+      offerEvaluations: selection.offerEvaluations,
+      checks: selection.checks,
+      ranking: selection.ranking,
+      selectedOfferId: selection.selectedOfferId,
+      digest: selection.digest,
+      recordFormat: selection.recordFormat,
+      createdAt: selection.createdAt,
+      updatedAt: selection.updatedAt,
+      idempotencyKey: selection.idempotencyKey,
+      executionId: selection.executionId,
+      correlationId: selection.correlationId,
+      causationId: selection.causationId,
     };
   }
   function toPlacementView(placement: PlacementRecord) {
@@ -7951,6 +8098,99 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return pools.map(toProcurementPoolView);
     },
 
+    // -- NET-W026 supplier-offer/selection commands -----------------------
+    async createSupplierOffer(execution, _actorPersonId, input) {
+      const result = await supplierOfferService.createSupplierOffer(
+        execution,
+        input as unknown as import("../demand/port.ts").CreateSupplierOfferInput,
+      );
+      return {
+        offer: toSupplierOfferView(result.offer),
+        created: result.created,
+      };
+    },
+
+    async withdrawSupplierOffer(execution, _actorPersonId, input) {
+      const offer = await supplierOfferService.withdrawSupplierOffer(
+        execution,
+        input as unknown as import("../demand/port.ts").WithdrawSupplierOfferInput,
+      );
+      return toSupplierOfferView(offer);
+    },
+
+    async listMySupplierOffers(execution, actorPersonId, input) {
+      // The supplier is the SERVER-RESOLVED authenticated actor —
+      // there is no supplierPersonId input on this route. This is
+      // the ONLY offer read surface (individual supplier offers are
+      // never exposed through any other route).
+      const offers = await supplierOfferService.listSupplierOffers(
+        execution,
+        input.organizationScopeId as string,
+        {
+          supplierPersonId: actorPersonId,
+          ...(input.poolId !== undefined && input.poolId !== null
+            ? { poolId: input.poolId as string }
+            : {}),
+        },
+      );
+      return offers.map(toSupplierOfferView);
+    },
+
+    async evaluateCompetitiveSelection(
+      execution,
+      _actorPersonId,
+      input,
+    ) {
+      // THE DERIVED SELECTION VIEW: no offer-set/eligibility/ranking
+      // or selection input exists — every caller field beyond
+      // scope/pool identity is ignored and the evaluation re-derives
+      // everything (a derived 200 decision for every outcome).
+      const view = await supplierOfferService.evaluateCompetitiveSelection(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId as string,
+          poolId: input.poolId as string,
+        },
+      );
+      return toCompetitiveSelectionView(view);
+    },
+
+    async recordCompetitiveSelection(
+      execution,
+      _actorPersonId,
+      input,
+    ) {
+      // THE AUTHORITATIVE SELECTION LINEAGE RECORD: no offer-set,
+      // eligibility, ranking or selected-offer input exists — the
+      // selection is re-derived INSIDE the authoritative transaction
+      // from CURRENT records.
+      const result = await supplierOfferService.recordCompetitiveSelection(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId as string,
+          poolId: input.poolId as string,
+          idempotencyKey: input.idempotencyKey as string,
+        },
+      );
+      return {
+        selection: toCompetitiveSelectionRecordView(result.selection),
+        created: result.created,
+      };
+    },
+
+    async listPoolSelections(execution, _actorPersonId, input) {
+      // The pool-creator-scoped selection lineage read (the service
+      // re-derives the creator gate server-side).
+      const selections = await supplierOfferService.listPoolSelections(
+        execution,
+        {
+          organizationScopeId: input.organizationScopeId as string,
+          poolId: input.poolId as string,
+        },
+      );
+      return selections.map(toCompetitiveSelectionRecordView);
+    },
+
     // -- NET-W012 helpful-contribution commands -------------------------
     async defineHelpfulnessPolicy(execution, _actorPersonId, input) {
       const result = await helpfulnessService.defineHelpfulnessPolicy(
@@ -9233,6 +9473,9 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     demandService,
     // NET-W025 demand (business procurement pools) service.
     procurementService,
+    // NET-W026 demand (supplier offers + competitive selection)
+    // service.
+    supplierOfferService,
     helpfulnessService,
     // NET-W013 quality/moderation/anti-spam services + LLM providers.
     qualityService,

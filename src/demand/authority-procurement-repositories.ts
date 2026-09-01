@@ -314,5 +314,22 @@ export function createAuthorityProcurementCommitmentRepository(
         )
         .sort(byCreatedAt);
     },
+
+    async listActiveByPoolWithinTx(poolId, tx) {
+      // The in-tx twin (NET-W026): the CURRENT active commitments read
+      // INSIDE the authoritative transaction so the offer/selection
+      // commands re-derive the pool's qualification from tx-scanned
+      // records (never a pre-flight snapshot — the TOCTOU closure).
+      const records = await tx.scan<ProcurementCommitment>(
+        PROCUREMENT_COMMITMENTS_COLLECTION,
+      );
+      return records
+        .map((rec) => rec.value)
+        .filter(
+          (commitment) =>
+            commitment.poolId === poolId && commitment.withdrawnAt === null,
+        )
+        .sort(byCreatedAt);
+    },
   };
 }

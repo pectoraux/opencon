@@ -14,12 +14,16 @@ import { defineBoundaryModule } from "../core/domain-module.ts";
  * behind the frozen commitment floor AND the frozen
  * distinct-organization floor, and the derived supplier-facing
  * minimized demand view (bands/buckets/windows only — never exact
- * quantities, prices, budgets or timing). Still zero economic
- * surface; still no second demand/procurement authority.
+ * quantities, prices, budgets or timing). NET-W026 extends the SAME
+ * boundary again with supplier offers and competitive selection:
+ * authorized supplier offers against currently qualified demand,
+ * server-derived hard eligibility, deterministic auditable selection
+ * lineage, and W025 privacy intact. Still zero economic surface;
+ * still no second demand/procurement/selection authority.
  */
 export const demandModule = defineBoundaryModule({
   name: "demand",
   tier: "domain",
   summary:
-    "demand aggregation (NET-W024: consumer demand pools; NET-W025: business procurement pools)",
+    "demand aggregation (NET-W024: consumer demand pools; NET-W025: business procurement pools; NET-W026: supplier offers and competitive selection)",
 });
