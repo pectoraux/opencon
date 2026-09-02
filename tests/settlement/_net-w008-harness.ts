@@ -18,6 +18,7 @@ import { createExecutionContext } from "../../src/core/execution-context.ts";
 import type { ExecutionContext } from "../../src/core/execution-context.ts";
 import type { LlmPort } from "../../src/llm/port.ts";
 import type { ProviderAdapter } from "../../src/core/adapter.ts";
+import type { MeasurementProviderAdapter } from "../../src/measurement/port.ts";
 import {
   CONTRIBUTION_TRANSITION_TABLE,
   OPPORTUNITY_TRANSITION_TABLE,
@@ -75,6 +76,13 @@ export interface NetW008Harness {
  * `createRuntime` (the authenticated external-fact ingestion
  * channel). Omitted keys → the providers' ingestion fails closed
  * (`unauthenticated`).
+ *
+ * NET-W034: `measurement.providers` threads provider-neutral
+ * measurement provider adapters into `createRuntime` (the W006
+ * harness precedent) so the composed advertising chain can exercise
+ * the REAL W022 provider-selection/normalization path on the same
+ * runtime as the campaigns/inventory/contribution machinery.
+ * Omitted → the reference ECHO adapter (reports nothing).
  */
 export interface NetW008HarnessOptions {
   readonly llm?: {
@@ -84,6 +92,9 @@ export interface NetW008HarnessOptions {
     readonly sellerAuthorizationTrustKey?: string;
     readonly externalSettlementProviders?: readonly ExternalSettlementProviderAdapter[];
     readonly externalSettlementTrustKeys?: Readonly<Record<string, string>>;
+  };
+  readonly measurement?: {
+    readonly providers?: readonly MeasurementProviderAdapter[];
   };
 }
 
@@ -116,6 +127,9 @@ export async function createNetW008Harness(
       ? { llm: { providers: opts.llm.providers } }
       : {}),
     ...(hasAdapterOptions ? { adapters: adaptersOptions } : {}),
+    ...(opts.measurement?.providers
+      ? { measurement: { providers: opts.measurement.providers } }
+      : {}),
   });
   await runtime.initialize();
   await runtime.api.start();
