@@ -5,15 +5,15 @@
 **Canonical backlog:** `spec/work-items.md`  
 **Canonical dependency graph:** `spec/dependency-graph.md`  
 **Canonical frozen constraints:** `spec/architecture.md`, `spec/architecture-lock.md`  
-**Operational state:** `spec/PROJECT-STATE.md`  
+**Operational state:** `spec/PROJECT-STATE.md`
 
 ## Purpose
 
-This is the durable roadmap for the implementation program. A new LLM architect must be able to continue from the repository without prior chat context.
+Durable implementation roadmap. A new LLM architect must be able to continue from the repository without prior chat context.
 
 ## Program invariant
 
-OpenCon is one protocol with explicit authorities. Do not create a second authority for something an existing boundary already owns. The v1.0 architecture freezes sixteen domain boundaries; a seventeenth domain requires an explicit Architecture Change Request and new architecture version.
+OpenCon is one protocol with explicit authorities. Do not create a second authority for something an existing boundary already owns. Architecture v1.0 freezes sixteen domain boundaries; a seventeenth domain requires an Architecture Change Request and a new architecture version.
 
 ## Authority map
 
@@ -58,23 +58,17 @@ W015, W016, W017, W018 — **COMPLETE**.
 W019, W020, W021, W022, W023 — **COMPLETE**.
 
 ### Phase 7 — Demand economy
-- W024 — **COMPLETE**.
-- W025 — **COMPLETE**. PR #51 merged `bcaf81b82088688af701f1a90242cc61b1fdd094`.
-- W026 — **COMPLETE**. PR #53 merged `6b8d8424587405aae7e0d8b8ea6bd5e48a5e0936`.
-- W027 — **COMPLETE**. PR #55 merged `d78a9b8bbb8e4319e73e75e1ca4bc8229b2ed300`.
-- W028 — **COMPLETE**. PR #57 merged `6e309e2af05a962e3417999ad8079da16d9ebc37`. The last skeletal v1.0 domain activated: every frozen domain is now implemented.
+W024, W025, W026, W027, W028 — **COMPLETE**.
 
 ### Phase 8 — Decentralization
-- W029 — **COMPLETE**. PR #60 merged `cf53378e1c432dfd735e1b408010eece55d7612f`. The Phase-8 integrity layer: production signed attestations (Ed25519/ECDSA behind injected interfaces; closed versioned vocabularies; SecretProvider-only keys) + salted coverage commitments over the three authoritative record families, with deterministic fail-closed verification and PostgreSQL authority containment.
-- W030 — **COMPLETE**. PR #62 merged `1d902e2148920ddd04e2b170509184d7b585cb3e`. The Phase-8 fact-ingestion/reconciliation layer: external settlement transactions as authenticated, idempotent, append-only FACTS inside `/settlement` (neutral adapter contracts; structural adapter implementation under `/adapters`; SecretProvider-only per-provider trust material, fail-closed, no dev fallback), deterministically reconciled against the internal ledger lineage — an external fact can never mint, consume or mutate internal value (architecture-lock §14 invariant 25).
-- W031 — **COMPLETE**. PR #64 merged `83f0e5b0041f6cb8c67b8d6334f08d52eaafc770`. Portable reputation proofs: verifiable reputation claims without raw private records, derived from `/reputation` through W029 signing/commitment machinery with aggregate-only disclosure, deterministic fail-closed verification, tenant-scoped issuance and self-contained presentation. Final remediation sealed revocation state into the signed canonical facts and preserved zero tenant-state lookups at presentation.
-- W032 — **COMPLETE**. PR #66 merged `a65bfdbd967ab6a606757a49538aa184f6838480`. Decentralized validation/dispute coordination inside `/disputes`: scoped validator participants, deterministic assignment and conflict exclusion, versioned count-based quorum, immutable challenge rounds/rechallenge, evidence-backed independent observations, settlement-only validator stakes, and owning-authority application. Architect review initially found an idempotent-replay ordering defect; the same PR remediated it across all audited W032 mutations, adding temporal replay regressions and mutation coverage. Final remediation head `fe2c9001753a3bacac553fed953103005e1e4b59` passed the full gate before merge.
+W029, W030, W031, W032 — **COMPLETE**.
 
 ### Phase 9 — End-to-end proof
-- W033 — **COMPLETE**. PR #68 merged `92482c6ea3b3dc18f8286d37b9c6236f9ef1c001`. Final reviewed head `476b57971a06a9e74d1545fa30824904cbc2359b`. The complete contribution traversal is proven in executable order: sanctioned `/workflows` publication to SUBMITTED, MEASURING point, `/evidence` + `/outcomes`, PoH evaluation, lifecycle completion to VERIFIED, reputation, settlement, then benefits. The same PR remediated initial sequencing drift and added deterministic traversal/audit-order witnesses.
-- W034 — **COMPLETE**. PR #70 squash-merged `7c19a19addd44a07965fa25ee7cab021bab2016a`. Final reviewed head `f66cb4f380afde56ed23716453a297d0280b2411`. The advertising lifecycle composition proof traversed campaign/policy → supply/provenance → W021 selection → placement → campaign opportunity/contribution lifecycle → MEASURING → real W022 measurement → outcomes → evidence/PoV → workflow completion → risk/dispute gates → `/settlement` pending/mature → declared clearing. The architect initially blocked AC-09 because its first fault fixture proved only stale-state refusal; the same PR added a genuine composite-level commit-failure rollback proof and replaced the dispute fixture's wall-clock anchor with the authoritative subject timestamp. Final evidence recorded 2258 pass / 15 skip / 0 fail, 322/0 architecture + authority checks, 12/12 targeted mutations caught with byte-identical restoration, real PostgreSQL/Redis integration 17/0, clean real-provider round-trip 11/11, and exact-head CI green on push and pull_request.
-- W035 — **CURRENT IMPLEMENTATION TARGET**. Issue #71 — Complete creator lifecycle: creator discovery → contract/terms → UGC/rights → disclosure/compliance → measurement → evidence/Proof-of-Value → settlement/payment.
-- W036 — **PLANNED**. Complete demand/procurement/benefit lifecycle: demand → supplier → fulfillment → verified savings → benefit allocation.
+
+- W033 — **COMPLETE**. PR #68 merged `92482c6ea3b3dc18f8286d37b9c6236f9ef1c001`; final reviewed head `476b57971a06a9e74d1545fa30824904cbc2359b`. Complete contribution traversal proved in executable order with authoritative state/version witnesses and durable audit ordering; initial sequencing drift was remediated on the same PR.
+- W034 — **COMPLETE**. PR #70 squash-merged `7c19a19addd44a07965fa25ee7cab021bab2016a`; final reviewed head `f66cb4f380afde56ed23716453a297d0280b2411`. Advertising traversal proved campaign/policy → supply/provenance → W021 selection → placement → lifecycle → MEASURING → real W022 measurement → outcomes → evidence/PoV → workflow completion → risk/dispute → settlement pending/mature → clearing. The same PR remediated the AC-09 fault proof into a genuine composite commit-failure rollback and replaced a wall-clock dispute fixture anchor.
+- W035 — **COMPLETE**. PR #73 squash-merged `85e5d6d7b8ff1df2fda4740fdd1f541890496610`; final reviewed head `eaf19bd9292a1c924cf7a8e6d086838369a5affc`. Creator traversal proved discovery/matching → terms → W017 acceptance/UGC/rights → W018 disclosure/compliance → MEASURING → real W022 measurement → outcomes → evidence/PoV → workflow completion → risk/dispute → settlement → W030 external payment. Architect CHANGES REQUESTED on determinism was remediated on the same PR with fixed/authoritative timestamps, deterministic payment identity, a mechanical regression pin and additional mutation coverage. Final evidence: 2330 pass / 15 skip / 0 fail, 322/0 architecture+authority violations, 16/16 targeted mutations caught with byte-identical restoration, real PostgreSQL/Redis 17/17, real-provider round-trip 23/23, exact-head CI green, no production `src/` changes.
+- W036 — **CURRENT IMPLEMENTATION TARGET**. Canonical issue #75: Complete demand/procurement/benefit lifecycle. Documentation preparation PR #80 squash-merged `6d02bcea0b335dd8b8ea71a7316d40f922e38fe9`. Frozen work order: `spec/work-orders/NET-W036.md`. Frozen evidence ledger: `docs/net-w036-complete-demand-procurement-benefit-lifecycle.md`.
 
 ## Dependency sequence
 
@@ -90,29 +84,43 @@ W014/W018/W023/W028 → W033 → W034 → W035
 W028/W033 → W036
 ```
 
-## W033 merge record
+## W035 merge record
 
-W033 is merged and closes the first Phase-9 composition milestone for the contribution side. The implementation deliberately added no new source-domain authority: the final scenario uses existing owning boundaries and proves the declared executable order with authoritative contribution state/version witnesses plus durable audit order. The final merge is PR #68 at `92482c6ea3b3dc18f8286d37b9c6236f9ef1c001` (reviewed head `476b57971a06a9e74d1545fa30824904cbc2359b`).
+W035 is merged and closes the creator-side Phase-9 composition milestone. The implementation remains composition/proof-only with no production `src/` changes and no architecture amendment. Final merge is PR #73 at `85e5d6d7b8ff1df2fda4740fdd1f541890496610`, from reviewed head `eaf19bd9292a1c924cf7a8e6d086838369a5affc`.
 
-The final W033 evidence record is `docs/net-w033-complete-contribution-lifecycle.md`.
+The W035 evidence record is `docs/net-w035-complete-creator-lifecycle.md`. The same-PR determinism remediation is part of the durable evidence record.
 
-## W034 merge record
+## W036 implementation freeze
 
-W034 is merged and closes the advertising Phase-9 composition milestone. No production `src/` file changed. The final scenario uses the existing W019/W020/W021/W022/W023 and downstream authorities, with authoritative traversal witnesses and ordered durable audit markers. The architect CHANGES REQUESTED decision on PR #70 was remediated on the same PR with a genuine composite-level commit-failure rollback proof and deterministic dispute anchoring. Final merge: PR #70 at `7c19a19addd44a07965fa25ee7cab021bab2016a`, reviewed head `f66cb4f380afde56ed23716453a297d0280b2411`.
+NET-W036 is the final Phase-9 demand/procurement/benefit composition proof. The frozen execution contract is:
 
-The final W034 evidence record is `docs/net-w034-complete-advertising-lifecycle.md`.
+```text
+demand pool
+→ privacy-safe qualified demand
+→ supplier offers / hard eligibility / deterministic selection
+→ fulfillment lifecycle
+→ measurement / outcomes
+→ supported baseline / counterfactual
+→ evidence / Proof-of-Value
+→ settlement
+→ benefit funding / deterministic allocation
+```
+
+W036 must keep `/demand` authoritative for demand/offer/selection; `/workflows` authoritative for lifecycle; W027 authoritative for savings/baseline/counterfactual semantics; `/evidence` authoritative for provenance/PoV; `/settlement` authoritative for economic value; `/benefits` authoritative for pool/allocation semantics; `/adapters` authoritative for provider-specific facts. Commitment count and distinct buyer-organization count are separate procurement privacy dimensions. Hard supplier eligibility precedes deterministic selection. Savings must preserve uncertainty and fail closed when support is stale, invalid or insufficient. Benefit allocation must consume authoritative funded value and conserve source value.
+
+No W037 behavior, second ledger, new lifecycle engine, new economic/savings/benefit primitive, new decentralized semantics or architecture amendment is permitted.
 
 ## Operating procedure
 
 1. Confirm issue/readiness/dependencies.
-2. Read this roadmap, `spec/PROJECT-STATE.md`, frozen architecture/lock and canonical work item.
-3. Author `spec/work-orders/NET-WXXX.md` and evidence ledger before coding.
+2. Read roadmap, project state, frozen architecture/lock and canonical work item.
+3. Author work order and evidence ledger before coding.
 4. Reuse existing ports and `...WithinTx` primitives.
-5. Implement one-to-one AC tests plus architecture/out-of-scope regressions.
-6. Run complete local and configured integration gates plus targeted mutation checks.
+5. Implement one-to-one AC suites plus architecture/out-of-scope regression.
+6. Run complete local/integration gates and targeted mutations.
 7. Create exactly one implementation PR.
 8. Architect reviews; CHANGES REQUESTED is remediated on the same PR.
-9. Merge only after implementation + green verification/CI + architect approval.
+9. Merge only after implementation, green verification/CI and architect approval.
 10. After merge, update `spec/PROJECT-STATE.md` and this roadmap with the canonical merge SHA before advancing.
 
 ## Merge policy
