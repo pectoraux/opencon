@@ -6847,8 +6847,11 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     async verifyPresentedReputationProof(execution, input) {
       const verdict = await reputationProofService.verifyPresentedProof(
         getExecutionContext() ?? execution,
-        fromApiReputationProofView(input.proof),
-        input.evaluatedAt,
+        {
+          presented: fromApiReputationProofView(input.proof),
+          currentProof: fromApiReputationProofView(input.currentProof),
+          evaluatedAt: input.evaluatedAt,
+        },
       );
       return {
         proofId: verdict.proofId,

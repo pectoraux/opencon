@@ -15,6 +15,7 @@
  *
  * ```text
  * reputation-proof/v1
+ * proof:            <proofId>
  * subject:          <subjectPersonId>
  * organization:     <organizationScopeId>
  * snapshot:         <snapshotId>
@@ -25,17 +26,30 @@
  * dimension:        <dimension>:<score(6dp)>:<capped>:<inputCount>:<verifiedInputCount>:<indicatedInputCount>
  *                   (exactly the eight frozen dimensions, in frozen
  *                    vocabulary order)
+ * revoked-at:       none | <revokedAt ISO-8601>
+ * revocation-reason: none | <the reason, JSON-string-escaped>
  * ```
  *
  * The lineage block (snapshot id, policy id + version, referenceAt and
- * the SNAPSHOT's digest) is bound INTO the signature: tampering any
- * lineage field — or any aggregate dimension fact, the subject, the
- * scope or the issuance timestamp — changes the rebuilt canonical input
- * and verification fails closed (`signature_mismatch`). The one-way
- * revocation fields and the per-write bookkeeping (idempotency /
- * execution lineage stamps — the W029 exclusion discipline) are
- * deliberately NOT signed: revocation is a post-issuance mutation and
- * write bookkeeping is not substantive proof content.
+ * the SNAPSHOT's digest), the proof id, ANY aggregate dimension fact,
+ * the subject, the scope, the issuance timestamp AND the one-way
+ * revocation representation are ALL bound INTO the signature: tampering
+ * ANY signed line — including STRIPPING or RESETTING `revokedAt` /
+ * `revocationReason` on a revoked artifact — changes the rebuilt
+ * canonical input and verification fails closed (`signature_mismatch`).
+ *
+ * Revocation coverage rationale (the architect review remediation on
+ * PR #64): the presentation-side verifier is self-contained (zero
+ * tenant-state queries), so the artifact's own revocation state is the
+ * ONLY revocation signal it can evaluate — it must therefore be
+ * UNFORGEABLE, i.e. SIGNED. Revocation remains the W029 one-way field
+ * mutation; because the mutation now changes signed content, the
+ * authority RE-SEALS the record (re-signs the canonical input
+ * including the revocation lines) inside the same revocation
+ * transaction — every CURRENT presentation of a revoked proof carries
+ * a signature over its revoked state and fails closed on every
+ * surface. The per-write bookkeeping (idempotency / execution lineage
+ * stamps) stays deliberately unsigned (the W029 exclusion discipline).
  *
  * AGGREGATE DISCLOSURE ONLY (PRIV-001..003, work order §3.2): the
  * canonical facts and the durable proof record carry ONLY the
@@ -64,8 +78,14 @@ import { REPUTATION_PROOF_FRESHNESS_WINDOW_MS } from "./port.ts";
  * STRUCTURAL type: the same projection is derived at issuance (from the
  * authoritative snapshot) and rebuilt at verification (from the
  * presented proof) — identical content ⇒ identical canonical input.
+ * The one-way revocation representation (`revokedAt` /
+ * `revocationReason`) is part of the SIGNED content: the proof id
+ * (claim identity — tamper-evident on every surface), the issuance
+ * state (`none`/`none`) and, after the one-way revocation re-seal, the
+ * revoked state.
  */
 export interface ReputationProofCanonicalFacts {
+  readonly id: string;
   readonly subjectPersonId: string;
   readonly organizationScopeId: string;
   readonly snapshotId: string;
@@ -75,6 +95,8 @@ export interface ReputationProofCanonicalFacts {
   readonly issuedAt: string;
   readonly digest: string;
   readonly dimensions: readonly ReputationProofDimensionFact[];
+  readonly revokedAt: string | null;
+  readonly revocationReason: string | null;
 }
 
 /** One machine-readable shape-validation failure (field path + issue). */
@@ -106,6 +128,15 @@ function isNonNegativeInteger(value: unknown): value is number {
  * the presented facts changes the input and fails the signature check.
  * Scores serialize at the W007 fixed precision (REPUTATION_SCORE_DECIMALS)
  * so floating-point representation can never change a digest.
+ *
+ * The REVOCATION tail: `revoked-at` carries `none` for a live proof or
+ * the one-way revocation timestamp; `revocation-reason` carries `none`
+ * or the reason under standard JSON string escaping (deterministic,
+ * single-line for ANY reason text — embedded newlines can never
+ * fabricate canonical-line ambiguity). Both lines are SIGNED, so a
+ * revoked artifact whose revocation representation is stripped, reset
+ * or altered fails the signature check; the proof id line makes the
+ * claim identity tamper-evident on every surface.
  */
 export function buildReputationProofDigestInput(
   facts: ReputationProofCanonicalFacts,
@@ -116,6 +147,7 @@ export function buildReputationProofDigestInput(
   );
   return [
     "reputation-proof/v1",
+    `proof:${facts.id}`,
     `subject:${facts.subjectPersonId}`,
     `organization:${facts.organizationScopeId}`,
     `snapshot:${facts.snapshotId}`,
@@ -124,19 +156,53 @@ export function buildReputationProofDigestInput(
     `issued-at:${facts.issuedAt}`,
     `digest:${facts.digest}`,
     ...dimensionLines,
+    `revoked-at:${facts.revokedAt ?? "none"}`,
+    `revocation-reason:${facts.revocationReason === null ? "none" : JSON.stringify(facts.revocationReason)}`,
   ].join("\n");
 }
 
 /**
  * The substantive-facts projection of a (stored or presented) proof —
- * the exact input to the canonical builder. Revocation fields and
- * write bookkeeping are excluded (never signed, never shape-validated
- * as substantive content beyond their typed shape below).
+ * the exact input to the canonical builder. Includes the SIGNED
+ * revocation representation (see the discipline header: revocation is
+ * an unforgeable, one-way, tamper-evident statement on the proof
+ * surface); write bookkeeping (idempotency / execution lineage stamps)
+ * is excluded (never signed — the W029 exclusion discipline).
  */
 export function reputationProofCanonicalFacts(
   proof: ReputationProof | PresentedReputationProof,
 ): ReputationProofCanonicalFacts {
   return {
+    id: proof.id,
+    subjectPersonId: proof.subjectPersonId,
+    organizationScopeId: proof.organizationScopeId,
+    snapshotId: proof.snapshotId,
+    policyId: proof.policyId,
+    policyVersion: proof.policyVersion,
+    referenceAt: proof.referenceAt,
+    issuedAt: proof.issuedAt,
+    digest: proof.digest,
+    dimensions: proof.dimensions,
+    revokedAt: proof.revokedAt ?? null,
+    revocationReason: proof.revocationReason ?? null,
+  };
+}
+
+/**
+ * The SUBSTANTIVE (revocation-excluded) facts projection used for PAIR
+ * BINDING on the presentation-side surface: the captured/presented
+ * artifact and the authority's current sealed record of the SAME proof
+ * share these facts EXACTLY — the one-way revocation mutation (and the
+ * re-sealed envelope covering it) is the ONLY legitimate difference
+ * between a pre-revocation capture and the current record. A pair
+ * whose substantive facts differ is NOT a presentation of the same
+ * proof and fails closed (`proof_pair_mismatch`).
+ */
+export function reputationProofSubstantiveFacts(
+  proof: ReputationProof | PresentedReputationProof,
+): Omit<ReputationProofCanonicalFacts, "revokedAt" | "revocationReason"> {
+  return {
+    id: proof.id,
     subjectPersonId: proof.subjectPersonId,
     organizationScopeId: proof.organizationScopeId,
     snapshotId: proof.snapshotId,
@@ -147,6 +213,44 @@ export function reputationProofCanonicalFacts(
     digest: proof.digest,
     dimensions: proof.dimensions,
   };
+}
+
+/**
+ * The FIRST substantive field that differs between two artifacts'
+ * revocation-excluded facts (machine-readable pair-binding detail;
+ * null when the facts are identical). Dimensions are compared
+ * element-wise with full precision.
+ */
+export function firstReputationProofFactDifference(
+  a: Omit<ReputationProofCanonicalFacts, "revokedAt" | "revocationReason">,
+  b: Omit<ReputationProofCanonicalFacts, "revokedAt" | "revocationReason">,
+): string | null {
+  if (a.id !== b.id) return "id";
+  if (a.subjectPersonId !== b.subjectPersonId) return "subjectPersonId";
+  if (a.organizationScopeId !== b.organizationScopeId) return "organizationScopeId";
+  if (a.snapshotId !== b.snapshotId) return "snapshotId";
+  if (a.policyId !== b.policyId) return "policyId";
+  if (a.policyVersion !== b.policyVersion) return "policyVersion";
+  if (a.referenceAt !== b.referenceAt) return "referenceAt";
+  if (a.issuedAt !== b.issuedAt) return "issuedAt";
+  if (a.digest !== b.digest) return "digest";
+  if (a.dimensions.length !== b.dimensions.length) return "dimensions";
+  for (let i = 0; i < a.dimensions.length; i += 1) {
+    const da = a.dimensions[i];
+    const db = b.dimensions[i];
+    if (da === undefined || db === undefined) return `dimensions[${i}]`;
+    if (
+      da.dimension !== db.dimension ||
+      da.score !== db.score ||
+      da.capped !== db.capped ||
+      da.inputCount !== db.inputCount ||
+      da.verifiedInputCount !== db.verifiedInputCount ||
+      da.indicatedInputCount !== db.indicatedInputCount
+    ) {
+      return `dimensions[${i}]`;
+    }
+  }
+  return null;
 }
 
 /**

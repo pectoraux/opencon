@@ -975,9 +975,21 @@ export interface ApiVerifyReputationProofInput {
 /**
  * Inputs to verify a PRESENTED, self-contained proof artifact
  * (NET-W031 — the portable path: no tenant state is queried).
+ *
+ * The PR #64 remediation pair contract: the caller presents BOTH the
+ * holder's captured artifact (`proof`) AND the authority's CURRENT
+ * sealed record of the same proof (`currentProof` — obtained through
+ * the existing guarded presentation-read route immediately before
+ * verifying; a separate, explicit read, never a lookup on this path).
+ * The current record's SIGNED one-way revocation state governs the
+ * portable verdict: a captured pre-revocation artifact can never
+ * return `verified` once the authoritative proof is revoked.
  */
 export interface ApiVerifyPresentedReputationProofInput {
+  /** The holder's presented/captured portable artifact (untrusted JSON). */
   readonly proof: ApiReputationProofView;
+  /** The authority's CURRENT sealed record of the same proof. */
+  readonly currentProof: ApiReputationProofView;
   readonly evaluatedAt: string;
 }
 

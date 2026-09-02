@@ -1534,11 +1534,17 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
     }
 
     // POST /api/reputation/proofs/presented-verification — verify a
-    // PRESENTED, self-contained proof artifact (protected; guard
+    // PRESENTED, self-contained proof artifact PAIR (protected; guard
     // action reputationProof.verify; the PORTABLE path — no
-    // tenant-scoped state is queried; deterministic + fail-closed with
-    // machine-readable reasons; the EXACT match runs BEFORE the :id
-    // routes so the path can never be captured as an :id).
+    // tenant-scoped state is queried: the caller supplies BOTH the
+    // holder's captured artifact and the authority's CURRENT sealed
+    // record of the same proof, obtained via the existing guarded
+    // presentation-read route; the current record's SIGNED one-way
+    // revocation state governs, so a pre-revocation capture can never
+    // return `verified` once the proof is revoked; deterministic +
+    // fail-closed with machine-readable reasons; the EXACT match runs
+    // BEFORE the :id routes so the path can never be captured as an
+    // :id).
     if (
       path === "/api/reputation/proofs/presented-verification" &&
       method === "POST" &&
@@ -7239,15 +7245,17 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
   }
 
   /**
-   * Parse the presented-proof verification body. The presented artifact
-   * is UNTRUSTED JSON: the parser only checks the REQUEST shape (a
-   * `proof` object + the explicit `evaluatedAt`) and normalizes runtime
-   * types so untyped JSON can cross the typed boundary — the DOMAIN
-   * shape validator + signature check are the authority on malformed
-   * and tampered artifacts, and every substituted sentinel fails
-   * closed downstream ("" → not_a_nonempty_string / not_hex; -1 →
-   * negative; a non-boolean capped parses as the claim false, which the
-   * signature over the canonical input still binds).
+   * Parse the presented-proof verification body. BOTH artifacts (the
+   * holder's presented/captured copy `proof` AND the authority's
+   * CURRENT sealed record `currentProof`) are UNTRUSTED JSON: the
+   * parser only checks the REQUEST shape (a `proof` object + a
+   * `currentProof` object + the explicit `evaluatedAt`) and normalizes
+   * runtime types so untyped JSON can cross the typed boundary — the
+   * DOMAIN shape validator + signature checks are the authority on
+   * malformed and tampered artifacts, and every substituted sentinel
+   * fails closed downstream ("" → not_a_nonempty_string / not_hex;
+   * -1 → negative; a non-boolean capped parses as the claim false,
+   * which the signature over the canonical input still binds).
    */
   function parseVerifyPresentedReputationProofInput(
     body: unknown,
@@ -7255,10 +7263,19 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
     const obj = requireBodyObject(body);
     const proof = obj.proof;
     if (!proof || typeof proof !== "object" || Array.isArray(proof)) {
-      throw apiValidationError('field "proof" must be a JSON object (the presented proof artifact)');
+      throw apiValidationError(
+        'field "proof" must be a JSON object (the presented proof artifact)',
+      );
+    }
+    const currentProof = obj.currentProof;
+    if (!currentProof || typeof currentProof !== "object" || Array.isArray(currentProof)) {
+      throw apiValidationError(
+        'field "currentProof" must be a JSON object (the authority\'s current sealed record of the same proof — fetch it via the /api/reputation/proofs/:id/read route before verifying)',
+      );
     }
     return {
       proof: parsePresentedReputationProofView(proof as Record<string, unknown>),
+      currentProof: parsePresentedReputationProofView(currentProof as Record<string, unknown>),
       evaluatedAt: strField(obj, "evaluatedAt"),
     };
   }

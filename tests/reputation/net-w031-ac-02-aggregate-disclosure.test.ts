@@ -103,19 +103,43 @@ describe("NET-W031-AC-02 aggregate disclosure containment", () => {
       reputationProofCanonicalFacts(proof),
     );
     const lines = canonical.split("\n");
-    // The header + the seven fixed fact lines + exactly 8 dimension lines.
-    expect(lines).toHaveLength(16);
+    // The header + the proof-id line + the seven fixed fact lines +
+    // exactly 8 dimension lines + the two SIGNED revocation lines
+    // (the PR #64 remediation: revoked-at/revocation-reason are part
+    // of the signed content — `none`/`none` for a live proof).
+    expect(lines).toHaveLength(19);
     expect(lines[0]).toBe("reputation-proof/v1");
-    expect(lines[1]).toBe(`subject:${harness.personId}`);
-    expect(lines[2]).toBe(`organization:${harness.organizationScopeId}`);
-    expect(lines[3]).toBe(`snapshot:${snapshot.id}`);
-    expect(lines[4]).toBe(`policy:${snapshot.policyId}:1`);
-    expect(lines[5]).toBe(`reference-at:${snapshot.referenceAt}`);
-    expect(lines[6]).toBe(`issued-at:${proof.issuedAt}`);
-    expect(lines[7]).toBe(`digest:${snapshot.digest}`);
-    for (let i = 8; i < 16; i += 1) {
+    expect(lines[1]).toBe(`proof:${proof.id}`);
+    expect(lines[2]).toBe(`subject:${harness.personId}`);
+    expect(lines[3]).toBe(`organization:${harness.organizationScopeId}`);
+    expect(lines[4]).toBe(`snapshot:${snapshot.id}`);
+    expect(lines[5]).toBe(`policy:${snapshot.policyId}:1`);
+    expect(lines[6]).toBe(`reference-at:${snapshot.referenceAt}`);
+    expect(lines[7]).toBe(`issued-at:${proof.issuedAt}`);
+    expect(lines[8]).toBe(`digest:${snapshot.digest}`);
+    for (let i = 9; i < 17; i += 1) {
       expect(lines[i]).toMatch(/^dimension:[a-z_]+:[0-9]+\.[0-9]{6}:(true|false):[0-9]+:[0-9]+:[0-9]+$/);
     }
+    expect(lines[17]).toBe("revoked-at:none");
+    expect(lines[18]).toBe("revocation-reason:none");
+    // Exactly the sanctioned line prefixes — closed set.
+    const prefixes = new Set(lines.map((line) => line.split(":")[0] ?? ""));
+    expect([...prefixes].sort()).toEqual(
+      [
+        "reputation-proof/v1",
+        "proof",
+        "subject",
+        "organization",
+        "snapshot",
+        "policy",
+        "reference-at",
+        "issued-at",
+        "digest",
+        "dimension",
+        "revoked-at",
+        "revocation-reason",
+      ].sort(),
+    );
     // No upstream evidence/input ids appear anywhere in the input.
     const ctx = actorCtx(harness, "ac02-canonical-upstream");
     const inputs = await harness.runtime.reputationInputService.listInputs(

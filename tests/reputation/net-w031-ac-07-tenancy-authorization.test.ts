@@ -172,7 +172,10 @@ describe("NET-W031-AC-07 tenancy + authorization", () => {
           "x-auth-provider-kind": "internal",
         },
         body: JSON.stringify({
+          // The PR #64 pair protocol over HTTP: the holder's captured
+          // artifact + the CURRENT sealed record (just re-read).
           proof: readProof,
+          currentProof: readProof,
           evaluatedAt: freshAt({ issuedAt: new Date().toISOString() }),
         }),
       },
@@ -181,6 +184,10 @@ describe("NET-W031-AC-07 tenancy + authorization", () => {
     const presentedVerdict = (await presentedResponse.json()) as { valid: boolean };
     expect(presentedVerdict.valid).toBe(true);
 
+    // THE PR #64 REMEDIATION CASE over HTTP: capture the artifact, then
+    // revoke the proof — the CAPTURED copy can no longer return
+    // `verified` when paired with the current sealed record.
+    const captured = JSON.parse(JSON.stringify(readProof)) as Record<string, unknown>;
     const revokeResponse = await fetch(
       `${BASE}:${harness.runtime.api.port}/api/reputation/proofs/${issued.proof.id}/revocation`,
       {
@@ -200,6 +207,46 @@ describe("NET-W031-AC-07 tenancy + authorization", () => {
     expect(revokeResponse.status).toBe(200);
     const revoked = (await revokeResponse.json()) as { revokedAt: string | null };
     expect(revoked.revokedAt).not.toBeNull();
+
+    // Re-read the CURRENT sealed record; the captured pre-revocation
+    // copy paired with it fails closed.
+    const currentResponse = await fetch(
+      `${BASE}:${harness.runtime.api.port}/api/reputation/proofs/${issued.proof.id}/read`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-auth-subject-id": harness.subjectId,
+          "x-auth-provider-kind": "internal",
+        },
+        body: JSON.stringify({ organizationScopeId: harness.organizationScopeId }),
+      },
+    );
+    expect(currentResponse.status).toBe(200);
+    const currentProof = await currentResponse.json();
+    const postRevocationResponse = await fetch(
+      `${BASE}:${harness.runtime.api.port}/api/reputation/proofs/presented-verification`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-auth-subject-id": harness.subjectId,
+          "x-auth-provider-kind": "internal",
+        },
+        body: JSON.stringify({
+          proof: captured,
+          currentProof,
+          evaluatedAt: freshAt({ issuedAt: new Date().toISOString() }),
+        }),
+      },
+    );
+    expect(postRevocationResponse.status).toBe(200);
+    const postRevocationVerdict = (await postRevocationResponse.json()) as {
+      valid: boolean;
+      reason: string;
+    };
+    expect(postRevocationVerdict.valid).toBe(false);
+    expect(postRevocationVerdict.reason).toBe("proof_revoked");
   });
 
   test("cross-tenant reads are INDISTINGUISHABLE from nonexistent ids at the service surface (no existence oracle)", async () => {
@@ -335,6 +382,27 @@ describe("NET-W031-AC-07 tenancy + authorization", () => {
       },
     );
     expect(response.status).toBe(400);
+    // The pair protocol REQUIRES the current sealed record — its
+    // absence is a validation failure with a precise message (the PR
+    // #64 remediation contract).
+    const missingCurrent = await fetch(
+      `${BASE}:${harness.runtime.api.port}/api/reputation/proofs/presented-verification`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-auth-subject-id": harness.subjectId,
+          "x-auth-provider-kind": "internal",
+        },
+        body: JSON.stringify({
+          proof: JSON.parse(JSON.stringify(proof)) as Record<string, unknown>,
+          evaluatedAt: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    );
+    expect(missingCurrent.status).toBe(400);
+    const error = (await missingCurrent.json()) as { message: string };
+    expect(error.message).toContain("currentProof");
     // A malformed evaluatedAt on the by-id route is likewise a
     // validation failure (never a silent accept).
     const badEvaluated = await fetch(

@@ -116,6 +116,10 @@ describe("NET-W031-AC-09 architecture / out-of-scope", () => {
       "algorithm_key_reference_mismatch",
       "signature_mismatch",
       "proof_stale",
+      // The PR #64 remediation: a presented artifact must be BOUND to
+      // the authority's current sealed record — a mismatched pair
+      // fails closed.
+      "proof_pair_mismatch",
     ]);
     // The REUSED W007 dimension vocabulary is unchanged (extend,
     // never rewrite — proofs disclose exactly the frozen eight).

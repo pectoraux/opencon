@@ -530,13 +530,23 @@ export interface ReputationSnapshotService {
 //  - DETERMINISTIC, fail-closed verification with MACHINE-READABLE
 //    reasons from a closed vocabulary, in TWO forms: authority-side
 //    (by id, over the stored record) and PRESENTATION-side (over a
-//    presented artifact, WITHOUT querying tenant-scoped state — the
-//    portable path; work order §3.3). Both are non-mutating and
-//    non-auditing derived decisions;
+//    presented artifact PAIR — the holder's captured/presented
+//    artifact BOUND to the authority's CURRENT sealed record of the
+//    same proof — WITHOUT querying tenant-scoped state; the portable
+//    path; work order §3.3). Both are non-mutating and non-auditing
+//    derived decisions;
 //  - the ONE-WAY revocation discipline (the W029 precedent: a field
 //    mutation, never a lifecycle transition; /workflows is not
-//    extended) and VERIFICATION-TIME staleness over the issuance
-//    timestamp (never a stored lifecycle state; work order §5).
+//    extended) with the revocation representation SIGNED INTO the
+//    canonical input (the PR #64 architect-review remediation): the
+//    authority RE-SEALS the record inside the revocation transaction,
+//    so every CURRENT presentation of a revoked proof carries an
+//    unforgeable revoked state, a stripped/reset revocation
+//    representation fails the signature check, and a pre-revocation
+//    capture paired with the current record fails closed. A revoked
+//    proof NEVER verifies again. Staleness remains a VERIFICATION-TIME
+//    derivation over the issuance timestamp (never a stored lifecycle
+//    state; work order §5).
 //
 // Proof issuance composes the W029 machinery through the NEUTRAL
 // `ReputationProofSigner` / `ReputationProofVerifier` /
@@ -591,9 +601,17 @@ export interface ReputationProofDimensionFact {
  * The SUBSTANTIVE, portable proof artifact — everything a verifier
  * needs (identity + lineage + aggregate facts + the signed envelope),
  * nothing it must not see. This is the SELF-CONTAINED presentation
- * shape: a stored `ReputationProof` IS a `PresentedReputationProof`
- * (the record adds only write bookkeeping, which is excluded from
- * signing and from verification semantics).
+ * shape: a stored `ReputationProof` IS a
+ * `PresentedReputationProof` (the record adds only write bookkeeping,
+ * which is excluded from signing and from verification semantics).
+ *
+ * `signature` covers the canonical input OVER THE ARTIFACT'S OWN
+ * STATE, including its revocation representation (`revokedAt` /
+ * `revocationReason` — signed since the PR #64 remediation): the
+ * issuance seal covers the live state, the revocation re-seal covers
+ * the revoked state. Stripping, resetting or altering the revocation
+ * representation of a sealed artifact therefore fails the signature
+ * check on every surface.
  */
 export interface PresentedReputationProof {
   readonly id: string;
@@ -630,15 +648,20 @@ export interface PresentedReputationProof {
  *    REP-002: no score-altering input exists on the proof surface);
  *  - the record is IMMUTABLE after issuance except the ONE-WAY
  *    revocation fields (`revokedAt`/`revocationReason` — the W029/W028
- *    closure precedent; never a lifecycle transition); re-issuance
- *    produces a NEW proof;
+ *    closure precedent; never a lifecycle transition) and the RE-SEALED
+ *    envelope covering them (the authority re-signs the canonical
+ *    input including the signed revocation representation inside the
+ *    revocation transaction — the substantive facts never rewrite);
+ *    re-issuance produces a NEW proof;
  *  - `algorithm`/`keyReference` come from the composed W029 versioned
  *    signing machinery and are validated against its CLOSED
- *    vocabularies at issuance and at verification (fail closed);
+ *    vocabularies at issuance, at revocation re-seal and at
+ *    verification (fail closed);
  *  - `signature` covers the "reputation-proof/v1" canonical digest
  *    input over the canonical facts (see proof-input.ts): tampering the
- *    subject, the scope, ANY lineage field, ANY aggregate dimension
- *    fact or the issuance timestamp invalidates it;
+ *    proof id, the subject, the scope, ANY lineage field, ANY aggregate
+ *    dimension fact, the issuance timestamp OR the revocation
+ *    representation (strip/reset/alter) invalidates it;
  *  - staleness is NOT a stored state: it is derived at verification
  *    time over `issuedAt` within the frozen freshness window.
  */
@@ -682,7 +705,10 @@ export interface RevokeReputationProofInput {
  * reasons). The algorithm/key-reference/signature reasons mirror the
  * W029 vocabulary semantics — composed machinery, same failure
  * semantics; the proof-specific reasons cover revocation, malformed
- * shape and staleness.
+ * shape, staleness and the presentation-pair binding (the PR #64
+ * remediation: a presented artifact must be bound to the authority's
+ * CURRENT sealed record of the same proof — a mismatched pair is not
+ * a presentation of any single claim and fails closed).
  */
 export const REPUTATION_PROOF_VERIFICATION_REASONS = [
   "verified",
@@ -693,13 +719,21 @@ export const REPUTATION_PROOF_VERIFICATION_REASONS = [
   "algorithm_key_reference_mismatch",
   "signature_mismatch",
   "proof_stale",
+  "proof_pair_mismatch",
 ] as const;
 
 export type ReputationProofVerificationReason =
   (typeof REPUTATION_PROOF_VERIFICATION_REASONS)[number];
 
-/** The closed check-name vocabulary for per-check verification detail. */
-export type ReputationProofCheckName =
+/**
+ * The per-artifact check names (the single-artifact pipeline gates, in
+ * fixed order). The presentation-side PAIR surface reports these
+ * names QUALIFIED with the artifact they evaluated (`presented:` /
+ * `current:` prefixes) plus the leading `pair_binding` gate, so a
+ * machine consumer can pinpoint exactly WHICH artifact failed WHICH
+ * check.
+ */
+export type ReputationProofBaseCheckName =
   | "revocation"
   | "proof_shape"
   | "algorithm_vocabulary"
@@ -707,6 +741,13 @@ export type ReputationProofCheckName =
   | "algorithm_key_reference_pairing"
   | "signature"
   | "staleness";
+
+/** The closed check-name vocabulary (base + pair-qualified names). */
+export type ReputationProofCheckName =
+  | ReputationProofBaseCheckName
+  | "pair_binding"
+  | `presented:${ReputationProofBaseCheckName}`
+  | `current:${ReputationProofBaseCheckName}`;
 
 /**
  * One verification check outcome (deterministic order; no aggregate
@@ -743,6 +784,38 @@ export interface VerifyReputationProofInput {
    * The EXPLICIT staleness evaluation timestamp (REQUIRED — ISO-8601;
    * determinism: no wall clock anywhere on the verification path).
    */
+  readonly evaluatedAt: string;
+}
+
+/**
+ * Presentation-side verification input (the PORTABLE path — the PR #64
+ * remediation contract): the PRESENTED artifact (typically the
+ * holder's captured copy) PAIRED with the authority's CURRENT sealed
+ * record of the SAME proof (obtained through the existing guarded
+ * presentation read — `getProof`; a SEPARATE, explicit read, never a
+ * lookup on the verification path itself). The pair travels together;
+ * verification is a PURE derivation over the presented data with ZERO
+ * tenant-state queries.
+ *
+ * Soundness of the portable revocation contract: the current record's
+ * SIGNED one-way revocation state is authoritative — once a proof is
+ * revoked, the only current record obtainable carries the re-sealed
+ * revoked state, so the captured artifact can NEVER subsequently
+ * return `verified` through this surface (a revoked proof never
+ * verifies again). The presented artifact's own revocation
+ * representation is likewise SIGNED — stripped/reset copies fail the
+ * signature check.
+ */
+export interface VerifyPresentedReputationProofInput {
+  /** The holder's presented/captured portable artifact (untrusted). */
+  readonly presented: PresentedReputationProof;
+  /**
+   * The authority's CURRENT sealed record of the same proof — the
+   * revocation-governing half of the pair (its own signature covers its
+   * own state; the pair binding requires identical substantive facts).
+   */
+  readonly currentProof: PresentedReputationProof;
+  /** The EXPLICIT staleness evaluation timestamp (determinism). */
   readonly evaluatedAt: string;
 }
 
@@ -854,23 +927,39 @@ export interface ReputationProofService {
   ): Promise<ReputationProofVerification>;
   /**
    * PRESENTATION-side deterministic verification (the PORTABLE path;
-   * guard action `reputationProof.verify`): verifies a PRESENTED,
-   * self-contained proof artifact WITHOUT querying ANY tenant-scoped
-   * state (no store reads, no mutations, no audit). The same fixed
-   * fail-closed pipeline over the presented facts; revocation is
-   * evaluated from the artifact's own one-way field.
+   * guard action `reputationProof.verify`): verifies a PRESENTED
+   * artifact PAIR — the holder's captured artifact BOUND to the
+   * authority's CURRENT sealed record of the same proof — WITHOUT
+   * querying ANY tenant-scoped state (no store reads, no mutations,
+   * no audit; the current record is an explicit PRESENTED input, never
+   * a verification-time lookup). The fixed fail-closed pipeline: the
+   * PRESENTED artifact's own gates (its SIGNED revocation
+   * representation included — stripped/reset copies fail its signature
+   * check) → PAIR BINDING (identical substantive facts) → the CURRENT
+   * record's own gates — including its SIGNED one-way revocation
+   * state, which governs: a pre-revocation capture of a revoked proof
+   * fails closed `proof_revoked`. Machine-readable checks are
+   * pair-qualified (`presented:*`, `pair_binding`, `current:*`).
+   * Non-mutating, non-auditing.
    */
   verifyPresentedProof(
     execution: ExecutionContext,
-    presented: PresentedReputationProof,
-    evaluatedAt: string,
+    input: VerifyPresentedReputationProofInput,
   ): Promise<ReputationProofVerification>;
   /**
    * ONE-WAY revocation (guard action `reputationProof.revoke`; the
-   * W029 precedent — a field mutation, never a lifecycle transition).
-   * Idempotent: revoking an already-revoked proof returns it
-   * unchanged. Audited atomically. A revoked proof NEVER verifies
-   * again.
+   * W029 precedent — a field mutation, never a lifecycle transition):
+   * sets the revocation fields AND RE-SEALS the record — the composed
+   * signer re-signs the canonical input INCLUDING the signed revocation
+   * representation inside the same authoritative transaction, so the
+   * stored record (and every current presentation of it) carries an
+   * unforgeable revoked state. The substantive facts never rewrite; a
+   * signer or audit failure rolls the ENTIRE revocation back (the
+   * proof stays live and the retry succeeds). Idempotent: revoking an
+   * already-revoked proof returns it UNCHANGED (no second re-seal, no
+   * second audit event). Audited atomically. A revoked proof NEVER
+   * verifies again — on the authority surface (by id) and on the
+   * portable surface (any capture paired with the current record).
    */
   revokeProof(
     execution: ExecutionContext,

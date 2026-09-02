@@ -309,16 +309,33 @@ export async function verifyStored(
   );
 }
 
-/** Verify a PRESENTED artifact at `evaluatedAt` (presentation-side). */
+/**
+ * Verify a PRESENTED artifact at `evaluatedAt` (presentation-side — the
+ * PR #64 pair protocol). By default this models the VERIFIER'S
+ * PROTOCOL exactly: the authority's CURRENT sealed record of the same
+ * proof is fetched through the guarded presentation read (getProof)
+ * and supplied as the revocation-governing half of the pair — so a
+ * pre-revocation captured artifact can never return `verified` once
+ * the authoritative proof is revoked. Pass `opts.current` to pin an
+ * explicit current record instead (e.g. one fetched before a store
+ * deletion, or a tampered copy).
+ */
 export async function verifyPresented(
   harness: NetW031Harness,
   presented: PresentedReputationProof,
   evaluatedAt: string,
+  opts: { readonly current?: PresentedReputationProof } = {},
 ) {
+  const currentProof =
+    opts.current ??
+    (await harness.runtime.reputationProofService.getProof(
+      actorCtx(harness, "w031-verify-presented-read"),
+      presented.organizationScopeId,
+      presented.id,
+    ));
   return harness.runtime.reputationProofService.verifyPresentedProof(
     actorCtx(harness, "w031-verify-presented"),
-    presented,
-    evaluatedAt,
+    { presented, currentProof, evaluatedAt },
   );
 }
 

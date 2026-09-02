@@ -41,9 +41,11 @@
  *    FAIL-CLOSED with machine-readable reasons from the closed
  *    vocabulary — in fixed order: revocation → shape → algorithm
  *    vocabulary → key-reference vocabulary → pairing → signature →
- *    staleness. The presentation-side surface verifies a
- *    self-contained artifact WITHOUT querying tenant-scoped state
- *    (work order §3.3);
+ *    staleness. The presentation-side surface verifies a PRESENTED
+ *    PAIR — the holder's captured artifact BOUND to the authority's
+ *    CURRENT sealed record — WITHOUT querying tenant-scoped state
+ *    (work order §3.3; the PR #64 remediation: the current record is
+ *    an explicit INPUT, never a verification-time lookup);
  *  - material mutations follow the established discipline: composite
  *    idempotency (`reputation_proof:{scope}:{subject}:{key}` — the
  *    W007/W029 precedent), ONE authoritative transaction (the
@@ -52,9 +54,16 @@
  *    and the canonical input is signed INSIDE that transaction;
  *  - revocation is ONE-WAY (the W029/W028 closure precedent — a field
  *    mutation, never a lifecycle transition; /workflows is not
- *    extended); a revoked proof NEVER verifies again. Staleness is a
- *    verification-time derivation over the issuance timestamp — never
- *    a stored lifecycle state (work order §5).
+ *    extended) AND RE-SEALED: the revocation representation is SIGNED
+ *    content (the PR #64 architect-review remediation), so the
+ *    authority re-signs the canonical input including the revocation
+ *    lines inside the revocation transaction — a revoked proof NEVER
+ *    verifies again on ANY surface: authority-side (by id), portable
+ *    (any capture paired with the current sealed record), and a
+ *    stripped/reset revocation representation fails the signature
+ *    check. Staleness is a verification-time derivation over the
+ *    issuance timestamp — never a stored lifecycle state (work order
+ *    §5).
  *
  * PostgreSQL remains THE authoritative state: proofs DERIVE from
  * recorded snapshots; issuance mutates NO reputation authority state
@@ -94,8 +103,10 @@ import type {
 import { REPUTATION_PROOF_RECORD_FORMAT } from "./port.ts";
 import {
   buildReputationProofDigestInput,
+  firstReputationProofFactDifference,
   isReputationProofFresh,
   reputationProofCanonicalFacts,
+  reputationProofSubstantiveFacts,
   validateReputationProofShape,
 } from "./proof-input.ts";
 
@@ -182,6 +193,19 @@ export function createReputationProofService(
       reason,
       checks: Object.freeze([...checks]),
     });
+  }
+
+  /** Re-tag a single-artifact verdict's checks with a pair prefix. */
+  function qualified(
+    result: ReputationProofVerification,
+    prefix: "presented" | "current",
+  ): ReputationProofCheck[] {
+    return result.checks.map((c) => ({
+      check: `${prefix}:${c.check}` as ReputationProofCheckName,
+      subject: c.subject,
+      passed: c.passed,
+      reason: c.reason,
+    }));
   }
 
   /**
@@ -408,7 +432,9 @@ export function createReputationProofService(
           // caller-asserted) and sign the canonical input ---------------
           const dimensions = deriveDimensionFacts(snapshot);
           const issuedAt = new Date().toISOString();
+          const proofId = randomUUID();
           const canonicalInput = buildReputationProofDigestInput({
+            id: proofId,
             subjectPersonId: snapshot.subjectPersonId,
             organizationScopeId: snapshot.organizationScopeId,
             snapshotId: snapshot.id,
@@ -418,6 +444,11 @@ export function createReputationProofService(
             issuedAt,
             digest: snapshot.digest,
             dimensions,
+            // The ISSUANCE seal covers the live state: the signed
+            // revocation representation is none/none (the PR #64
+            // remediation — the revocation fields are unforgeable).
+            revokedAt: null,
+            revocationReason: null,
           });
           // The signer's declared (algorithm, keyReference) build the
           // canonical trust envelope; the returned triple MUST match
@@ -426,7 +457,7 @@ export function createReputationProofService(
           assertSigningVocabulary(signed);
 
           const record: ReputationProof = Object.freeze({
-            id: randomUUID(),
+            id: proofId,
             organizationScopeId: snapshot.organizationScopeId,
             subjectPersonId: snapshot.subjectPersonId,
             snapshotId: snapshot.id,
@@ -494,16 +525,71 @@ export function createReputationProofService(
     async verifyProof(_execution, input) {
       validateEvaluatedAt(input.evaluatedAt);
       // Authority-side: the STORED record carries the CURRENT one-way
-      // revocation state (a revoked proof never verifies again).
+      // revocation state (re-sealed at revocation — a revoked proof
+      // never verifies again).
       const proof = await loadScoped(input.organizationScopeId, input.proofId);
       return deriveVerification(proof, input.evaluatedAt);
     },
 
-    async verifyPresentedProof(_execution, presented, evaluatedAt) {
-      validateEvaluatedAt(evaluatedAt);
-      // Presentation-side: the PRESENTED artifact is the ONLY input —
-      // no store reads, no mutations, no audit (the portable path).
-      return deriveVerification(presented, evaluatedAt);
+    async verifyPresentedProof(_execution, input) {
+      validateEvaluatedAt(input.evaluatedAt);
+      // Presentation-side (the PORTABLE path — the PR #64 remediation):
+      // the verification act takes the PRESENTED PAIR — the holder's
+      // captured artifact + the authority's CURRENT sealed record of
+      // the same proof (an explicit INPUT, never a lookup: no store
+      // reads, no mutations, no audit on this path). Fixed pipeline:
+      // the presented artifact's full single-artifact pipeline (its
+      // own SIGNED revocation representation included — a
+      // stripped/reset copy fails its signature check) → PAIR BINDING
+      // (identical substantive facts) → the current record's full
+      // single-artifact pipeline. The current record's SIGNED one-way
+      // revocation state is AUTHORITATIVE — a pre-revocation capture
+      // of a revoked proof passes its own (historical) gates and then
+      // fails closed `proof_revoked` on the current record's gate (a
+      // revoked proof never verifies again, on every surface).
+      const presentedId =
+        typeof input.presented?.id === "string" && input.presented.id.length > 0
+          ? input.presented.id
+          : "unknown";
+      const checks: ReputationProofCheck[] = [];
+
+      // 1. The PRESENTED artifact's own full pipeline (its SIGNED
+      //    revocation representation included — a stripped/reset copy
+      //    fails its signature check; a revoked presented artifact
+      //    fails its own revocation gate first).
+      const presentedResult = await deriveVerification(input.presented, input.evaluatedAt);
+      checks.push(...qualified(presentedResult, "presented"));
+      if (!presentedResult.valid) {
+        return verdict(presentedId, false, presentedResult.reason, checks);
+      }
+
+      // 2. Pair binding — the two artifacts must be presentations of
+      //    the SAME proof: identical substantive facts (everything
+      //    EXCEPT the one-way revocation representation, which is the
+      //    only legitimate difference between a pre-revocation capture
+      //    and the current sealed record).
+      const difference = firstReputationProofFactDifference(
+        reputationProofSubstantiveFacts(input.presented),
+        reputationProofSubstantiveFacts(input.currentProof),
+      );
+      if (difference !== null) {
+        checks.push(check("pair_binding", difference, false, "proof_pair_mismatch"));
+        return verdict(presentedId, false, "proof_pair_mismatch", checks);
+      }
+      checks.push(check("pair_binding", null, true, "verified"));
+
+      // 3. The CURRENT record's own full pipeline — its revocation
+      //    gate fires `proof_revoked` for the current sealed state of
+      //    a revoked proof (even when the presented capture predates
+      //    the revocation); a tampered/stripped current record fails
+      //    its own gates the same way.
+      const currentResult = await deriveVerification(input.currentProof, input.evaluatedAt);
+      checks.push(...qualified(currentResult, "current"));
+      if (!currentResult.valid) {
+        return verdict(presentedId, false, currentResult.reason, checks);
+      }
+
+      return verdict(presentedId, true, "verified", checks);
     },
 
     async revokeProof(execution, input) {
@@ -550,14 +636,38 @@ export function createReputationProofService(
                 );
               }
               // ONE-WAY: an already-revoked proof is returned unchanged
-              // (no second mutation, no second audit event).
+              // (no second mutation, no second re-seal, no second audit
+              // event).
               if (found.revokedAt !== null) {
                 return found;
               }
+              // ---- RE-SEAL (the PR #64 remediation) -------------------
+              // The one-way field mutation changes SIGNED content, so
+              // the authority re-seals the record: the composed signer
+              // re-signs the canonical input INCLUDING the revocation
+              // representation, inside the SAME transaction. The
+              // substantive facts never rewrite; the stored record (and
+              // every current presentation of it) carries an
+              // unforgeable revoked state. A signer failure rolls the
+              // ENTIRE revocation back (the proof stays live; the
+              // retry succeeds).
+              const revokedAt = new Date().toISOString();
+              const revocationReason = input.reason;
+              const sealedInput = buildReputationProofDigestInput({
+                ...reputationProofCanonicalFacts(found),
+                revokedAt,
+                revocationReason,
+              });
+              const sealed = await signer.signProof(sealedInput);
+              assertSigningVocabulary(sealed);
+
               const revokedRecord: ReputationProof = Object.freeze({
                 ...found,
-                revokedAt: new Date().toISOString(),
-                revocationReason: input.reason,
+                revokedAt,
+                revocationReason,
+                algorithm: sealed.algorithm,
+                keyReference: sealed.keyReference,
+                signature: sealed.signature,
               });
               await proofRepository.saveWithinTx(revokedRecord, tx);
               const buffer = auditWriter.forTransaction(tx);

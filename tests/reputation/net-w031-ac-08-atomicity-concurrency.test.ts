@@ -309,7 +309,7 @@ describe("NET-W031-AC-08 atomicity/idempotency/concurrency", () => {
     expect((await verifyStored(harness, proof.id, freshAt(proof))).reason).toBe("proof_revoked");
 
     // Re-revocation: the record is returned UNCHANGED (no second
-    // mutation, no second audit event).
+    // mutation, no second re-seal, no second audit event).
     const reRevoked = await harness.runtime.reputationProofService.revokeProof(ctx, {
       organizationScopeId: harness.organizationScopeId,
       proofId: proof.id,
@@ -324,6 +324,101 @@ describe("NET-W031-AC-08 atomicity/idempotency/concurrency", () => {
     expect(events).toHaveLength(1);
     const event = events[0] as { metadata: Record<string, unknown> };
     expect(event.metadata.reason).toBe("ac08 revocation reason");
+  });
+
+  test("REVOCATION RE-SEALS the record: the envelope covers the SIGNED revocation state, the substantive facts never rewrite (the PR #64 remediation)", async () => {
+    const ctx = actorCtx(harness, "ac08-reseal");
+    const { proof } = await issueProof(harness, { snapshotId: snapshot.id });
+
+    const revoked = await harness.runtime.reputationProofService.revokeProof(ctx, {
+      organizationScopeId: harness.organizationScopeId,
+      proofId: proof.id,
+      reason: "ac08 re-seal reason",
+      idempotencyKey: key("ac08-reseal"),
+    });
+
+    // The re-sealed envelope differs from the issuance seal...
+    expect(revoked.signature).not.toBe(proof.signature);
+    // ...while the (declared) algorithm/key reference and every
+    // substantive fact are byte-identical — the one-way mutation
+    // touches ONLY the revocation fields + the seal covering them.
+    expect(revoked.algorithm).toBe(proof.algorithm);
+    expect(revoked.keyReference).toBe(proof.keyReference);
+    expect(revoked.issuedAt).toBe(proof.issuedAt);
+    expect(revoked.subjectPersonId).toBe(proof.subjectPersonId);
+    expect(revoked.organizationScopeId).toBe(proof.organizationScopeId);
+    expect(revoked.snapshotId).toBe(proof.snapshotId);
+    expect(revoked.digest).toBe(proof.digest);
+    expect(revoked.dimensions).toEqual(proof.dimensions);
+
+    // The re-sealed record is INTERNALLY consistent: its own
+    // presentation (the current record paired with itself) fails
+    // closed at the revocation gate, and the re-seal is one-way —
+    // the pre-revocation seal cannot resurrect the proof.
+    const currentPresentation = await harness.runtime.reputationProofService.verifyPresentedProof(
+      ctx,
+      {
+        presented: revoked,
+        currentProof: revoked,
+        evaluatedAt: freshAt(proof),
+      },
+    );
+    expect(currentPresentation.valid).toBe(false);
+    expect(currentPresentation.reason).toBe("proof_revoked");
+
+    // Re-revocation keeps the SAME seal (no second re-seal).
+    const reRevoked = await harness.runtime.reputationProofService.revokeProof(ctx, {
+      organizationScopeId: harness.organizationScopeId,
+      proofId: proof.id,
+      reason: "re-revoke keeps the seal",
+      idempotencyKey: key("ac08-reseal-again"),
+    });
+    expect(reRevoked.signature).toBe(revoked.signature);
+  });
+
+  test("a SIGNER failure inside the REVOCATION transaction rolls the revocation back ENTIRELY (the proof stays live and verifiable; retry succeeds)", async () => {
+    const ctx = actorCtx(harness, "ac08-revoke-signer-failure");
+    // Issue through the HEALTHY wired service...
+    const { proof } = await issueProof(harness, { snapshotId: snapshot.id });
+    expect((await verifyStored(harness, proof.id, freshAt(proof))).valid).toBe(true);
+
+    // ...then attempt the revocation through a service whose signer
+    // fails at the re-seal.
+    const service = buildService(harness, { signer: failingSigner() });
+    await expect(
+      service.revokeProof(ctx, {
+        organizationScopeId: harness.organizationScopeId,
+        proofId: proof.id,
+        reason: "ac08 signer failure at re-seal",
+        idempotencyKey: key("ac08-revoke-signer-failure"),
+      }),
+    ).rejects.toThrow("injected signer failure");
+
+    // NOTHING survived: the proof is STILL LIVE and verifiable, no
+    // revoked audit event, no idempotency consumption.
+    const stillLive = await harness.runtime.reputationProofService.getProof(
+      ctx,
+      harness.organizationScopeId,
+      proof.id,
+    );
+    expect(stillLive.revokedAt).toBeNull();
+    expect(stillLive.signature).toBe(proof.signature);
+    expect((await verifyStored(harness, proof.id, freshAt(proof))).valid).toBe(true);
+    expect(
+      await harness.runtime.auditWriter.query({ eventType: "reputation_proof.revoked" }),
+    ).toHaveLength(0);
+
+    // A RETRY through the healthy wired service succeeds (the failed
+    // attempt consumed no idempotency record) — and the re-seal lands.
+    const retried = await harness.runtime.reputationProofService.revokeProof(ctx, {
+      organizationScopeId: harness.organizationScopeId,
+      proofId: proof.id,
+      reason: "ac08 signer failure at re-seal",
+      idempotencyKey: key("ac08-revoke-signer-failure"),
+    });
+    expect(retried.revokedAt).not.toBeNull();
+    expect(retried.signature).not.toBe(proof.signature);
+    expect((await verifyStored(harness, proof.id, freshAt(proof))).reason).toBe("proof_revoked");
   });
 
   test("two CONCURRENT revocations produce exactly one revokedAt value and one audit event", async () => {
