@@ -1671,6 +1671,17 @@ export async function resolveHold(
 /**
  * Open + bond a dispute over the subject (the challenger holds
  * credits — the W010 pattern). Returns the dispute id.
+ *
+ * DETERMINISTIC FIXTURE (the PR #70 remediation — architect comment
+ * #5511352937): the challenge anchor is the subject's OWN
+ * authoritative anchor — `contribution.createdAt` /
+ * `economic_value.recordedAt`, the EXACT fields the dispute
+ * authority's subject lookup binds — read through the owning
+ * boundary. The challenge-window check [anchorAt, anchorAt +
+ * DISPUTE_CHALLENGE_WINDOW_MS] accepts the anchor itself by
+ * construction, so the fixture carries NO wall-clock call
+ * (the W034 deterministic-fixture contract: verification never
+ * depends on `Date.now()`).
  */
 export async function openBondedDisputeOn(
   harness: NetW034Harness,
@@ -1679,13 +1690,27 @@ export async function openBondedDisputeOn(
 ): Promise<string> {
   await ensureCreditsFor(harness.w010, harness.challengerPersonId, 50);
   const ctx = harness.challengerCtx("w034-dispute");
+  const subjectAnchorAt =
+    subjectType === "contribution"
+      ? (
+          await harness.runtime.contributionService.getContribution(
+            harness.operatorCtx("w034-dispute-anchor"),
+            subjectId,
+          )
+        ).createdAt
+      : (
+          await harness.runtime.economicValueService.getValue(
+            harness.operatorCtx("w034-dispute-anchor"),
+            subjectId,
+          )
+        ).recordedAt;
   const opened = await harness.runtime.disputeService.openDispute(ctx, {
     organizationScopeId: harness.organizationScopeId,
     subjectRef: { subjectType, subjectId },
     statement: "the challenged advertising delivery misstates verified value",
     reasonCodes: ["contested_verification"],
     supportingRefs: [{ kind: subjectType, id: subjectId }],
-    effectiveAt: new Date(Date.now() + 3600_000).toISOString(),
+    effectiveAt: subjectAnchorAt,
     idempotencyKey: key("w034-dispute"),
   });
   const dispute = opened.dispute;
