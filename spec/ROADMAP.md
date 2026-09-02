@@ -67,11 +67,14 @@ W019, W020, W021, W022, W023 — **COMPLETE**.
 ### Phase 8 — Decentralization
 - W029 — **COMPLETE**. PR #60 merged `cf53378e1c432dfd735e1b408010eece55d7612f`. The Phase-8 integrity layer: production signed attestations (Ed25519/ECDSA behind injected interfaces; closed versioned vocabularies; SecretProvider-only keys) + salted coverage commitments over the three authoritative record families, with deterministic fail-closed verification and PostgreSQL authority containment.
 - W030 — **COMPLETE**. PR #62 merged `1d902e2148920ddd04e2b170509184d7b585cb3e`. The Phase-8 fact-ingestion/reconciliation layer: external settlement transactions as authenticated, idempotent, append-only FACTS inside `/settlement` (neutral adapter contracts; structural adapter implementation under `/adapters`; SecretProvider-only per-provider trust material, fail-closed, no dev fallback), deterministically reconciled against the internal ledger lineage — an external fact can never mint, consume or mutate internal value (architecture-lock §14 invariant 25).
-- W031 — **CURRENT IMPLEMENTATION TARGET**. Portable reputation proofs: verifiable reputation claims without raw private records — proofs derive from the authoritative `/reputation` state through the W029 signed-attestation machinery, disclose aggregate facts only under the aggregate disclosure gate, and verify deterministically with fail-closed machine-readable reasons.
-- W032 — **PLANNED**.
+- W031 — **COMPLETE**. PR #64 merged `83f0e5b0041f6cb8c67b8d6334f08d52eaafc770`. Portable reputation proofs: verifiable reputation claims without raw private records, derived from `/reputation` through W029 signing/commitment machinery with aggregate-only disclosure, deterministic fail-closed verification, tenant-scoped issuance and self-contained presentation. Final remediation sealed revocation state into the signed canonical facts and preserved zero tenant-state lookups at presentation.
+- W032 — **COMPLETE**. PR #66 merged `a65bfdbd967ab6a606757a49538aa184f6838480`. Decentralized validation/dispute coordination inside `/disputes`: scoped validator participants, deterministic assignment and conflict exclusion, versioned count-based quorum, immutable challenge rounds/rechallenge, evidence-backed independent observations, settlement-only validator stakes, and owning-authority application. Architect review initially found an idempotent-replay ordering defect; the same PR remediated it across all audited W032 mutations, adding temporal replay regressions and mutation coverage. Final remediation head `fe2c9001753a3bacac553fed953103005e1e4b59` passed the full gate before merge.
 
 ### Phase 9 — End-to-end proof
-W033, W034, W035, W036 — **PLANNED**.
+- W033 — **CURRENT IMPLEMENTATION TARGET**. Complete contribution lifecycle: contribution → evidence → outcome → reputation → settlement → benefit.
+- W034 — **PLANNED**. Complete advertising lifecycle: advertiser → inventory/creator → measurement → Proof-of-Value → settlement.
+- W035 — **PLANNED**. Complete creator lifecycle: creator discovery → contract → UGC → disclosure → measurement → payment.
+- W036 — **PLANNED**. Complete demand/procurement/benefit lifecycle: demand → supplier → fulfillment → verified savings → benefit allocation.
 
 ## Dependency sequence
 
@@ -87,45 +90,11 @@ W014/W018/W023/W028 → W033 → W034 → W035
 W028/W033 → W036
 ```
 
-## W031 implementation contract
+## W032 merge record
 
-### Authority model
+W032 is now merged and closes the decentralized-validation layer for v1.0. The architectural interpretation of “decentralized” remains independent validation participants plus deterministic quorum/dispute coordination inside `/disputes`, not a second source of truth, blockchain, token economy, or network consensus protocol. Validators cannot directly rewrite lifecycle, reputation, evidence, or economic authority; accepted outcomes cross the owning authority's explicit mutation boundary. `/settlement` remains the sole economic authority and `/workflows` the sole lifecycle authority.
 
-```text
-/reputation internal reputation authority (W007 — UNCHANGED)
-(dimension state, authoritative inputs, snapshots, time decay)
-        ↓ neutral lookups (aggregate, opaque-reference facts only)
-/evidence W029 signed-attestation machinery (COMPOSED — no new crypto)
-(versioned algorithm/key vocabularies, SecretProvider-only keys,
- deterministic fail-closed verification)
-        ↓
-portable reputation PROOFS (derived, tenant-scoped at issuance,
- self-contained at presentation, aggregate disclosure only)
-        ↓
-verification is deterministic + fail-closed (machine-readable reasons)
-no raw private record, no cross-tenant data, no reputation transfer
-(reputation STAYS authoritative in PostgreSQL; proofs INFORM)
-```
-
-`/reputation` remains the SOLE reputation authority; W031 adds proof DERIVATION, presentation and verification only, composing the existing W029 signed-attestation machinery (the composition root is the only join). No 18th domain.
-
-### Non-negotiables
-
-1. Proofs are DERIVED views over the authoritative `/reputation` state — never a second reputation authority, never raw record transfer (PRIV-001..002).
-2. Proof issuance composes the W029 machinery: REP-004 evidence lineage via opaque references; no new signing surface, no new key-material class.
-3. Disclosure is AGGREGATE and scoped under the aggregate disclosure gate (dimension scores, grades, decayed values, evidence-reference counts) — no raw personal activity, payloads, or cross-tenant data (PRIV-003).
-4. Verification is deterministic, non-mutating, fail-closed with machine-readable reasons from a closed vocabulary.
-5. Proofs are tenant-scoped at issuance and self-contained at presentation (no existence oracles; verification never queries tenant-scoped state).
-6. Reputation remains non-purchasable (REP-002): no proof path accepts spend/wealth as reputation substance.
-7. Time decay applies at derivation (REP-003): disclosed scores are the authority's own deterministic decayed values, never presentation-side recomputations.
-8. Issuance uses composite idempotency, one authoritative transaction, transactional audit; presentation/verification mutates and audits nothing.
-9. AI, if used, is advisory only; it cannot authorize proof issuance or verification outcomes.
-10. W032+ decentralized validation and W033+ end-to-end flows remain excluded.
-11. `spec/architecture.md` and `spec/architecture-lock.md` remain unchanged.
-
-### Required evidence
-
-AC coverage for REP-003..004 + PRIV-001..003; proof-issuance round-trips over the composed W029 machinery; aggregate-disclosure containment (no raw records, no cross-tenant leakage); deterministic verification with fail-closed paths (tamper/revocation/staleness); non-purchasability containment; time-decay consistency; tenancy/authorization; idempotency/concurrency/atomicity; targeted mutation checks; `bun run verify`; architecture/authority checks; secret scan; configured PostgreSQL/Redis integration.
+The final W032 evidence record is `docs/net-w032-decentralized-validation-dispute.md` and the implementation PR is #66.
 
 ## Operating procedure
 
