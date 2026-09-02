@@ -57,6 +57,7 @@ import {
   resolveDispute,
   key,
   personCtx,
+  W035_RIGHTS_EVALUATION_AS_OF,
   type NetW035Harness,
   type CreatorScenario,
 } from "./_net-w035-harness.ts";
@@ -523,7 +524,9 @@ describe("NET-W035-AC-09 replay, concurrency, atomicity and tenancy", () => {
         foreignCtx,
         harness.secondOrgId,
         scenario.usageRightsGrantId,
-        null,
+        // FIXED deterministic anchor (§3.1) — the call fails NOT_FOUND
+        // on the tenant boundary before any status derivation.
+        W035_RIGHTS_EVALUATION_AS_OF,
       ),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
     // The publication does not resolve in the foreign scope.

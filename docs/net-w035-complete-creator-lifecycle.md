@@ -314,7 +314,7 @@ Same-key retry: measurement submission + recognition + payment fact replays all 
 Concurrent exactly-once proof: concurrent same-key recognition converges to exactly ONE value record (the economic boundary race; conservation holds)
 Tenant matrix: cross-tenant profile/match-run/engagement/grant/publication/measurement/value/payment-fact references all fail closed without existence oracles (AC-09); the foreign-scope payment fact's derived reconciliation stays `pending` (internal_lineage_not_found)
 
-Architect decision: PENDING
+Architect decision: CHANGES REQUESTED (comment 5514394512, 2026-09-02 — the canonical-path determinism blockers) → remediation delivered on the SAME PR/branch (§15.5); re-review PENDING at the remediation head.
 
 ### 15.1 The delivered traversal witnesses (the exact 30-stage order)
 
@@ -434,12 +434,117 @@ are never committed.
    the fixed `2026-09-01T12:00:00.000Z` anchor; the payment fact's
    `observedAt` is fresh at ingestion (the W030 freshness-window
    semantics — the W030 golden-path pattern; the determinism anchors
-   never depend on it).
+   never depend on it). AMENDED by the §15.5 remediation: the
+   canonical rights windows and evidence-capture timestamps are
+   FIXED anchors, the usage-rights view reads pass a FIXED
+   evaluation `asOf`, the external payment identity is DERIVED from
+   the matured value record, and the signing timestamp is the FIXED
+   `W035_PAYMENT_SIGNED_AT` anchor — the ONE sanctioned wall-clock
+   read is the provider freshness `observedAt` (the explicit
+   architect-sanctioned exception).
 5. **The AC-09 atomicity proof targets the creator-to-settlement
    join** (the recognition composite's authoritative mutation service)
    — a genuine composite-level COMMIT failure after full staging, NOT
    a stale-state refusal (the W034 PR #70 remediation lesson applied
    from the start).
+
+### 15.5 Remediation record (PR #73 — architect comment 5514394512)
+
+**The architect decision (2026-09-02): CHANGES REQUESTED** — two
+blockers in the canonical proof path's deterministic-fixture contract
+(work order §3.1):
+
+1. **Blocker 1 — the canonical traversal was not deterministic**:
+   `runCreatorScenario()` used wall-clock `Date.now()` windows for the
+   engagement requested/granted rights and `new Date().toISOString()`
+   for the production/disclosure evidence `collectedAt` timestamps.
+2. **Blocker 2 — the canonical payment identity was nondeterministic**:
+   `recordCreatorPayment()` generated the default external payment
+   identity with `randomUUID()` and signed with a fresh timestamp.
+
+**The remediation (same branch/PR; NO production source change):**
+
+- **Fixed canonical anchors (Blocker 1)** — the harness now declares
+  the exported fixed anchor block: `W035_RIGHTS_STARTS_AT`
+  (2026-09-01), `W035_RIGHTS_REQUESTED_ENDS_AT` (2026-10-01, +30d),
+  `W035_RIGHTS_GRANTED_ENDS_AT` (2026-09-30, +29d — strictly within
+  the requested envelope), `W035_RIGHTS_EVALUATION_AS_OF`
+  (2026-09-15 — inside the granted window),
+  `W035_RIGHTS_EXPIRED_AS_OF` (2040-01-01 — after every fixed
+  window), `W035_EVIDENCE_CAPTURED_AT` (2026-09-02T10:00) and
+  `W035_PAYMENT_SIGNED_AT` (2026-09-02T10:05). The canonical
+  requested/granted rights windows, ALL THREE platform evidence
+  captures (production/declaration/publication) and every local
+  AC-suite engagement fixture now compose these anchors (the W034
+  PR #70 remediation discipline applied consistently — the W023
+  fixed provider-fixture style).
+- **Deterministic rights-view reads** — every usage-rights view read
+  in the suite (the canonical scenario + full-path + AC-03 + AC-09)
+  passes an explicit FIXED `asOf` (the evaluation anchor for ACTIVE,
+  the expired anchor for the derived EXPIRED/REVOKED lifecycle
+  proofs); the authority's `asOf ?? now` default is never exercised
+  by a W035 proof path.
+- **Deterministic payment identity (Blocker 2)** — the canonical
+  default external id is `ext-pay-w035-{valueRecordId}` — DERIVED
+  from the authoritative matured value record the fact reports on
+  (never random UUID entropy), so the same canonical execution over
+  the same authoritative state reproduces the same durable external
+  lineage. The signing timestamp is the FIXED
+  `W035_PAYMENT_SIGNED_AT` anchor (integrity.signedAt is
+  shape-validated only — never freshness-gated).
+- **The ONE explicit wall-clock exception** —
+  `freshProviderObservationTimestamp()` (the single `new Date()` in
+  the entire suite) provides the W030 provider freshness `observedAt`
+  ONLY: the external-settlement authority itself wall-clock-enforces
+  the freshness window, so a fixed instant fails closed by design
+  (the architect-sanctioned exception; the determinism anchors never
+  depend on it).
+- **Test-specific payment fixtures carry EXPLICIT identities** — the
+  AC-08 fresh-fact/mismatch/failure-mode fixtures (facts recorded
+  OVER the canonical value record beyond the canonical payment) pass
+  explicit distinct external ids + idempotency keys, so each
+  fail-closed channel (wrong key / tampered / unsigned / stale)
+  remains attributable to ITS OWN gate — never masked by an identity
+  conflict with the canonical deterministic fact (proven by the
+  M8/M9 mutation catches).
+- **The strengthened AC-10 determinism pin** — a mechanical
+  comment-stripping scanner over the whole W035 suite: ZERO
+  `Date.now(`/`randomUUID` code tokens; exactly ONE `new Date(` —
+  inside the sanctioned freshness helper; the exact fixed anchor
+  values and their canonical usage counts are pinned (2 rights
+  windows, 3 evidence captures, the evaluation asOf, the derived
+  payment identity, the fixed signing anchor). This pin is the
+  durable guard: ANY regression of either blocker fails the suite.
+
+**Verification at the remediation head:**
+
+- `bun run typecheck`: PASS; `arch:check` + `authority:check`: 322
+  files / 0 violations.
+- `bun run verify`: 2330 pass / 15 skip / 0 fail — 2345 tests /
+  300 files / 31,415 expect() (the same pass/skip counts; the pin
+  strengthening adds assertions).
+- Targeted mutations: **16/16 CAUGHT** with byte-identical source
+  restoration (the 12 original W035 guards + the 4 NEW remediation
+  guards M13–M16: rights-window-wallclock, payment-random-identity,
+  payment-fresh-signedAt, evidence-wallclock — each regression of
+  the remediated fixture contract is caught by the strengthened
+  pin; driver outside the repo, never committed).
+- Real PostgreSQL 17 + Redis 7.2.5 integration: 17 pass / 0 fail (a
+  dedicated database, dropped afterwards).
+- Real-provider creator round-trip: **23/23 checks PASSED** on a
+  dedicated database with the SAME deterministic fixture discipline
+  (fixed rights windows + fixed evidence captures + the fixed
+  evaluation asOf + the derived payment identity + the fixed signing
+  anchor; the only wall-clock read is the sanctioned provider
+  freshness `observedAt`); the database dropped afterwards.
+- No production source change (the diff since 3f60333 is exactly: 8
+  modified test files — the harness + 6 composition suites + the
+  strengthened AC-10 regression pin — + this ledger). The frozen
+  architecture files remain byte-identical.
+
+### 15.6 CI verification record (the remediation heads)
+
+(recorded after push — both event paths at the exact heads)
 
 ## 16. Review discipline
 

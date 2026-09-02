@@ -28,6 +28,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import {
   createNetW035Harness,
   runCreatorScenario,
+  W035_RIGHTS_EVALUATION_AS_OF,
   type NetW035Harness,
   type CreatorScenario,
 } from "./_net-w035-harness.ts";
@@ -104,7 +105,9 @@ describe("NET-W035 full-path scenario (creator discovery → settlement + paymen
       ctx,
       harness.organizationScopeId,
       scenario.usageRightsGrantId,
-      null,
+      // FIXED evaluation anchor INSIDE the granted window (§3.1 — the
+      // canonical path never exercises the `asOf ?? now` default).
+      W035_RIGHTS_EVALUATION_AS_OF,
     );
     expect(rightsView.effectiveStatus).toBe("ACTIVE");
     expect(rightsView.grant.engagementId).toBe(scenario.engagement.id);

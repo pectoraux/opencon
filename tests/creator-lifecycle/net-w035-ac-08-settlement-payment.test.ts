@@ -150,7 +150,9 @@ describe("NET-W035-AC-08 settlement and payment", () => {
       scenario.matureValue.recognitionTransactionId,
     );
     // The fact is provider integration ONLY: the ledger is unchanged
-    // by the payment (count the entries before/after a fresh fact).
+    // by the payment (count the entries before/after a fresh fact —
+    // an EXPLICIT test-specific identity, distinct from the canonical
+    // deterministic identity the scenario already committed).
     const before =
       await harness.runtime.postgresAuthority.scan("economic_ledger_entries");
     const matured = await matureCreatorValue(harness, scenario.value.id, {
@@ -161,6 +163,8 @@ describe("NET-W035-AC-08 settlement and payment", () => {
       valueRecordId: scenario.matureValue.id,
       internalTransactionId: scenario.matureValue.recognitionTransactionId,
       reportedAmount: scenario.matureValue.amount,
+      externalId: key("w035-ac08-fresh-fact"),
+      idempotencyKey: key("w035-ac08-fresh-payment"),
     });
     const after =
       await harness.runtime.postgresAuthority.scan("economic_ledger_entries");
@@ -168,12 +172,17 @@ describe("NET-W035-AC-08 settlement and payment", () => {
   });
 
   test("PROVIDER FAILURES cannot fabricate settled value (wrong key / tampered / unsigned / stale all fail closed)", async () => {
-    for (const failure of [
+    // Each failure mode carries an EXPLICIT test-specific identity
+    // (distinct from the canonical deterministic identity AND from
+    // every other mode) — so each rejection is attributable to ITS
+    // OWN gate (authentication / integrity / freshness), never
+    // masked by an identity conflict with the canonical fact.
+    for (const [index, failure] of [
       { wrongKey: true },
       { tampered: true },
       { unsigned: true },
       { stale: true },
-    ] as const) {
+    ].entries()) {
       const factsBefore =
         await harness.runtime.postgresAuthority.count(
           "external_settlement_facts",
@@ -183,6 +192,8 @@ describe("NET-W035-AC-08 settlement and payment", () => {
           valueRecordId: scenario.matureValue.id,
           internalTransactionId: scenario.matureValue.recognitionTransactionId,
           reportedAmount: scenario.matureValue.amount,
+          externalId: key(`w035-ac08-failure-${index}`),
+          idempotencyKey: key(`w035-ac08-failure-payment-${index}`),
           ...failure,
         }),
       ).rejects.toMatchObject({ code: "EXTERNAL_SETTLEMENT_INGESTION_REJECTED" });
@@ -248,6 +259,11 @@ describe("NET-W035-AC-08 settlement and payment", () => {
       valueRecordId: scenario.matureValue.id,
       internalTransactionId: scenario.matureValue.recognitionTransactionId,
       reportedAmount: scenario.matureValue.amount + 25,
+      // An EXPLICIT test-specific identity (the mismatch fixture is
+      // a SECOND fact over the same value record — distinct from the
+      // canonical deterministic identity).
+      externalId: key("w035-ac08-mismatch-fact"),
+      idempotencyKey: key("w035-ac08-mismatch-payment"),
     });
     const view =
       await harness.runtime.externalSettlementService.evaluateExternalSettlementReconciliation(

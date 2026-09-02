@@ -16,6 +16,12 @@ import {
   createCreatorCampaign,
   key,
   personCtx,
+  W035_RIGHTS_STARTS_AT,
+  W035_RIGHTS_REQUESTED_ENDS_AT,
+  W035_RIGHTS_GRANTED_ENDS_AT,
+  W035_RIGHTS_EVALUATION_AS_OF,
+  W035_RIGHTS_EXPIRED_AS_OF,
+  W035_EVIDENCE_CAPTURED_AT,
   type NetW035Harness,
   type CreatorScenario,
 } from "./_net-w035-harness.ts";
@@ -41,7 +47,8 @@ describe("NET-W035-AC-03 creator acceptance and UGC production", () => {
       ctx,
       harness.organizationScopeId,
       scenario.usageRightsGrantId,
-      null,
+      // FIXED evaluation anchor INSIDE the granted window (§3.1).
+      W035_RIGHTS_EVALUATION_AS_OF,
     );
     expect(rightsView.effectiveStatus).toBe("ACTIVE");
     expect(rightsView.grant.engagementId).toBe(scenario.engagement.id);
@@ -81,13 +88,15 @@ describe("NET-W035-AC-03 creator acceptance and UGC production", () => {
 
   test("rights are NOT implied by acceptance or artifact existence (the derived lifecycle)", async () => {
     const ctx = harness.operatorCtx("w035-ac03-derived");
-    // EXPIRED: the derived status evaluated after the grant window.
+    // EXPIRED: the derived status evaluated AFTER the fixed grant window.
     const expiredView =
       await harness.runtime.creatorEngagementService.getUsageRights(
         ctx,
         harness.organizationScopeId,
         scenario.usageRightsGrantId,
-        new Date(Date.now() + 400 * 86_400_000).toISOString(),
+        // FIXED evaluation anchor after every rights window (§3.1 —
+        // never Date.now() + offset).
+        W035_RIGHTS_EXPIRED_AS_OF,
       );
     expect(expiredView.effectiveStatus).toBe("EXPIRED");
     // REVOKED: the one-way revocation flips the derived status.
@@ -106,7 +115,10 @@ describe("NET-W035-AC-03 creator acceptance and UGC production", () => {
       ctx,
       harness.organizationScopeId,
       scenario.usageRightsGrantId,
-      null,
+      // FIXED evaluation anchor (§3.1): after the fixed window AND
+      // after the recorded revocation's effectiveAt — REVOKED takes
+      // precedence over EXPIRED.
+      W035_RIGHTS_EXPIRED_AS_OF,
     );
     expect(revokedView.effectiveStatus).toBe("REVOKED");
   });
@@ -158,8 +170,9 @@ describe("NET-W035-AC-03 creator acceptance and UGC production", () => {
           channels: ["creator_owned_channel"],
           territories: ["GH"],
           formats: ["short_video"],
-          startsAt: new Date(Date.now() - 86_400_000).toISOString(),
-          endsAt: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+          // FIXED deterministic anchors (§3.1 — never Date.now()).
+          startsAt: W035_RIGHTS_STARTS_AT,
+          endsAt: W035_RIGHTS_REQUESTED_ENDS_AT,
           exclusions: [],
         },
         compensation: null,
@@ -190,8 +203,10 @@ describe("NET-W035-AC-03 creator acceptance and UGC production", () => {
           channels: ["creator_owned_channel"],
           territories: ["GH"],
           formats: ["short_video"],
-          startsAt: new Date(Date.now() - 86_400_000).toISOString(),
-          endsAt: new Date(Date.now() + 29 * 86_400_000).toISOString(),
+          // FIXED deterministic anchors (§3.1 — the granted window
+          // sits strictly within the requested envelope).
+          startsAt: W035_RIGHTS_STARTS_AT,
+          endsAt: W035_RIGHTS_GRANTED_ENDS_AT,
           exclusions: [],
         },
         idempotencyKey: key("w035-ac03-fresh-accept"),
@@ -237,7 +252,8 @@ describe("NET-W035-AC-03 creator acceptance and UGC production", () => {
           sourceType: "platform",
           sourceId: "example-platform",
           method: "w035 fixture production capture",
-          collectedAt: new Date().toISOString(),
+          // FIXED deterministic anchor (§3.1 — never wall-clock).
+          collectedAt: W035_EVIDENCE_CAPTURED_AT,
           collectorId: harness.creatorPersonId,
         },
         confidence: { point: 0.9, lower: 0.8, upper: 0.95 },
@@ -306,8 +322,9 @@ describe("NET-W035-AC-03 creator acceptance and UGC production", () => {
           channels: ["creator_owned_channel"],
           territories: ["GH"],
           formats: ["short_video"],
-          startsAt: new Date(Date.now() - 86_400_000).toISOString(),
-          endsAt: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+          // FIXED deterministic anchors (§3.1 — never Date.now()).
+          startsAt: W035_RIGHTS_STARTS_AT,
+          endsAt: W035_RIGHTS_REQUESTED_ENDS_AT,
           exclusions: [],
         },
         compensation: null,
@@ -338,8 +355,10 @@ describe("NET-W035-AC-03 creator acceptance and UGC production", () => {
           channels: ["creator_owned_channel"],
           territories: ["GH"],
           formats: ["short_video"],
-          startsAt: new Date(Date.now() - 86_400_000).toISOString(),
-          endsAt: new Date(Date.now() + 29 * 86_400_000).toISOString(),
+          // FIXED deterministic anchors (§3.1 — the granted window
+          // sits strictly within the requested envelope).
+          startsAt: W035_RIGHTS_STARTS_AT,
+          endsAt: W035_RIGHTS_GRANTED_ENDS_AT,
           exclusions: [],
         },
         idempotencyKey: key("w035-ac03-evidence-accept"),

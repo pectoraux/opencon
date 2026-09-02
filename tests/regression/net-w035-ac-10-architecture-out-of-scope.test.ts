@@ -73,6 +73,25 @@ const DOMAIN_DIRS = [
 const SECRET_VALUE_PATTERN =
   /(?:AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{36,}|-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----)/;
 
+/**
+ * Strip comments (block + line) so the determinism pins below scan
+ * CODE only — the remediation doc comments legitimately NAME the
+ * forbidden tokens (`Date.now()`, `randomUUID`) while explaining why
+ * they are absent. URLs are safe: the line-comment pattern requires
+ * whitespace before `//`, so `https://…` string content survives.
+ */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^[ \t]*\/\/.*$/gm, "")
+    .replace(/[ \t]\/\/.*$/gm, "");
+}
+
+/** Count code-level (comment-free) occurrences of an exact token. */
+function countCodeToken(source: string, token: string): number {
+  return (stripComments(source).split(token).length - 1);
+}
+
 describe("NET-W035-AC-10 architecture / out-of-scope", () => {
   test("the architecture + authority guards pass over the whole tree (0 violations)", async () => {
     const authority = await scanAuthorityBoundaries(SRC);
@@ -299,19 +318,109 @@ describe("NET-W035-AC-10 architecture / out-of-scope", () => {
     }
   });
 
-  test("the W035 determinism contract: no wall-clock anchors in the proof paths (the dispute fixture binds the authoritative subject anchor)", async () => {
-    // The W034 PR #70 remediation discipline carried forward: the
-    // dispute fixture derives its anchor from the subject's OWN
-    // authoritative timestamp (contribution.createdAt /
-    // economic_value.recordedAt) — never Date.now().
-    const harness = await readFile(
+  test("the W035 determinism contract: the canonical proof path is wall-clock/random-free (fixed + derived anchors; ONE sanctioned freshness exception)", async () => {
+    // The PR #73 remediation (architect comment #5514394512): every
+    // fixture timestamp in the canonical creator path is a FIXED
+    // anchor or an authoritative-subject-derived value, and the
+    // canonical external payment identity is DERIVED from the matured
+    // value record — never randomUUID entropy. The ONLY sanctioned
+    // wall-clock read in the suite is the W030 provider freshness
+    // `observedAt` (freshProviderObservationTimestamp — the
+    // external-settlement authority itself wall-clock-gates the
+    // freshness window, so the exception is load-bearing).
+    const harnessSource = await readFile(
       join(REPO, "tests/creator-lifecycle/_net-w035-harness.ts"),
       "utf8",
     );
-    expect(harness).toContain("subjectAnchorAt");
-    expect(harness).toContain("effectiveAt: subjectAnchorAt");
-    // The fixed evaluation anchor for the risk assessment (the W016
-    // fixture discipline).
-    expect(harness).toContain('evaluatedAt: "2026-09-01T12:00:00.000Z"');
+    const harnessCode = stripComments(harnessSource);
+
+    // (a) The dispute fixture binds the authoritative subject anchor
+    //     (the W034 PR #70 discipline — never Date.now()).
+    expect(harnessCode).toContain("subjectAnchorAt");
+    expect(harnessCode).toContain("effectiveAt: subjectAnchorAt");
+    // The fixed evaluation anchor for the risk assessment.
+    expect(harnessCode).toContain(
+      'evaluatedAt: "2026-09-01T12:00:00.000Z"',
+    );
+
+    // (b) The canonical FIXED anchors exist with their exact values.
+    expect(harnessCode).toContain(
+      'export const W035_RIGHTS_STARTS_AT = "2026-09-01T00:00:00.000Z"',
+    );
+    expect(harnessCode).toContain(
+      'export const W035_RIGHTS_REQUESTED_ENDS_AT = "2026-10-01T00:00:00.000Z"',
+    );
+    expect(harnessCode).toContain(
+      'export const W035_RIGHTS_GRANTED_ENDS_AT = "2026-09-30T00:00:00.000Z"',
+    );
+    expect(harnessCode).toContain(
+      'export const W035_RIGHTS_EVALUATION_AS_OF = "2026-09-15T00:00:00.000Z"',
+    );
+    expect(harnessCode).toContain(
+      'export const W035_RIGHTS_EXPIRED_AS_OF = "2040-01-01T00:00:00.000Z"',
+    );
+    expect(harnessCode).toContain(
+      'export const W035_EVIDENCE_CAPTURED_AT = "2026-09-02T10:00:00.000Z"',
+    );
+    expect(harnessCode).toContain(
+      'export const W035_PAYMENT_SIGNED_AT = "2026-09-02T10:05:00.000Z"',
+    );
+
+    // (c) The canonical scenario composes the fixed anchors: BOTH
+    //     rights windows (requested + granted), the usage-rights view
+    //     read at the fixed evaluation anchor, and ALL THREE platform
+    //     evidence captures (production/declaration/publication).
+    expect(countCodeToken(harnessSource, "startsAt: W035_RIGHTS_STARTS_AT,")).toBe(2);
+    expect(countCodeToken(harnessSource, "endsAt: W035_RIGHTS_REQUESTED_ENDS_AT,")).toBe(1);
+    expect(countCodeToken(harnessSource, "endsAt: W035_RIGHTS_GRANTED_ENDS_AT,")).toBe(1);
+    expect(countCodeToken(harnessSource, "collectedAt: W035_EVIDENCE_CAPTURED_AT,")).toBe(3);
+    expect(countCodeToken(harnessSource, "W035_RIGHTS_EVALUATION_AS_OF,")).toBe(1);
+
+    // (d) The canonical payment identity is DERIVED from the matured
+    //     value record and the signing timestamp is the FIXED anchor.
+    expect(harnessCode).toContain("ext-pay-w035-${opts.valueRecordId}");
+    expect(harnessCode).toContain("W035_PAYMENT_SIGNED_AT,");
+
+    // (e) The mechanical wall-clock/random sweep: ZERO `Date.now(`
+    //     and ZERO `randomUUID(` tokens in the whole suite; exactly
+    //     ONE `new Date(` — inside the sanctioned
+    //     freshProviderObservationTimestamp helper (the explicit W030
+    //     provider-freshness exception).
+    expect(countCodeToken(harnessSource, "Date.now(")).toBe(0);
+    expect(countCodeToken(harnessSource, "randomUUID")).toBe(0);
+    expect(countCodeToken(harnessSource, "new Date(")).toBe(1);
+    expect(harnessCode).toContain(
+      "function freshProviderObservationTimestamp",
+    );
+    expect(harnessCode).toContain(
+      "function freshProviderObservationTimestamp(): string {\n  return new Date().toISOString();\n}",
+    );
+
+    // (f) Every W035 .test.ts file is wall-clock/random-free in code
+    //     (the fixed anchors are imported from the harness). This
+    //     ENFORCER file is exempt: its own assertion arguments quote
+    //     the forbidden tokens as pin vocabulary.
+    for (const rel of W035_TEST_FILES) {
+      if (
+        !rel.endsWith(".test.ts") ||
+        rel === "tests/regression/net-w035-ac-10-architecture-out-of-scope.test.ts"
+      ) {
+        continue;
+      }
+      const content = await readFile(join(REPO, rel), "utf8");
+      const code = stripComments(content);
+      expect(
+        code.includes("Date.now("),
+        `${rel} code must be Date.now-free`,
+      ).toBe(false);
+      expect(
+        code.includes("new Date("),
+        `${rel} code must be new-Date-free`,
+      ).toBe(false);
+      expect(
+        code.includes("randomUUID"),
+        `${rel} code must be randomUUID-free`,
+      ).toBe(false);
+    }
   });
 });

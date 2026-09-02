@@ -17,6 +17,8 @@ import {
   createCreatorCampaign,
   key,
   personCtx,
+  W035_RIGHTS_STARTS_AT,
+  W035_RIGHTS_REQUESTED_ENDS_AT,
   type NetW035Harness,
   type CreatorScenario,
 } from "./_net-w035-harness.ts";
@@ -261,8 +263,9 @@ describe("NET-W035-AC-02 campaign contract and terms", () => {
             channels: ["creator_owned_channel"],
             territories: ["GH"],
             formats: ["short_video"],
-            startsAt: new Date(Date.now() - 86_400_000).toISOString(),
-            endsAt: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+            // FIXED deterministic anchors (§3.1 — never Date.now()).
+            startsAt: W035_RIGHTS_STARTS_AT,
+            endsAt: W035_RIGHTS_REQUESTED_ENDS_AT,
             exclusions: [],
           },
           compensation: null,

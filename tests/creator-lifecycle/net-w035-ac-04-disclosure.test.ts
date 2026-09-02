@@ -16,6 +16,10 @@ import {
   runCreatorScenario,
   createCreatorCampaign,
   key,
+  W035_RIGHTS_STARTS_AT,
+  W035_RIGHTS_REQUESTED_ENDS_AT,
+  W035_RIGHTS_GRANTED_ENDS_AT,
+  W035_EVIDENCE_CAPTURED_AT,
   type NetW035Harness,
   type CreatorScenario,
 } from "./_net-w035-harness.ts";
@@ -53,8 +57,9 @@ async function freshPublicationFixture(opts: {
         channels: ["creator_owned_channel"],
         territories: ["GH"],
         formats: ["short_video"],
-        startsAt: new Date(Date.now() - 86_400_000).toISOString(),
-        endsAt: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+        // FIXED deterministic anchors (§3.1 — never Date.now()).
+        startsAt: W035_RIGHTS_STARTS_AT,
+        endsAt: W035_RIGHTS_REQUESTED_ENDS_AT,
         exclusions: [],
       },
       compensation: null,
@@ -85,8 +90,10 @@ async function freshPublicationFixture(opts: {
         channels: ["creator_owned_channel"],
         territories: ["GH"],
         formats: ["short_video"],
-        startsAt: new Date(Date.now() - 86_400_000).toISOString(),
-        endsAt: new Date(Date.now() + 29 * 86_400_000).toISOString(),
+        // FIXED deterministic anchors (§3.1 — the granted window sits
+        // strictly within the requested envelope).
+        startsAt: W035_RIGHTS_STARTS_AT,
+        endsAt: W035_RIGHTS_GRANTED_ENDS_AT,
         exclusions: [],
       },
       idempotencyKey: key("w035-ac04-accept"),
@@ -129,7 +136,8 @@ async function freshPublicationFixture(opts: {
         sourceType: "platform",
         sourceId: "example-platform",
         method: "w035 fixture production capture",
-        collectedAt: new Date().toISOString(),
+        // FIXED deterministic anchor (§3.1 — never wall-clock).
+        collectedAt: W035_EVIDENCE_CAPTURED_AT,
         collectorId: harness.creatorPersonId,
       },
       confidence: { point: 0.9, lower: 0.8, upper: 0.95 },
@@ -206,7 +214,8 @@ async function declareKind(publicationId: string, kind: string) {
         sourceType: "platform",
         sourceId: "example-platform",
         method: "w035 fixture declaration capture",
-        collectedAt: new Date().toISOString(),
+        // FIXED deterministic anchor (§3.1 — never wall-clock).
+        collectedAt: W035_EVIDENCE_CAPTURED_AT,
         collectorId: harness.creatorPersonId,
       },
       confidence: { point: 0.9, lower: 0.8, upper: 0.95 },
@@ -316,7 +325,8 @@ describe("NET-W035-AC-04 disclosure and compliance", () => {
           sourceType: "platform",
           sourceId: "example-platform",
           method: "w035 fixture verification capture",
-          collectedAt: new Date().toISOString(),
+          // FIXED deterministic anchor (§3.1 — never wall-clock).
+          collectedAt: W035_EVIDENCE_CAPTURED_AT,
           collectorId: harness.creatorPersonId,
         },
         confidence: { point: 0.9, lower: 0.8, upper: 0.95 },
@@ -403,8 +413,9 @@ describe("NET-W035-AC-04 disclosure and compliance", () => {
           channels: ["creator_owned_channel"],
           territories: ["GH"],
           formats: ["short_video"],
-          startsAt: new Date(Date.now() - 86_400_000).toISOString(),
-          endsAt: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+          // FIXED deterministic anchors (§3.1 — never Date.now()).
+          startsAt: W035_RIGHTS_STARTS_AT,
+          endsAt: W035_RIGHTS_REQUESTED_ENDS_AT,
           exclusions: [],
         },
         compensation: null,

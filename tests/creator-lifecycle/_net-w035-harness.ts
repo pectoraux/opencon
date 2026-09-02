@@ -121,6 +121,64 @@ import type { EconomicValueRecord, ExternalSettlementFactRecord } from "../../sr
 
 export { EXTERNAL_SETTLEMENT_TEST_TRUST_KEY };
 
+// ---------------------------------------------------------------------------
+// The deterministic fixture anchors (work order §3.1 — the PR #73
+// remediation, architect comment #5514394512 — the W034 PR #70
+// remediation discipline applied to the WHOLE canonical creator
+// path): every usage-rights window, evidence-capture timestamp and
+// the external payment identity the canonical scenario fabricates
+// is a FIXED anchor or an id DERIVED from the authoritative subject
+// — never wall-clock/random entropy. The ONE sanctioned wall-clock
+// read in the entire suite is the W030 provider freshness
+// `observedAt` (the explicit exception inside
+// freshProviderObservationTimestamp: the external-settlement
+// authority itself wall-clock-gates the freshness window, so a
+// fixed instant fails it by design).
+// ---------------------------------------------------------------------------
+
+/** The canonical usage-rights window opens (FIXED anchor). */
+export const W035_RIGHTS_STARTS_AT = "2026-09-01T00:00:00.000Z";
+/** The canonical REQUESTED window closes (+30 days — FIXED anchor). */
+export const W035_RIGHTS_REQUESTED_ENDS_AT = "2026-10-01T00:00:00.000Z";
+/**
+ * The canonical GRANTED window closes (+29 days — FIXED anchor,
+ * strictly within the requested envelope: the acceptance subset
+ * check gStart >= rStart && gEnd <= rEnd holds by construction).
+ */
+export const W035_RIGHTS_GRANTED_ENDS_AT = "2026-09-30T00:00:00.000Z";
+/**
+ * A FIXED evaluation instant INSIDE the canonical granted window —
+ * the deterministic `asOf` for every usage-rights view read (ACTIVE
+ * by construction; the authority default `asOf ?? now` is never
+ * exercised by the canonical path).
+ */
+export const W035_RIGHTS_EVALUATION_AS_OF = "2026-09-15T00:00:00.000Z";
+/**
+ * A FIXED evaluation instant AFTER every fixed rights window (the
+ * derived EXPIRED/REVOKED evaluations — never `now + offset`).
+ */
+export const W035_RIGHTS_EXPIRED_AS_OF = "2040-01-01T00:00:00.000Z";
+/** The FIXED platform evidence-capture anchor (the W023 fixture style). */
+export const W035_EVIDENCE_CAPTURED_AT = "2026-09-02T10:00:00.000Z";
+/**
+ * The FIXED external-settlement signing anchor — `integrity.signedAt`
+ * is shape-validated only (parseable instant), never freshness-gated,
+ * so the canonical payment signature timestamp is deterministic.
+ */
+export const W035_PAYMENT_SIGNED_AT = "2026-09-02T10:05:00.000Z";
+
+/**
+ * The ONE sanctioned wall-clock read in the NET-W035 suite: the W030
+ * provider freshness timestamp `observedAt` (the explicit architect
+ * exception — the external-settlement authority wall-clock-enforces
+ * the freshness window, so the canonical payment fixture MUST stay
+ * fresh at ingestion). Every other timestamp in the suite is a
+ * fixed/derived deterministic anchor (see the block above).
+ */
+function freshProviderObservationTimestamp(): string {
+  return new Date().toISOString();
+}
+
 export interface NetW035Harness {
   /** The wrapped NET-W018 harness (all its factories work unchanged). */
   readonly w018: NetW018Harness;
@@ -829,8 +887,10 @@ export async function runCreatorScenario(
         channels: ["creator_owned_channel"],
         territories: ["GH", "NG"],
         formats: ["short_video"],
-        startsAt: new Date(Date.now() - 86_400_000).toISOString(),
-        endsAt: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+        // FIXED deterministic anchors (the §3.1 contract — never
+        // Date.now()): the canonical requested window.
+        startsAt: W035_RIGHTS_STARTS_AT,
+        endsAt: W035_RIGHTS_REQUESTED_ENDS_AT,
         exclusions: ["political advertising"],
       },
       compensation: {
@@ -880,8 +940,11 @@ export async function runCreatorScenario(
         channels: ["creator_owned_channel"],
         territories: ["GH"],
         formats: ["short_video"],
-        startsAt: new Date(Date.now() - 86_400_000).toISOString(),
-        endsAt: new Date(Date.now() + 29 * 86_400_000).toISOString(),
+        // FIXED deterministic anchors (the §3.1 contract — never
+        // Date.now()): the canonical granted window, strictly within
+        // the requested envelope above.
+        startsAt: W035_RIGHTS_STARTS_AT,
+        endsAt: W035_RIGHTS_GRANTED_ENDS_AT,
         exclusions: ["political advertising", "gambling"],
       },
       idempotencyKey: key("w035-accept"),
@@ -964,7 +1027,10 @@ export async function runCreatorScenario(
     harness.operatorCtx("w035-rights"),
     harness.organizationScopeId,
     grant.id,
-    null,
+    // FIXED evaluation anchor INSIDE the granted window (§3.1 — the
+    // authoritative `asOf ?? now` default is never exercised by the
+    // canonical path; ACTIVE holds by construction).
+    W035_RIGHTS_EVALUATION_AS_OF,
   );
   if (rightsView.effectiveStatus !== "ACTIVE") {
     throw new Error(
@@ -991,7 +1057,8 @@ export async function runCreatorScenario(
         sourceType: "platform",
         sourceId: "example-platform",
         method: "w035 fixture production capture",
-        collectedAt: new Date().toISOString(),
+        // FIXED deterministic anchor (§3.1 — never wall-clock).
+        collectedAt: W035_EVIDENCE_CAPTURED_AT,
         collectorId: harness.creatorPersonId,
       },
       confidence: { point: 0.9, lower: 0.8, upper: 0.95 },
@@ -1092,7 +1159,8 @@ export async function runCreatorScenario(
           sourceType: "platform",
           sourceId: "example-platform",
           method: "w035 fixture publication capture",
-          collectedAt: new Date().toISOString(),
+          // FIXED deterministic anchor (§3.1 — never wall-clock).
+          collectedAt: W035_EVIDENCE_CAPTURED_AT,
           collectorId: harness.creatorPersonId,
         },
         confidence: { point: 0.9, lower: 0.8, upper: 0.95 },
@@ -1130,7 +1198,8 @@ export async function runCreatorScenario(
         sourceType: "platform",
         sourceId: "example-platform",
         method: "w035 fixture publication capture",
-        collectedAt: new Date().toISOString(),
+        // FIXED deterministic anchor (§3.1 — never wall-clock).
+        collectedAt: W035_EVIDENCE_CAPTURED_AT,
         collectorId: harness.creatorPersonId,
       },
       confidence: { point: 0.9, lower: 0.8, upper: 0.95 },
@@ -1970,8 +2039,20 @@ export async function matureCreatorValue(
  * transaction. The fact is provider integration ONLY: it posts NO
  * ledger entries, touches NO account, mints/consumes/reverses
  * NOTHING (the reconciliation is DERIVED over the authoritative
- * internal lineage). The `observedAt` timestamp is fresh at ingestion
- * (the freshness-window semantics — the W030 golden-path pattern;
+ * internal lineage).
+ *
+ * DETERMINISTIC FIXTURE (the PR #73 remediation — architect comment
+ * #5514394512, Blocker 2): the canonical external payment identity
+ * is DERIVED from the authoritative subject it reports on —
+ * `ext-pay-w035-{valueRecordId}` over the matured value record —
+ * never randomUUID entropy, so the same canonical execution over
+ * the same authoritative state reproduces the same durable external
+ * lineage. The signing timestamp is the FIXED W035_PAYMENT_SIGNED_AT
+ * anchor (integrity.signedAt is shape-validated only — never
+ * freshness-gated). The ONE sanctioned wall-clock read is the
+ * provider freshness `observedAt` (the explicit architect exception:
+ * the external-settlement authority wall-clock-enforces the
+ * freshness window — a fixed instant would fail closed by design;
  * the determinism anchors never depend on it).
  */
 export async function recordCreatorPayment(
@@ -1990,11 +2071,12 @@ export async function recordCreatorPayment(
     readonly organizationScopeId?: string;
   },
 ): Promise<ExternalSettlementFactRecord> {
-  const { randomUUID } = await import("node:crypto");
-  const externalId = opts.externalId ?? `ext-pay-${randomUUID()}`;
+  const externalId =
+    opts.externalId ?? `ext-pay-w035-${opts.valueRecordId}`;
+  // The explicit freshness exception — see the doc comment above.
   const observedAt = opts.stale
     ? "2020-01-01T00:00:00.000Z"
-    : new Date().toISOString();
+    : freshProviderObservationTimestamp();
   const facts = {
     externalId,
     internalTransactionId: opts.internalTransactionId,
@@ -2010,7 +2092,7 @@ export async function recordCreatorPayment(
       opts.wrongKey === true
         ? "wrong-external-settlement-trust-key"
         : EXTERNAL_SETTLEMENT_TEST_TRUST_KEY,
-      new Date().toISOString(),
+      W035_PAYMENT_SIGNED_AT,
     );
     let signature = envelope.signature;
     if (opts.tampered === true) {
