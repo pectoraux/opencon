@@ -285,40 +285,161 @@ tests/creator/
 
 Names may differ where existing conventions require it. The acceptance criteria remain one-to-one with AC-01..AC-10.
 
-## 15. Required verification record template
+## 15. Verification record (delivered)
 
-The implementation PR must replace the placeholders below with exact evidence.
-
-```text
-Implementation PR: #___
+Implementation PR: (assigned on push — recorded in §15.5)
 Implementation branch: feat/net-w035-complete-creator-lifecycle
-Reviewed head: __________
-Merge SHA: __________
+Reviewed head: (recorded after push — see §15.5)
+Merge SHA: (pending architect approval)
 
-Changed files: ___
-Production src changes: ___
-Frozen architecture file changes: 0 required
+Changed files: 15 (12 new test files + 1 new regression suite + 1 modified TEST harness + this ledger)
+Production src changes: 0
+Frozen architecture file changes: 0
 
-bun run typecheck: PASS/FAIL
-bun run arch:check: ___ files / ___ violations
-bun run authority:check: ___ files / ___ violations
-bun run verify: ___ pass / ___ skip / ___ fail / ___ tests / ___ files
-Targeted mutations: ___/___ caught; byte-identical restoration: PASS/FAIL
-Real PostgreSQL + Redis: ___ pass / ___ fail
-Real creator provider round-trip: ___ checks / ___ passed
-Secret scan: PASS/FAIL
-CI push exact-head: run ___ / PASS/FAIL
-CI pull_request exact-head: run ___ / PASS/FAIL
+bun run typecheck: PASS
+bun run arch:check: 322 files / 0 violations
+bun run authority:check: 322 files / 0 violations
+bun run verify: 2330 pass / 15 skip / 0 fail / 2345 tests / 300 files (the W034 baseline 2258/15/0 ⇒ +72 W035 composition tests across 12 new test files)
+Targeted mutations: 12/12 caught; byte-identical restoration: PASS (driver `opencon-tmp-w035/mutation-driver.py`, never committed)
+Real PostgreSQL + Redis: 17 pass / 0 fail (PG 17 on 127.0.0.1:55432 + Redis 7.2.5 on 127.0.0.1:56379)
+Real creator provider round-trip: 23 checks / 23 passed (a DEDICATED round-trip database, dropped afterwards — see §15.2)
+Secret scan: PASS (the AC-10 regression pin over the whole W035 artifact set)
+CI push exact-head: run (recorded after push — §15.5)
+CI pull_request exact-head: run (recorded after push — §15.5)
 
-Traversal witnesses: __________
-Durable audit markers: __________
-AC-09 rollback proof: __________
-Same-key retry: __________
-Concurrent exactly-once proof: __________
-Tenant matrix: __________
+Traversal witnesses: the 30 ordered stage witnesses (§15.3) over BOTH authoritative lifecycle subjects (engagement v0 DRAFT → v5 VERIFIED; contribution v0 DRAFT → v4 SUBMITTED → v5 MEASURING → v10 VERIFIED)
+Durable audit markers: 33 canonical markers in strictly ascending audit positions (the full-path scenario suite) + 31 in the real round-trip
+AC-09 rollback proof: the composite-level COMMIT failure over the ACTUAL creator-to-settlement join (the recognition composite's authoritative mutation service, `createEconomicValueService`, rebuilt over a commit-failing authority with the REAL repositories/ledger/idempotency/audit-writer + neutral lookups over the public services): the value record + balanced recognition postings + idempotency record + buffered audit all staged then rolled back — NOTHING persists (no value record, no ledger entries/transactions, no idempotency, no audit event); the healthy same-key retry through the REAL apiCommand completes exactly once
+Same-key retry: measurement submission + recognition + payment fact replays all return the committed records verbatim (created=false; one audit event each)
+Concurrent exactly-once proof: concurrent same-key recognition converges to exactly ONE value record (the economic boundary race; conservation holds)
+Tenant matrix: cross-tenant profile/match-run/engagement/grant/publication/measurement/value/payment-fact references all fail closed without existence oracles (AC-09); the foreign-scope payment fact's derived reconciliation stays `pending` (internal_lineage_not_found)
 
 Architect decision: PENDING
+
+### 15.1 The delivered traversal witnesses (the exact 30-stage order)
+
+```text
+creator-resolved → creator-authorized → match-hard-gates-passed
+→ match-committed → campaign-policy-resolved → opportunity-materialized
+→ terms-pinned (DRAFT v0) → creator-accepted (ASSIGNED v2)
+→ contribution-entered (DRAFT v0) → contribution-submitted (SUBMITTED v4)
+→ ugc-recorded (IN_PROGRESS v3) → rights-authorized (ACTIVE grant)
+→ ugc-submitted (SUBMITTED v4) → engagement-verified (VERIFIED v5)
+→ relationship-recorded → publication-recorded
+→ disclosure-compliance-satisfied (publication VERIFIED)
+→ lifecycle-measuring (MEASURING v5) → measurement-normalized
+→ outcome-verified → evidence-pov-verified → poh-evaluated
+→ lifecycle-completed (VERIFIED v10) → settlement-pending
+→ risk-gate-refused → risk-gate-resolved → dispute-gate-refused
+→ dispute-gate-resolved → settlement-matured → payment-committed
 ```
+
+Every witness from the engagement creation onward carries the
+AUTHORITATIVE engagement state + version read through
+`creatorEngagementService.getEngagement`; every witness from the
+contribution entry onward ALSO carries the AUTHORITATIVE contribution
+state + version read through `contributionService.getContribution` —
+a strictly deterministic executable-order proof over BOTH authorities
+(the W033 PR #68 remediation discipline carried forward).
+
+**Ordering deviation of record (the W034 precedent):** the ledger's
+template list places `settlement-pending` after the gate resolutions;
+the delivered scenario recognizes the value (PENDING) BEFORE
+exercising the gates — mechanically the ONLY real-refusal shape (the
+gates refuse the MATURATION of a pending value: `RISK_CONTROL` /
+`DISPUTE_CHALLENGE`; recognition itself is not risk-gated — the
+`refuseWhenGated`/`refuseWhenDisputed` enforcement points are the
+maturation/issuance/allocation composites). This is exactly the
+W034-approved order ("economic witnesses cannot occur before the
+required workflow/evidence/evaluation/risk gates" — the binding
+constraint is that maturation/consumption follows gate resolution,
+which the delivered order satisfies: settlement-matured and
+payment-committed both follow dispute-gate-resolved), documented here
+rather than hidden.
+
+### 15.2 The real round-trip record
+
+`opencon-tmp-w035/real-pg-roundtrip.ts` (never committed): a DEDICATED
+`opencon_w035_roundtrip` database + a staging-classified runtime (the
+REAL provider-selection path — PostgresAuthorityAdapter +
+RedisCoordinationAdapter, no shims; the delivery-notice adapter
+AUTO-WIRED from the staging SecretProvider's
+MEASUREMENT_OPENRTB_DELIVERY_KEY; the W030 trust channel from
+EXTERNAL_SETTLEMENT_REFERENCE_TRUST_KEY) + the seeded W008→W018
+guard/policy surface + ONE creator execution through the complete
+canonical chain — ALL 23 CHECKS PASSED (the REAL provider selection,
+the REAL W022 registry, the W015 profile, the W016 hard-gated match,
+the ACTIVE campaign with the escrowed budget, the W017 acceptance
+composite, the W012 contribution entry, the UGC production bound to
+the contribution + the rights view, the engagement VERIFIED walk, the
+W018 disclosure/compliance gate, the W022 measurement, the outcomes,
+the evidence/PoV + the PoH, the completed VERIFIED v10 walk, the
+risk/dispute gates fail-closed-then-resolved, the settlement
+pending/mature, the W030 external payment with the derived MATCHED
+reconciliation, the 30-witness CANONICAL TRAVERSAL ORDER, the 31
+ordered audit markers, the terminal states, the settlement
+conservation over the REAL ledger, the privacy boundary, the payment
+containment). The round-trip database dropped afterwards.
+
+### 15.3 The changed-file inventory (the authority mapping)
+
+| File | Kind | Authority exercised |
+|---|---|---|
+| tests/creator-lifecycle/_net-w035-harness.ts | NEW (shared harness) | pure test composition over the existing contracts |
+| tests/creator-lifecycle/net-w035-full-path-scenario.test.ts | NEW | the canonical traversal + audit order + conservation |
+| tests/creator-lifecycle/net-w035-ac-01-creator-discovery.test.ts | NEW | /creators + W016 matching |
+| tests/creator-lifecycle/net-w035-ac-02-campaign-terms.test.ts | NEW | /campaigns terms + escrow |
+| tests/creator-lifecycle/net-w035-ac-03-acceptance-ugc-rights.test.ts | NEW | W017 engagement/UGC/rights |
+| tests/creator-lifecycle/net-w035-ac-04-disclosure.test.ts | NEW | W018 sponsorship/disclosure |
+| tests/creator-lifecycle/net-w035-ac-05-measurement.test.ts | NEW | /measurement→/outcomes + privacy |
+| tests/creator-lifecycle/net-w035-ac-06-evidence.test.ts | NEW | /evidence PoV + PoH |
+| tests/creator-lifecycle/net-w035-ac-07-workflow-risk-dispute.test.ts | NEW | /workflows + /disputes gates |
+| tests/creator-lifecycle/net-w035-ac-08-settlement-payment.test.ts | NEW | /settlement + /payments+/adapters |
+| tests/creator-lifecycle/net-w035-ac-09-replay-concurrency-atomicity.test.ts | NEW | replay/race/atomicity/tenancy/lineage |
+| tests/regression/net-w035-ac-10-architecture-out-of-scope.test.ts | NEW (regression) | the structural pins |
+| tests/creators/_net-w018-harness.ts | MODIFIED (the ONE declared test-harness adjustment) | option forwarding of the PRE-EXISTING NetW008HarnessOptions (the W015/W016/W017 chain already threaded them): the NET-W006 measurement-provider registry + the NET-W030 trust keys — tests-only, never src/ (the W034 measurement-threading precedent) |
+| docs/net-w035-complete-creator-lifecycle.md | MODIFIED (this record) | the evidence ledger |
+
+No production source file changed. The frozen architecture files are
+byte-identical (AC-10 regression pin). The mutation driver and the
+round-trip script live OUTSIDE the repository (opencon-tmp-w035/) and
+are never committed.
+
+### 15.4 Decisions of record
+
+1. **The canonical order follows the frozen ledger literally** (match
+   before campaign; discovery → terms → acceptance → UGC → rights →
+   disclosure → MEASURING → measurement → evidence → completion →
+   gates → settlement → payment), with the W034-precedented
+   recognition-before-gates deviation documented in §15.1.
+2. **The contribution enters through the sanctioned W012 helpfulness
+   composite** on the campaign's `helpful_recommendation` opportunity
+   (the W034 decision of record — the ONLY contribution vehicle); the
+   W017 production binds the contribution id, giving the
+   engagement → production → contribution → measurement lineage.
+3. **The declared payment/settlement path is the W030 external
+   payment** (the /payments + /adapters leg the work order §3.3 and
+   AC-08 explicitly provide for): the W020 cross-promotion clearing
+   composite is placement-bound (an advertising-shaped join — /inventory
+   is explicitly OUTSIDE the W035 authority placement), so the
+   campaign's declared compensation/clearing rule (reward_allocation
+   to the CREATOR, maxDrawAmount covered by the escrowed budget) is
+   the declared compensation lineage and the external fact + derived
+   reconciliation is the payment leg. The fact posts NO ledger
+   entries; the provider acknowledgement never becomes internal
+   settlement truth.
+4. **The dispute fixture anchor is the subject's OWN authoritative
+   timestamp** (contribution.createdAt / economic_value.recordedAt —
+   the W034 PR #70 remediation discipline); the risk assessment uses
+   the fixed `2026-09-01T12:00:00.000Z` anchor; the payment fact's
+   `observedAt` is fresh at ingestion (the W030 freshness-window
+   semantics — the W030 golden-path pattern; the determinism anchors
+   never depend on it).
+5. **The AC-09 atomicity proof targets the creator-to-settlement
+   join** (the recognition composite's authoritative mutation service)
+   — a genuine composite-level COMMIT failure after full staging, NOT
+   a stale-state refusal (the W034 PR #70 remediation lesson applied
+   from the start).
 
 ## 16. Review discipline
 
