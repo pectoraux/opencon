@@ -884,6 +884,110 @@ export interface ApiReputationSnapshotView {
   readonly idempotencyKey: string;
 }
 
+// -- NET-W031 portable reputation proof views/inputs --------------------
+
+/**
+ * ONE disclosed dimension fact (AGGREGATE ONLY — the authority's own
+ * time-decayed score + cap flag + the three evidence-reference counts;
+ * the REP-004 opaque lineage; PRIV-001..003: no raw personal activity,
+ * no input ids, no payloads ever appear).
+ */
+export interface ApiReputationProofDimensionView {
+  readonly dimension: string;
+  readonly score: number;
+  readonly capped: boolean;
+  readonly inputCount: number;
+  readonly verifiedInputCount: number;
+  readonly indicatedInputCount: number;
+}
+
+/**
+ * The public view of a portable reputation proof (NET-W031) — the
+ * SELF-CONTAINED presentation artifact: identity + lineage binding
+ * (snapshot id, policy id + version, referenceAt, the snapshot
+ * digest), the aggregate dimension facts, the composed W029 signed
+ * envelope (algorithm, key reference, signature), the one-way
+ * revocation fields and the record-format marker.
+ */
+export interface ApiReputationProofView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string;
+  readonly snapshotId: string;
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly referenceAt: string;
+  readonly digest: string;
+  readonly dimensions: readonly ApiReputationProofDimensionView[];
+  readonly algorithm: string;
+  readonly keyReference: string;
+  readonly signature: string;
+  readonly issuedAt: string;
+  readonly revokedAt: string | null;
+  readonly revocationReason: string | null;
+  readonly createdAt: string;
+  readonly recordFormat: string;
+}
+
+/**
+ * Inputs to issue a portable reputation proof (NET-W031). Deliberately
+ * carries NO facts: the disclosed values are always DERIVED from the
+ * authoritative snapshot (non-purchasable — REP-002: no score-altering
+ * input exists on the proof surface).
+ */
+export interface ApiIssueReputationProofInput {
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string;
+  /** Omitted → the subject's LATEST recorded snapshot in scope. */
+  readonly snapshotId?: string;
+  readonly idempotencyKey: string;
+}
+
+/** The issuance result (201 + replay-safe `created` flag). */
+export interface ApiIssueReputationProofResult {
+  readonly proof: ApiReputationProofView;
+  readonly created: boolean;
+}
+
+/** One machine-readable verification check outcome (NET-W031). */
+export interface ApiReputationProofCheckView {
+  readonly check: string;
+  readonly subject: string | null;
+  readonly passed: boolean;
+  readonly reason: string;
+}
+
+/** The deterministic verification verdict for a proof (NET-W031). */
+export interface ApiReputationProofVerificationView {
+  readonly proofId: string;
+  readonly valid: boolean;
+  readonly reason: string;
+  readonly checks: readonly ApiReputationProofCheckView[];
+}
+
+/** Inputs to verify a STORED proof by id (NET-W031). */
+export interface ApiVerifyReputationProofInput {
+  readonly organizationScopeId: string;
+  /** The EXPLICIT staleness evaluation timestamp (determinism). */
+  readonly evaluatedAt: string;
+}
+
+/**
+ * Inputs to verify a PRESENTED, self-contained proof artifact
+ * (NET-W031 — the portable path: no tenant state is queried).
+ */
+export interface ApiVerifyPresentedReputationProofInput {
+  readonly proof: ApiReputationProofView;
+  readonly evaluatedAt: string;
+}
+
+/** Inputs to revoke a proof (NET-W031; ONE-WAY). */
+export interface ApiRevokeReputationProofInput {
+  readonly organizationScopeId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
 // -- NET-W008 settlement views/inputs ----------------------------------
 
 /** The public view of an economic value record (pending/mature value). */
@@ -2032,6 +2136,75 @@ export interface ApiCommands {
     organizationScopeId: string,
     subjectPersonId: string,
   ): Promise<ApiReputationSnapshotView | null>;
+
+  // -----------------------------------------------------------------
+  // NET-W031 — portable reputation proofs (issue #63).
+  // -----------------------------------------------------------------
+
+  /**
+   * Issue a portable reputation proof (NET-W031, protected mutation;
+   * guard action `reputationProof.create`): derives the AGGREGATE
+   * dimension facts from the authoritative snapshot INSIDE the
+   * issuance transaction (exact id or the subject's latest in scope —
+   * missing/cross-scope/subject-mismatch fail closed), signs the
+   * "reputation-proof/v1" canonical input through the composed W029
+   * versioned signer, and commits the immutable proof + its audit
+   * event atomically (composite idempotency). The input carries NO
+   * caller-asserted facts (REP-002).
+   */
+  issueReputationProof(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiIssueReputationProofInput,
+  ): Promise<ApiIssueReputationProofResult>;
+
+  /**
+   * Fetch a portable proof artifact (NET-W031, tenant-scoped read;
+   * guard action `reputationProof.read`): cross-tenant and nonexistent
+   * are indistinguishable (null → 404; no existence oracle).
+   */
+  getReputationProof(
+    execution: ExecutionContext,
+    id: string,
+    input: { readonly organizationScopeId: string },
+  ): Promise<ApiReputationProofView | null>;
+
+  /**
+   * Verify a STORED proof (NET-W031, derived decision; guard action
+   * `reputationProof.verify`): deterministic, fail-closed, non-mutating
+   * verification with machine-readable reasons — the fixed pipeline
+   * revocation → shape → vocabularies → pairing → signature →
+   * staleness at the EXPLICIT evaluatedAt.
+   */
+  verifyReputationProof(
+    execution: ExecutionContext,
+    id: string,
+    input: ApiVerifyReputationProofInput,
+  ): Promise<ApiReputationProofVerificationView>;
+
+  /**
+   * Verify a PRESENTED, self-contained proof artifact (NET-W031, the
+   * PORTABLE path; guard action `reputationProof.verify`): the same
+   * deterministic fail-closed pipeline WITHOUT querying any
+   * tenant-scoped state (no store reads, no mutations, no audit).
+   */
+  verifyPresentedReputationProof(
+    execution: ExecutionContext,
+    input: ApiVerifyPresentedReputationProofInput,
+  ): Promise<ApiReputationProofVerificationView>;
+
+  /**
+   * Revoke a proof (NET-W031, ONE-WAY mutation; guard action
+   * `reputationProof.revoke`): a revoked proof NEVER verifies again;
+   * revoking an already-revoked record is an idempotent no-op
+   * returning the record.
+   */
+  revokeReputationProof(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    id: string,
+    input: ApiRevokeReputationProofInput,
+  ): Promise<ApiReputationProofView>;
 
   // -- NET-W008 settlement commands --------------------------------------
 

@@ -18,6 +18,7 @@ import { createRuntime, type Runtime } from "../../src/bootstrap/runtime.ts";
 import { createExecutionContext } from "../../src/core/execution-context.ts";
 import type { ExecutionContext } from "../../src/core/execution-context.ts";
 import type { ReputationDimension } from "../../src/core/reputation.ts";
+import type { AttestationSigner, AttestationVerifier, SignedAttestationSigner, SignedAttestationVerifier } from "../../src/evidence/port.ts";
 import {
   CONTRIBUTION_TRANSITION_TABLE,
   OPPORTUNITY_TRANSITION_TABLE,
@@ -47,11 +48,30 @@ export interface NetW007Harness {
   teardown(): Promise<void>;
 }
 
-export async function createNetW007Harness(): Promise<NetW007Harness> {
+/**
+ * NET-W031 (additive): explicit attestation signer/verifier adapters
+ * forwarded verbatim to createRuntime (the W005-harness precedent) —
+ * e.g. REAL Ed25519/ECDSA versioned pairs, or a FAILING signer for
+ * fault injection, over the SAME composed machinery the reputation
+ * proof service consumes. Omitted → the dev/test HMAC default.
+ */
+export interface NetW007HarnessOptions {
+  readonly attestation?: {
+    readonly signer?: AttestationSigner;
+    readonly verifier?: AttestationVerifier;
+    readonly versionedSigner?: SignedAttestationSigner;
+    readonly versionedVerifier?: SignedAttestationVerifier;
+  };
+}
+
+export async function createNetW007Harness(
+  opts: NetW007HarnessOptions = {},
+): Promise<NetW007Harness> {
   const runtime = createRuntime({
     forceEnv: "test",
     env: { APP_ENV: "test", LOG_LEVEL: "warn" },
     port: 0,
+    ...(opts.attestation ? { attestation: opts.attestation } : {}),
   });
   await runtime.initialize();
   await runtime.api.start();

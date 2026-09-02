@@ -44,7 +44,12 @@ import type { SecretProvider } from "../core/secrets.ts";
 import type { JobQueue } from "../core/queue.ts";
 import type { JobHandler } from "../core/queue.ts";
 import type { ModuleRegistry } from "../core/module.ts";
-import type { ApiAuth, ApiCommands, ApiSignedAttestationView } from "../api/port.ts";
+import type {
+  ApiAuth,
+  ApiCommands,
+  ApiReputationProofView,
+  ApiSignedAttestationView,
+} from "../api/port.ts";
 import type { ApiServer } from "../api/server.ts";
 import type { PostgresAuthority } from "../core/postgres-authority.ts";
 import type { CoordinationService } from "../core/coordination.ts";
@@ -164,6 +169,15 @@ import type {
 } from "../evidence/port.ts";
 import { createAuthoritySignedAttestationRepository } from "../evidence/authority-signed-attestation-repository.ts";
 import { createSignedAttestationService } from "../evidence/signed-attestation-service.ts";
+// NET-W031 composes the W029 machinery: the FROZEN algorithm +
+// key-reference vocabularies are injected INTO the reputation proof
+// service as data (single source of truth — no mirrored constants;
+// the composition root is the ONLY join).
+import {
+  SIGNED_ATTESTATION_ALGORITHMS,
+  SIGNED_ATTESTATION_KEY_REFERENCES,
+  SIGNED_ATTESTATION_KEY_REFERENCE_BY_ALGORITHM,
+} from "../evidence/port.ts";
 // NET-W006 outcomes boundary: first-class immutable/append-corrected
 // outcome observations, distinct deterministic/probabilistic/
 // experimental attribution representation, experiments/holdouts +
@@ -271,13 +285,26 @@ import { createAuthorityReputationInputRepository } from "../reputation/authorit
 import { createReputationInputService } from "../reputation/input-service.ts";
 import { createAuthorityReputationSnapshotRepository } from "../reputation/authority-snapshot-repository.ts";
 import { createReputationSnapshotService } from "../reputation/snapshot-service.ts";
+// NET-W031 (additive): portable reputation proofs — the DERIVED,
+// aggregate-disclosure, self-contained presentation layer over the
+// SAME /reputation authority, composing the W029 versioned signing
+// machinery through the NEUTRAL contracts declared on the reputation
+// port (wired below; the composition root is the ONLY join).
+import { createAuthorityReputationProofRepository } from "../reputation/authority-proof-repository.ts";
+import { createReputationProofService } from "../reputation/proof-service.ts";
 import type {
   ComputeReputationScoresInput,
   CreateReputationScoringPolicyInput,
+  PresentedReputationProof,
   RecordReputationInputInput,
   RecordReputationSnapshotInput,
   ReputationInputService,
   ReputationPolicyService,
+  ReputationProof,
+  ReputationProofService,
+  ReputationProofSigner,
+  ReputationProofSigningVocabulary,
+  ReputationProofVerifier,
   ReputationSnapshotService,
 } from "../reputation/port.ts";
 // NET-W008 settlement boundary: the economic ledger — pending/mature
@@ -714,6 +741,8 @@ export interface Runtime {
   readonly reputationPolicyService: ReputationPolicyService;
   readonly reputationInputService: ReputationInputService;
   readonly reputationSnapshotService: ReputationSnapshotService;
+  // NET-W031 domain service (the portable reputation proof surface).
+  readonly reputationProofService: ReputationProofService;
   // NET-W008 domain services (exposed for integration/security tests).
   readonly economicValueService: EconomicValueService;
   readonly creditService: CreditService;
@@ -1891,6 +1920,107 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     auditWriter,
     logger: logger.forModule("evidence"),
   });
+
+  // ------------------------------------------------------------------
+  // NET-W031 portable reputation proofs wiring (the /reputation
+  // boundary, EXTENDED — issue #63).
+  //
+  // Proofs COMPOSE the W029 machinery: the SAME versioned signing pair
+  // selected above is adapted to the NEUTRAL ReputationProofSigner /
+  // ReputationProofVerifier contracts declared on the reputation port
+  // (thin adapters — the composition root is the ONLY join; the
+  // reputation domain imports core contracts only and never imports
+  // /evidence), and W029's FROZEN vocabularies are injected as DATA
+  // (single source of truth — no mirrored constants to drift; a new
+  // algorithm id remains a W029 frozen-vocabulary change). Proof
+  // issuance reads the /reputation authority's OWN snapshot store
+  // (this boundary's records) — no cross-domain surface is gained.
+  // ------------------------------------------------------------------
+  const reputationProofRepo = createAuthorityReputationProofRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("reputation").debug(m, f) },
+  });
+  const reputationProofSigningVocabulary: ReputationProofSigningVocabulary = {
+    algorithms: SIGNED_ATTESTATION_ALGORITHMS,
+    keyReferences: SIGNED_ATTESTATION_KEY_REFERENCES,
+    keyReferenceByAlgorithm:
+      SIGNED_ATTESTATION_KEY_REFERENCE_BY_ALGORITHM as Readonly<Record<string, readonly string[]>>,
+  };
+  const reputationProofSigner: ReputationProofSigner = {
+    algorithm: versionedAttestationSigning.signer.algorithm,
+    keyReference: versionedAttestationSigning.signer.keyReference,
+    signProof: (canonicalInput) =>
+      versionedAttestationSigning.signer.signVersioned(canonicalInput),
+  };
+  const reputationProofVerifier: ReputationProofVerifier = {
+    verifyProof: (canonicalInput, envelope) =>
+      versionedAttestationSigning.verifier.verifyVersioned(canonicalInput, envelope),
+  };
+  const reputationProofService = createReputationProofService({
+    proofRepository: reputationProofRepo,
+    snapshotRepository: reputationSnapshotRepo,
+    signer: reputationProofSigner,
+    verifier: reputationProofVerifier,
+    signingVocabulary: reputationProofSigningVocabulary,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("reputation"),
+  });
+  function toApiReputationProofView(proof: ReputationProof): ApiReputationProofView {
+    return {
+      id: proof.id,
+      organizationScopeId: proof.organizationScopeId,
+      subjectPersonId: proof.subjectPersonId,
+      snapshotId: proof.snapshotId,
+      policyId: proof.policyId,
+      policyVersion: proof.policyVersion,
+      referenceAt: proof.referenceAt,
+      digest: proof.digest,
+      dimensions: proof.dimensions.map((d) => ({
+        dimension: d.dimension,
+        score: d.score,
+        capped: d.capped,
+        inputCount: d.inputCount,
+        verifiedInputCount: d.verifiedInputCount,
+        indicatedInputCount: d.indicatedInputCount,
+      })),
+      algorithm: proof.algorithm,
+      keyReference: proof.keyReference,
+      signature: proof.signature,
+      issuedAt: proof.issuedAt,
+      revokedAt: proof.revokedAt,
+      revocationReason: proof.revocationReason,
+      createdAt: proof.createdAt,
+      recordFormat: proof.recordFormat,
+    };
+  }
+  function fromApiReputationProofView(
+    view: ApiReputationProofView,
+  ): PresentedReputationProof {
+    return {
+      id: view.id,
+      organizationScopeId: view.organizationScopeId,
+      subjectPersonId: view.subjectPersonId,
+      snapshotId: view.snapshotId,
+      policyId: view.policyId,
+      policyVersion: view.policyVersion,
+      referenceAt: view.referenceAt,
+      digest: view.digest,
+      // The string dimensions cross into the domain shape; the domain
+      // shape validator re-checks the closed frozen vocabulary at
+      // runtime (fail closed) — the presented artifact is untrusted.
+      dimensions:
+        view.dimensions as unknown as PresentedReputationProof["dimensions"],
+      algorithm: view.algorithm,
+      keyReference: view.keyReference,
+      signature: view.signature,
+      issuedAt: view.issuedAt,
+      revokedAt: view.revokedAt,
+      revocationReason: view.revocationReason,
+      createdAt: view.createdAt,
+      recordFormat: view.recordFormat,
+    };
+  }
   const creditIssuanceRepo = createAuthorityCreditIssuanceRepository({
     authority: postgresAuthority,
     logger: { debug: (m, f) => logger.forModule("settlement").debug(m, f) },
@@ -6668,6 +6798,80 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return latest ? toReputationSnapshotView(latest) : null;
     },
 
+    // -- NET-W031 portable reputation proof commands --------------------
+
+    async issueReputationProof(execution, _actorPersonId, input) {
+      const result = await reputationProofService.issueProof(execution, {
+        organizationScopeId: input.organizationScopeId,
+        subjectPersonId: input.subjectPersonId,
+        ...(input.snapshotId !== undefined ? { snapshotId: input.snapshotId } : {}),
+        idempotencyKey: input.idempotencyKey,
+      });
+      return { proof: toApiReputationProofView(result.proof), created: result.created };
+    },
+    async getReputationProof(execution, id, input) {
+      try {
+        const proof = await reputationProofService.getProof(
+          getExecutionContext() ?? execution,
+          input.organizationScopeId,
+          id,
+        );
+        return toApiReputationProofView(proof);
+      } catch {
+        // Cross-tenant + nonexistent are indistinguishable (no
+        // existence oracle) — the route renders 404.
+        return null;
+      }
+    },
+    async verifyReputationProof(execution, id, input) {
+      const verdict = await reputationProofService.verifyProof(
+        getExecutionContext() ?? execution,
+        {
+          organizationScopeId: input.organizationScopeId,
+          proofId: id,
+          evaluatedAt: input.evaluatedAt,
+        },
+      );
+      return {
+        proofId: verdict.proofId,
+        valid: verdict.valid,
+        reason: verdict.reason,
+        checks: verdict.checks.map((c) => ({
+          check: c.check,
+          subject: c.subject,
+          passed: c.passed,
+          reason: c.reason,
+        })),
+      };
+    },
+    async verifyPresentedReputationProof(execution, input) {
+      const verdict = await reputationProofService.verifyPresentedProof(
+        getExecutionContext() ?? execution,
+        fromApiReputationProofView(input.proof),
+        input.evaluatedAt,
+      );
+      return {
+        proofId: verdict.proofId,
+        valid: verdict.valid,
+        reason: verdict.reason,
+        checks: verdict.checks.map((c) => ({
+          check: c.check,
+          subject: c.subject,
+          passed: c.passed,
+          reason: c.reason,
+        })),
+      };
+    },
+    async revokeReputationProof(execution, _actorPersonId, id, input) {
+      const proof = await reputationProofService.revokeProof(execution, {
+        organizationScopeId: input.organizationScopeId,
+        proofId: id,
+        reason: input.reason,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return toApiReputationProofView(proof);
+    },
+
     // -- NET-W008 settlement commands ------------------------------------
 
     async createEconomicValue(execution, input) {
@@ -10533,6 +10737,8 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     reputationPolicyService,
     reputationInputService,
     reputationSnapshotService,
+    // NET-W031 domain service (portable reputation proofs).
+    reputationProofService,
     // NET-W008 domain services.
     economicValueService,
     creditService,

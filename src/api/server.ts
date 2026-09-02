@@ -1509,6 +1509,138 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // -- NET-W031 portable reputation proof routes (issue #63) -----------
+    // Proofs are PRIVACY-CARRYING artifacts: every route is guarded
+    // (deny-by-default) and tenant-scoped — cross-tenant and
+    // nonexistent are indistinguishable (no existence oracle).
+
+    // POST /api/reputation/proofs — issue a portable reputation proof
+    // (protected; guard action reputationProof.create; the facts
+    // DERIVE from the authoritative snapshot inside the issuance
+    // transaction — the input carries no caller-asserted facts; the
+    // composed W029 versioned signer signs the canonical input;
+    // composite idempotency).
+    if (path === "/api/reputation/proofs" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "reputationProof.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseIssueReputationProofInput(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.issueReputationProof(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/reputation/proofs/presented-verification — verify a
+    // PRESENTED, self-contained proof artifact (protected; guard
+    // action reputationProof.verify; the PORTABLE path — no
+    // tenant-scoped state is queried; deterministic + fail-closed with
+    // machine-readable reasons; the EXACT match runs BEFORE the :id
+    // routes so the path can never be captured as an :id).
+    if (
+      path === "/api/reputation/proofs/presented-verification" &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "reputationProof.verify", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseVerifyPresentedReputationProofInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.verifyPresentedReputationProof(guarded.execution, input),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/reputation/proofs/:id/read — fetch a proof artifact
+    // (protected; guard action reputationProof.read; tenant-scoped —
+    // cross-tenant and nonexistent are indistinguishable 404s, no
+    // existence oracle).
+    if (
+      path.startsWith("/api/reputation/proofs/") &&
+      path.endsWith("/read") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/reputation/proofs/".length, -"/read".length);
+      const guarded = await guardMutation(ctx, req, "reputationProof.read", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.getReputationProof(guarded.execution, id, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+        }),
+      );
+      if (!view) {
+        await send(res, 404, {
+          error: "not_found",
+          message: `reputation proof not found: ${id}`,
+        });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/reputation/proofs/:id/verification — verify a STORED
+    // proof (protected; guard action reputationProof.verify;
+    // deterministic server-side decision — fails closed with
+    // machine-readable reasons; staleness is evaluated at the EXPLICIT
+    // body evaluatedAt).
+    if (
+      path.startsWith("/api/reputation/proofs/") &&
+      path.endsWith("/verification") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/reputation/proofs/".length, -"/verification".length);
+      const guarded = await guardMutation(ctx, req, "reputationProof.verify", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.verifyReputationProof(guarded.execution, id, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          evaluatedAt: strField(obj, "evaluatedAt"),
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/reputation/proofs/:id/revocation — revoke a proof
+    // (protected; guard action reputationProof.revoke; ONE-WAY — a
+    // revoked proof never verifies again).
+    if (
+      path.startsWith("/api/reputation/proofs/") &&
+      path.endsWith("/revocation") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/reputation/proofs/".length, -"/revocation".length);
+      const guarded = await guardMutation(ctx, req, "reputationProof.revoke", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.revokeReputationProof(guarded.execution, guarded.personId, id, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          reason: strField(obj, "reason"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
     // -- NET-W008 settlement routes ----------------------------------------
 
     // POST /api/settlement/values — record pending economic value
@@ -7086,6 +7218,107 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       coverage,
       idempotencyKey: strField(obj, "idempotencyKey"),
     };
+  }
+
+  // -- NET-W031 portable reputation proof request-body parsers ---------
+
+  function parseIssueReputationProofInput(
+    body: unknown,
+  ): import("./port.ts").ApiIssueReputationProofInput {
+    const obj = requireBodyObject(body);
+    const snapshotId = obj.snapshotId;
+    if (snapshotId !== undefined && typeof snapshotId !== "string") {
+      throw apiValidationError('field "snapshotId", when provided, must be a string');
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      subjectPersonId: strField(obj, "subjectPersonId"),
+      ...(snapshotId !== undefined ? { snapshotId } : {}),
+      idempotencyKey: strField(obj, "idempotencyKey"),
+    };
+  }
+
+  /**
+   * Parse the presented-proof verification body. The presented artifact
+   * is UNTRUSTED JSON: the parser only checks the REQUEST shape (a
+   * `proof` object + the explicit `evaluatedAt`) and normalizes runtime
+   * types so untyped JSON can cross the typed boundary — the DOMAIN
+   * shape validator + signature check are the authority on malformed
+   * and tampered artifacts, and every substituted sentinel fails
+   * closed downstream ("" → not_a_nonempty_string / not_hex; -1 →
+   * negative; a non-boolean capped parses as the claim false, which the
+   * signature over the canonical input still binds).
+   */
+  function parseVerifyPresentedReputationProofInput(
+    body: unknown,
+  ): import("./port.ts").ApiVerifyPresentedReputationProofInput {
+    const obj = requireBodyObject(body);
+    const proof = obj.proof;
+    if (!proof || typeof proof !== "object" || Array.isArray(proof)) {
+      throw apiValidationError('field "proof" must be a JSON object (the presented proof artifact)');
+    }
+    return {
+      proof: parsePresentedReputationProofView(proof as Record<string, unknown>),
+      evaluatedAt: strField(obj, "evaluatedAt"),
+    };
+  }
+
+  function parsePresentedReputationProofView(
+    obj: Record<string, unknown>,
+  ): import("./port.ts").ApiReputationProofView {
+    const dims = obj.dimensions;
+    return {
+      id: strOrEmpty(obj.id),
+      organizationScopeId: strOrEmpty(obj.organizationScopeId),
+      subjectPersonId: strOrEmpty(obj.subjectPersonId),
+      snapshotId: strOrEmpty(obj.snapshotId),
+      policyId: strOrEmpty(obj.policyId),
+      policyVersion: numOrMinusOne(obj.policyVersion),
+      referenceAt: strOrEmpty(obj.referenceAt),
+      digest: strOrEmpty(obj.digest),
+      dimensions: Array.isArray(dims)
+        ? dims.map((entry) =>
+            parsePresentedReputationProofDimensionView(
+              entry !== null && typeof entry === "object"
+                ? (entry as Record<string, unknown>)
+                : {},
+            ),
+          )
+        : (dims as unknown as readonly import("./port.ts").ApiReputationProofDimensionView[]),
+      algorithm: strOrEmpty(obj.algorithm),
+      keyReference: strOrEmpty(obj.keyReference),
+      signature: strOrEmpty(obj.signature),
+      issuedAt: strOrEmpty(obj.issuedAt),
+      revokedAt: strOrNull(obj.revokedAt),
+      revocationReason: strOrNull(obj.revocationReason),
+      createdAt: strOrEmpty(obj.createdAt),
+      recordFormat: strOrEmpty(obj.recordFormat),
+    };
+  }
+
+  function parsePresentedReputationProofDimensionView(
+    obj: Record<string, unknown>,
+  ): import("./port.ts").ApiReputationProofDimensionView {
+    return {
+      dimension: strOrEmpty(obj.dimension),
+      score: numOrMinusOne(obj.score),
+      capped: typeof obj.capped === "boolean" ? obj.capped : false,
+      inputCount: numOrMinusOne(obj.inputCount),
+      verifiedInputCount: numOrMinusOne(obj.verifiedInputCount),
+      indicatedInputCount: numOrMinusOne(obj.indicatedInputCount),
+    };
+  }
+
+  function strOrEmpty(value: unknown): string {
+    return typeof value === "string" ? value : "";
+  }
+
+  function strOrNull(value: unknown): string | null {
+    return typeof value === "string" ? value : null;
+  }
+
+  function numOrMinusOne(value: unknown): number {
+    return typeof value === "number" && Number.isFinite(value) ? value : -1;
   }
 
   function parseProofOfValueInput(body: unknown): import("./port.ts").ApiCreateProofOfValueInput {
