@@ -15,23 +15,24 @@
 
 ### Last merged work item
 
-**NET-W034 — Complete advertising lifecycle**
+**NET-W035 — Complete creator lifecycle**
 
-- GitHub issue: #69 — completed by merged PR #70
-- PR: #70 — squash-merged
-- Final reviewed head: `f66cb4f380afde56ed23716453a297d0280b2411`
-- Merge SHA: `7c19a19addd44a07965fa25ee7cab021bab2016a`
+- GitHub issue: #71 — completed
+- Implementation PR: #73 — squash-merged
+- Final reviewed head: `eaf19bd9292a1c924cf7a8e6d086838369a5affc`
+- Merge SHA: `85e5d6d7b8ff1df2fda4740fdd1f541890496610`
+- Documentation preparation PR: #72 — squash-merged `d480b71521a72de6bee63a7dc9cf58ff1cfedc3a`
 - Status: MERGED
 - Architectural decision: APPROVED after same-PR remediation.
-- Scope: Phase-9 advertising composition/evidence milestone; no new production domain, authority, ledger, workflow engine, cryptographic primitive, AI authority or frozen-architecture amendment.
-- Canonical executable order proven: campaign/policy → supply/provenance → W021 selection → placement → campaign opportunity → contribution entry/publication → `/workflows` MEASURING → W022 measurement → `/outcomes` → `/evidence` Proof-of-Value → PoH evaluation → `/workflows` completion to VERIFIED → risk/dispute gates → `/settlement` pending/mature → declared campaign clearing.
-- The architect initially requested changes because the first AC-09 fault fixture pre-consumed the value out-of-band and therefore proved only stale-state fail-closed behavior, not rollback of a partially staged clearing transaction. The same PR remediated this with a genuine composite-level commit-failure proof over the actual W020 clearing composite, and replaced the dispute fixture's `Date.now()` anchor with the authoritative subject timestamp.
-- Final W034 verification recorded in the ledger: `bun run verify` 2258 pass / 15 skip / 0 fail; `arch:check` + `authority:check` 322 files / 0 violations; 12/12 targeted behavioral mutations caught with byte-identical source restoration; real PostgreSQL + Redis integration 17/0; real-provider advertising round-trip 11/11 on a freshly recreated dedicated database; exact-head CI green on push and pull_request; no production `src/` changes.
-- The clean dedicated round-trip reported 26 real ledger entries rather than an earlier 46-entry run because the earlier database contained 20 residual entries from a prior development iteration; conservation held in the clean run and the discrepancy was explicitly documented rather than hidden.
+- Scope: Phase-9 creator composition/evidence milestone; no new production domain, authority, ledger, workflow engine, payment primitive, crypto primitive, AI authority or frozen-architecture amendment.
+- Canonical traversal proven: creator discovery/matching → campaign terms → W017 acceptance/rights → contribution entry → UGC/rights → W018 disclosure/compliance → `/workflows` MEASURING → real W022 measurement → `/outcomes` → `/evidence` PoV → PoH → workflow VERIFIED → settlement pending → risk/dispute gates → settlement matured → W030 external payment.
+- Final evidence: `bun run verify` 2330 pass / 15 skip / 0 fail; architecture + authority checks 322 files / 0 violations; targeted mutations 16/16 caught with byte-identical restoration; real PostgreSQL + Redis 17/17; real-provider creator round-trip 23/23; exact-head CI green; no production `src/` changes.
+- Same-PR remediation closed two determinism blockers: fixed/authoritative anchors replaced canonical wall-clock rights/evidence timestamps; payment identity became deterministic from the authoritative value record and signing timestamp fixed, with only the W030 freshness observation remaining wall-clock-dependent. The strengthened regression pin and M13–M16 mutations protect the fix.
+- AC-09 used a genuine composite-level commit-failure proof with real repositories/ledger/idempotency/audit writer, proving no partial state survives and a healthy same-key retry commits exactly once.
 
 ### Previous completed milestones
 
-NET-W001 through NET-W034 are complete and merged.
+NET-W001 through NET-W035 are complete and merged.
 
 Important lineage checkpoints:
 - W004 `/workflows` lifecycle authority
@@ -62,97 +63,85 @@ Important lineage checkpoints:
 - W032 decentralized validation/dispute coordination inside `/disputes`
 - W033 complete contribution lifecycle composition proof
 - W034 complete advertising lifecycle composition proof
+- W035 complete creator lifecycle composition proof
 
 ## Next implementation target
 
-**NET-W035 — Complete creator lifecycle**
+**NET-W036 — Complete demand/procurement/benefit lifecycle**
 
-- GitHub issue: #71 — OPEN
-- Status: READY_FOR_IMPLEMENTATION
-- Documentation preparation PR: #72 — squash-merged at `d480b71521a72de6bee63a7dc9cf58ff1cfedc3a`
-- Work order: `spec/work-orders/NET-W035.md` — merged and frozen for implementation
-- Evidence ledger: `docs/net-w035-complete-creator-lifecycle.md` — merged and frozen for implementation
-- Implementation branch: `feat/net-w035-complete-creator-lifecycle`
-- Implementation branch base: W034 merge SHA `7c19a19addd44a07965fa25ee7cab021bab2016a`
-- Dependencies: NET-W018 + NET-W034 — VERIFIED/MERGED
-- Requirements/scope: prove creator discovery → contract/terms → UGC/rights → disclosure/compliance → measurement → evidence/Proof-of-Value → settlement/payment using existing frozen authorities.
+- Canonical GitHub issue: #75 — OPEN, `ready-for-implementation`
+- Duplicate transition issues #74, #76, #77 were closed as `duplicate`; issue #78 was a temporary stop marker and is closed `not_planned`. Issue #75 is the only authoritative W036 issue.
+- Documentation preparation PR: #80 — squash-merged `6d02bcea0b335dd8b8ea71a7316d40f922e38fe9`
+- Work order: `spec/work-orders/NET-W036.md` — merged and frozen
+- Evidence ledger: `docs/net-w036-complete-demand-procurement-benefit-lifecycle.md` — merged and frozen
+- Implementation branch: to be created from W035 merge ancestry after the preparation checkpoint; do not reuse the documentation branch.
+- Dependencies: NET-W028 + NET-W033 — VERIFIED/MERGED
+- Scope: demand aggregation → supplier offers/eligibility/selection → fulfillment/execution → measurement/outcomes → W027 baseline/counterfactual → verified savings/PoV → `/settlement` → W028 benefit funding/allocation.
 
-W035 is a composition/proof milestone. Do not add a new domain or authority. `/creators` remains creator identity/matching/creator-record authority; `/campaigns` remains campaign policy; `/inventory` remains supply/placement; `/workflows` remains lifecycle; `/evidence` remains provenance/PoV; `/outcomes` and `/measurement` remain measurement authority/integration; `/disputes` remains risk/control; `/settlement` remains payment/economic authority; `/adapters` remains provider-specific integration; `/payments` remains provider transaction integration only.
+W036 is a composition/proof milestone. `/demand` remains demand/offer/selection authority; `/workflows` remains lifecycle authority; `/measurement` + `/outcomes` remain measurement boundaries; W027 remains savings/counterfactual semantics; `/evidence` remains PoV/provenance authority; `/settlement` remains sole economic authority; `/benefits` remains pool/allocation authority; `/adapters` remains provider integration. Do not create a second ledger, lifecycle engine, savings authority, benefit authority, or W037 behavior.
 
 Required proof shape:
 
 ```text
-creator discovery
-  → contract / campaign terms
-  → UGC production / rights
-  → disclosure / compliance
-  → /workflows MEASURING
-  → measurement / /outcomes
-  → evidence / Proof-of-Value
-  → workflow completion / risk + dispute controls
-  → settlement / optional external payment
+demand pool
+  → privacy-safe qualified demand
+  → supplier offers / hard eligibility / deterministic selection
+  → fulfillment lifecycle
+  → measurement / outcomes
+  → supported baseline / counterfactual
+  → verified savings / Proof-of-Value
+  → settlement
+  → benefit funding / deterministic allocation
 ```
 
-The exact executable order is frozen in the W035 work order and must be proven with authoritative state/version and durable audit witnesses; terminal payment alone is insufficient.
+The executable order must be proven with authoritative state/version and durable audit witnesses, not merely an ordered test array or terminal allocation.
 
 ## Review lessons that must persist
 
 ### Authority drift
-Use behavioral authority guards with positive and negative fixtures. Generic identifier matching alone is insufficient.
+Use behavioral authority guards with positive and negative fixtures. Identifier matching alone is insufficient.
 
 ### Tenant isolation
-Tenant scope must flow service → port → composition root → HTTP where applicable. Cross-tenant identifiers normally resolve as not-found.
-
-### Policy lineage
-When policy identity can exist across organizations, serialize lineage with an organization-independent mutex and re-check scope/version inside the authoritative transaction.
+Scope must flow service → port → composition root → HTTP where applicable. Cross-tenant identifiers fail closed without existence oracles.
 
 ### Sanctioned lifecycle paths
-Semantically gated lifecycle edges must not be exposed through generic workflow resolution. Use explicit sanctioned transition contracts. For traversal/composition proofs, prove executable ordering, not merely the terminal state.
+Semantically gated lifecycle edges must use explicit sanctioned transition contracts; do not expose generic workflow resolution as a bypass. E2E proofs must establish executable order.
 
 ### Economic atomicity
-Coupled economic mutations must share one authoritative transaction. Use `...WithinTx`; never chain independently committing economic commands.
+Coupled economic mutations share one authoritative transaction; use `...WithinTx` and never chain independently committing economic commands.
 
 ### Audit ordering
-Audit publication is post-commit. Durable commit failure discards the audit buffer; audit publication failure must never fabricate an uncommitted business mutation.
+Audit is post-commit; commit failure discards buffered audit. Never fabricate uncommitted business state through audit publication.
 
 ### AI boundaries
-AI is advisory only and may not authorize eligibility, rights, tenancy, risk, settlement-readiness, lifecycle, privacy or economics.
+AI is advisory only and may not authorize eligibility, rights, tenancy, lifecycle, evidence, measurement truth, risk, privacy or economics.
 
-### Attestation coverage and lifecycle binding
-Covered-record commitments bind substantive content only where intended; mutable lifecycle invalidation must fail closed through explicit current-state checks. Portable verification must not invent a second authority.
+### Secrets/authenticated verification
+Production credentials resolve only through `SecretProvider` and fail closed. Authenticated verification and freshness remain mandatory where governing authority depends on them.
 
-### Secrets and authenticated verification
-Production secrets resolve only through `SecretProvider` and fail closed. Caller-supplied consistency is not authenticated truth; trusted verification requires an authenticated channel and mandatory freshness when freshness governs authority.
-
-### Aggregate disclosure
-Every aggregate fact, including counts in machine-readable details, is disclosed only under the same aggregate disclosure gate.
-
-### Procurement privacy
-Commitment count and distinct buyer-organization count are separate privacy dimensions. Never collapse one into the other.
+### Aggregate disclosure / procurement privacy
+All aggregate facts are behind the same applicable disclosure gate. Commitment count and distinct buyer-organization count are separate privacy dimensions and must never be collapsed.
 
 ### Supplier selection
-Supplier competition remains a procurement decision inside `/demand`, never hidden economic authority. Hard eligibility precedes deterministic selection.
+Hard eligibility precedes deterministic competitive selection. Supplier competition stays inside `/demand` and never becomes hidden economic authority.
 
 ### Savings/counterfactuals
-Savings require explicit supported baselines and observed/counterfactual evidence. Preserve uncertainty and fail closed on invalid, stale or insufficient support. W028 consumes verified/authoritative value rather than recreating savings semantics.
+Savings require explicit supported baselines and observed/counterfactual evidence. Preserve uncertainty and fail closed on stale, invalid or insufficient support.
 
-### Benefit pools / economic orchestration
-Pools fund from references only; amounts re-derive in-tx. Drawable value posts exclusively through `/settlement` `WithinTx` primitives with a mirroring reward policy; verified savings fund entitlement-only allocations that post nothing. Conservation arithmetic uses scaled integers with explicit remainders. Stale snapshots never authorize economic effects.
+### Benefit pools
+Pools fund from references to authoritative value; amounts re-derive inside the authoritative transaction where required. Allocation conserves source value, uses deterministic versioned eligibility, and never creates a second ledger.
 
 ### Idempotent replay ordering
-For every material mutation, separate pure request-shape validation from mutable acceptance checks. Completed same-key replay must reach the idempotency store before mutable state reads that could have changed after the original commit. Fresh-key attempts must still enforce every current-state guard.
+Completed same-key replay reaches idempotency storage before mutable reads that may have changed. Fresh keys re-check every current-state guard.
 
-### Test mutation quality
-Every tamper helper must guarantee a real difference; fixed-prepend character tampering can be a no-op. Targeted mutation checks must mutate each material guard and restore source byte-identically.
+### Mutation quality
+Every mutation helper must make a real change and restore source byte-identically. Deterministic proof paths must not depend on fresh wall-clock or random identifiers except explicitly isolated provider-freshness semantics.
 
-### End-to-end traversal proof
-A Phase-9 composition milestone must pin the declared executable order explicitly. Use authoritative state/version witnesses and, where ordering depends on committed mutations, durable audit insertion/commit order. Reorder a scenario on the same PR when the architect identifies sequencing drift; do not weaken the owning-domain gates merely to make the fixture executable.
+### End-to-end traversal
+Phase-9 composition proofs pin executable order and use authoritative state/version plus durable audit commit order. A terminal state is not sufficient.
 
 ### Composite transaction-failure proof
-When a work item claims atomicity for a coupled composite, a stale-state rejection is not a rollback proof. The evidence must force failure after material work is staged inside the composite transaction and prove that no economic, bookkeeping, audit or idempotency state survives; then prove a healthy same-key retry commits exactly once.
-
-### Deterministic fixtures
-Canonical end-to-end fixtures must derive policy/window timestamps from fixed anchors or authoritative subject timestamps. Do not introduce fresh `Date.now()` dependencies into proof paths whose semantics are expected to be reproducible.
+Atomicity requires failure after material work is staged inside the real composite transaction, proving no economic/bookkeeping/audit/idempotency state survives, followed by a healthy same-key retry that commits exactly once.
 
 ## Quality gate
 
@@ -162,7 +151,7 @@ Canonical local gate:
 bun run verify
 ```
 
-Material work also requires configured real PostgreSQL/Redis integration. Architectural work requires `arch:check` and `authority:check`; material trust/integrity work requires targeted mutation checks and secret scanning. Phase-9 composition milestones additionally require a real end-to-end round-trip over the actual provider-selection path.
+Material work also requires configured real PostgreSQL/Redis integration. Architectural work requires `arch:check` and `authority:check`; material trust/integrity work requires targeted mutations and secret scanning. Phase-9 composition milestones additionally require a real end-to-end round-trip over the actual provider-selection path.
 
 ## GitHub workflow state machine
 
@@ -189,4 +178,4 @@ Never merge merely because CI is green. Never create a second implementation PR 
 
 ## Current action
 
-W035 is ready for implementation. The work order and evidence ledger are merged on `main`, and the implementation branch `feat/net-w035-complete-creator-lifecycle` is rooted directly at the W034 merge SHA `7c19a19addd44a07965fa25ee7cab021bab2016a`. Read the frozen architecture/lock, dependency graph, W017, W018, W033 and W034 evidence/work orders before implementation. Do not introduce W036 behavior or alter frozen architecture.
+W035 is complete and merged. NET-W036 is now the active implementation target. Its work order and evidence ledger are merged on `main` via preparation PR #80 at `6d02bcea0b335dd8b8ea71a7316d40f922e38fe9`. Create the implementation branch from W035 merge SHA `85e5d6d7b8ff1df2fda4740fdd1f541890496610`, then implement exactly one W036 PR under the frozen work order. Do not introduce W037 behavior or alter frozen architecture.
