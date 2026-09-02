@@ -1,9 +1,9 @@
 # NET-W034 Evidence Ledger — Complete advertising lifecycle
 
-**Status:** ARCHITECTURE / WORK-ORDER FREEZE — implementation not yet verified  
-**Issue:** #69  
-**Dependencies:** NET-W020 + NET-W021 + NET-W022 + NET-W023 + NET-W033 — merged/verified  
-**Architecture:** v1.0 frozen; no amendment authorized  
+**Status:** IMPLEMENTED — full local verification gate GREEN
+**Issue:** #69
+**Dependencies:** NET-W020 + NET-W021 + NET-W022 + NET-W023 + NET-W033 — merged/verified
+**Architecture:** v1.0 frozen (byte-identical — no shared-file amendment)
 **Implementation branch:** `feat/net-w034-complete-advertising-lifecycle`
 
 ## 1. Purpose
@@ -66,6 +66,22 @@ The final implementation must expose a deterministic ordered witness collection 
 16. final lineage/audit reconstruction completed.
 
 The implementation must demonstrate that witnesses 9–10 cannot occur before witness 8, and that economic witnesses cannot occur before the required workflow/evidence/evaluation/risk gates. Local array order alone is not evidence.
+
+**Delivered** — the canonical scenario emits exactly these 21 ordered stage witnesses (each carrying the durable authority record id; from the contribution entry onward, the AUTHORITATIVE contribution state + version read through the owning boundary):
+
+```text
+campaign-policy-resolved → supply-provenance-resolved → matching-run-committed
+→ supply-selected-eligible → placement-committed → opportunity-materialized
+→ contribution-created (DRAFT v0) → lifecycle-submitted (SUBMITTED v4)
+→ lifecycle-measuring (MEASURING v5) → measurement-normalized (MEASURING v5)
+→ outcome-verified (MEASURING v5) → evidence-pov-verified (MEASURING v5)
+→ poh-evaluated (MEASURING v5) → lifecycle-completed (VERIFIED v10)
+→ settlement-pending (VERIFIED v10) → risk-gate-refused → risk-gate-resolved
+→ dispute-gate-refused → dispute-gate-resolved → settlement-matured
+→ clearing-committed
+```
+
+plus 24 ordered durable audit markers (campaign.created → inventory_item.registered → supply_verification_attached → campaign_match.recorded → placement.recorded → opportunity.created → contribution transitions → outcome_observation.created → measured_outcome lifecycle → proof_of_value lifecycle → the walk completion → economic_value.recorded → risk_control/dispute resolutions → economic_value.matured → reward_allocation.recorded → cross_promotion_clearing.recorded) — the audit commit order corroborates the witness order (the W033 PR #68 remediation discipline).
 
 ## 4. Acceptance map — evidence required before merge
 
@@ -276,17 +292,17 @@ No production advertising credentials may be committed or embedded in fixtures.
 
 | Gate | Command / evidence | Result | Head / reference |
 |---|---|---|---|
-| Typecheck | `bun run typecheck` | PENDING | PENDING |
-| Architecture | `bun run arch:check` | PENDING | PENDING |
-| Authority | `bun run authority:check` | PENDING | PENDING |
-| Full verify | `bun run verify` | PENDING | PENDING |
-| Targeted mutation checks | W034 mutation driver | PENDING | PENDING |
-| Source restoration | byte-identical restore checks | PENDING | PENDING |
-| Secret scan | repository/W034 surface | PENDING | PENDING |
-| PostgreSQL + Redis | configured integration suite | PENDING | PENDING |
-| Real advertising round-trip | dedicated real-provider path | PENDING | PENDING |
-| CI push | GitHub Actions | PENDING | PENDING |
-| CI pull_request | GitHub Actions | PENDING | PENDING |
+| Typecheck | `bun run typecheck` | **PASS** | implementation head (clean `tsc --noEmit`) |
+| Architecture | `bun run arch:check` | **PASS: 322 files scanned, 0 violations** | implementation head |
+| Authority | `bun run authority:check` | **PASS: 322 files scanned, 0 violations** | implementation head |
+| Full verify | `bun run verify` | **PASS: 2257 pass / 15 skip / 0 fail — 2272 tests / 289 files / 30,533 expect()** (the W033 baseline 2170/15/0 — 2185 tests / 277 files ⇒ +87 W034 composition tests / +12 files; every pre-existing suite preserved) | implementation head |
+| Targeted mutation checks | `opencon-tmp-w034/mutation-driver.py`, never committed | **10/10 behavioral mutations CAUGHT** | M1 the recognition VERIFIED-lifecycle gate (runtime.ts), M2 the maturation risk-control gate, M3 the maturation dispute gate, M4 the MEASURING-before-measurement stage ordering (the harness — the W033-lesson ordering guard), M5 the clearing risk/dispute gate (clearing-service.ts), M6 the /workflows stale-writer gate, M7 the /evidence grade derivation, M8 the PoV verify attestation requirement (the defense-in-depth pair), M9 the W022 delivery-notice integrity gate, M10 the exact-one inventory resolution |
+| Source restoration | byte-identical restore checks | **PASS** — every mutated source restored byte-identically (cmp-verified) + the post-restore clean suite GREEN | implementation head |
+| Secret scan | repository/W034 surface | **CLEAN** (no key material in the W034 surface; `REQUIRED_IN_PRODUCTION` unchanged: `DATABASE_URL`, `REDIS_URL`, `OBJECT_STORAGE_BUCKET`; every provider credential is a TEST literal) | implementation head |
+| PostgreSQL + Redis | configured integration suite | **17 pass / 0 fail** — locally provisioned PostgreSQL 17 + Redis 7 (the CI service-container equivalents): `PG_TEST_DATABASE_URL=postgres://…:55432/opencon_test REDIS_TEST_URL=redis://…:56379 bun test tests/integration/` | implementation head |
+| Real advertising round-trip | dedicated real-provider path | **ALL CHECKS PASSED (11 checks)** — `opencon-tmp-w034/real-pg-roundtrip.ts`, never committed: a DEDICATED round-trip database + a staging-classified runtime (the REAL provider-selection path — PostgresAuthorityAdapter + RedisCoordinationAdapter, no shims; the delivery-notice adapter AUTO-WIRED from the staging SecretProvider's `MEASUREMENT_OPENRTB_DELIVERY_KEY`) + the same seeded guard/policy surface the W008→W034 chain builds + ONE advertising execution through the complete canonical chain — the 21 ordered stage witnesses (MEASURING v5 BEFORE the measurement/outcomes/evidence stages; the completed VERIFIED v10 walk BEFORE the economic stages; the risk/dispute gates BEFORE the maturation), the 24 ordered audit markers over 258 real-PostgreSQL audit events, the terminal state (contribution VERIFIED v10, PoV VERIFIED, measured outcome VERIFIED, value CONSUMED 100, exactly ONE reward allocation), global conservation over 46 real ledger entries, the privacy boundary (no raw vendor values), the same-key clearing replay exactly-once; the round-trip database dropped afterwards | implementation head |
+| CI push | GitHub Actions | PENDING (recorded after the PR push) | PENDING |
+| CI pull_request | GitHub Actions | PENDING (recorded after the PR opens) | PENDING |
 
 ## 7. Changed-file policy
 
@@ -300,6 +316,22 @@ Expected primary surfaces are:
 - minimal composition-root test/harness adjustments only when required to invoke existing authorities
 
 The implementation PR must explicitly list every changed source file and identify which existing authority it belongs to.
+
+### 7.1 The delivered changed-file inventory (the complete list)
+
+**Added — the W034 composition/proof artifact set (13 files, tests + docs):**
+
+- `tests/advertising/_net-w034-harness.ts` — the shared advertising harness: wraps the ENTIRE W008→W019 creators/contribution chain on ONE runtime, threads the REAL W022 delivery-notice measurement provider + the W023 seller-authorization trust key, seeds the W020/W021/W022/W023 guard surface, and implements the canonical `runAdvertisingScenario` with the ordered 21-witness traversal proof (every authority invoked through its owning boundary — NO production source, NO new authority).
+- `tests/advertising/net-w034-full-path-scenario.test.ts` — the deterministic full-path scenario (3 tests) incl. the canonical traversal-ORDER proof (stage witnesses + the audit commit order).
+- `tests/advertising/net-w034-ac-01-campaign.test.ts` … `tests/advertising/net-w034-ac-10-traversal-architecture.test.ts` — the one-to-one AC suites (AC-01: 6, AC-02: 10, AC-03: 8, AC-04: 8, AC-05: 8, AC-06: 8, AC-07: 6, AC-08: 8, AC-09: 6, AC-10: 6 tests).
+- `tests/regression/net-w034-ac-10-architecture-out-of-scope.test.ts` — the repository regression suite (10 tests: the architecture/authority guards, the frozen files, the work-order binding, the vocabulary pins, the no-production-source pin, the secret boundary).
+- `docs/net-w034-complete-advertising-lifecycle.md` — this ledger (the implementation record).
+
+**Modified — the ONE declared composition-root test/harness adjustment:**
+
+- `tests/settlement/_net-w008-harness.ts` (+14 lines) — `NetW008HarnessOptions.measurement.providers` threaded into `createRuntime` (the pre-existing NET-W006 measurement option — the same provider-selection surface the W006/W022 harnesses use). This is a TEST harness file (never `src/`); it exists because the canonical advertising chain needs the REAL W022 measurement provider registry on the SAME runtime as the W008→W019 contribution machinery. **Authority mapping:** the threading composes the existing `/measurement` provider-selection boundary — it adds NO authority, NO domain, NO production surface.
+
+**No `src/` file changed. No production source changed. The frozen architecture files are byte-identical.**
 
 ## 8. Merge gate
 
