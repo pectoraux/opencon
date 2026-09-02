@@ -67,11 +67,11 @@ Important lineage checkpoints:
 
 **NET-W035 — Complete creator lifecycle**
 
-- GitHub issue: #70-equivalent backlog target (create/confirm canonical issue before activation)
-- Status: NEXT / DEPENDENCY-READY after W034 merge
+- GitHub issue: #71 — OPEN
+- Status: READY_FOR_IMPLEMENTATION
 - Branch: to be created from W034 merge SHA `7c19a19addd44a07965fa25ee7cab021bab2016a`
 - Dependencies: NET-W018 + NET-W034 — VERIFIED/MERGED
-- Requirements/scope: prove creator discovery → contract → UGC → disclosure → measurement → payment using existing frozen authorities.
+- Requirements/scope: prove creator discovery → contract/terms → UGC/rights → disclosure/compliance → measurement → evidence/Proof-of-Value → settlement/payment using existing frozen authorities.
 - Work order: author `spec/work-orders/NET-W035.md` before coding.
 - Evidence ledger: author `docs/net-w035-complete-creator-lifecycle.md` before coding.
 
