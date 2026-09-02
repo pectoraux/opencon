@@ -29,6 +29,19 @@ import { defineBoundaryModule } from "../core/domain-module.ts";
  * (control outcome separated from the economic consequence), and
  * appeals as NEW linked records (append-only history).
  *
+ * NET-W032 extends the same boundary with the decentralized
+ * VALIDATION/DISPUTE COORDINATION layer: scoped validator
+ * participants, deterministic assignment (conflict-of-interest
+ * exclusions + frozen (registeredAt, id) tie-break + versioned
+ * cardinality), bounded validation challenge rounds (immutable
+ * facts + explicit outcome records — no second workflow engine),
+ * independent validator observations with opaque W029/W031 evidence
+ * references, deterministic quorum/outcome derivation (the PURE
+ * quorum-engine over the versioned policy contract) and accepted
+ * outcomes applied ONLY through the owning authority's sanctioned
+ * mutation boundary (composition-root orchestration; validator
+ * stakes escrow in /settlement — NEVER here).
+ *
  * Decision-support and control authority ONLY: no economic mutation,
  * no reputation mutation, no lifecycle mutation (those belong to
  * /settlement, /reputation and /workflows).
@@ -40,5 +53,7 @@ export const disputesModule = defineBoundaryModule({
     "fraud/risk foundation: signals, deterministic policies, " +
     "assessments, review cases, control gates (NET-W009); challenges/" +
     "disputes/appeals with explicit settlement-authority staking " +
-    "(NET-W010)",
+    "(NET-W010); decentralized validation coordination: validators, " +
+    "deterministic assignments, quorum outcomes applied only through " +
+    "the owning authorities (NET-W032)",
 });

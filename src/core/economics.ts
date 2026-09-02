@@ -333,10 +333,18 @@ export function isEconomicStakeState(value: string): value is EconomicStakeState
  * only records the references (no hidden ledger; the /campaigns
  * boundary carries no economic-unit mutation methods). The purpose
  * is the linkage each boundary verifies against its own records.
+ * NET-W032 adds `validation_assignment` (additive, non-breaking): a
+ * validator's per-round eligibility bond — committed through the
+ * settlement authority at the composition root with the purpose id
+ * `{challengeId}:{validatorPersonId}` (one bonded validator per
+ * assignment slot); the /disputes domain only VERIFIES the linkage
+ * when bonding and RECORDS the disposition the settlement authority
+ * executed after a terminal closure.
  */
 export const ECONOMIC_STAKE_PURPOSE_KINDS = [
   "campaign_budget",
   "dispute_challenge",
+  "validation_assignment",
 ] as const;
 
 export type EconomicStakePurposeKind = (typeof ECONOMIC_STAKE_PURPOSE_KINDS)[number];

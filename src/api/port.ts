@@ -1000,6 +1000,270 @@ export interface ApiRevokeReputationProofInput {
   readonly idempotencyKey: string;
 }
 
+// -- NET-W032 validation views/inputs -------------------------------------
+
+/** The public view of a versioned quorum policy (NET-W032). */
+export interface ApiValidationQuorumPolicyView {
+  readonly id: string;
+  readonly policyId: string;
+  readonly version: number;
+  readonly organizationScopeId: string;
+  readonly description: string | null;
+  readonly assignmentCardinality: number;
+  readonly minimumSubmitted: number;
+  readonly upholdThreshold: number;
+  readonly rejectThreshold: number;
+  readonly challengeWindowMs: number;
+  readonly validatorStakeRequirementCredits: number;
+  readonly createdBy: string;
+  readonly createdAt: string;
+}
+
+/** Inputs to create a quorum policy version (NET-W032; versioned lineage). */
+export interface ApiCreateValidationPolicyInput {
+  readonly organizationScopeId: string;
+  readonly policyId: string;
+  readonly version: number;
+  readonly description?: string;
+  readonly assignmentCardinality: number;
+  readonly minimumSubmitted: number;
+  readonly upholdThreshold: number;
+  readonly rejectThreshold: number;
+  readonly challengeWindowMs: number;
+  readonly validatorStakeRequirementCredits: number;
+}
+
+/** The public view of a validator participant (NET-W032). */
+export interface ApiValidatorParticipantView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly personId: string;
+  readonly status: string;
+  readonly registeredAt: string;
+  readonly suspendedAt: string | null;
+  readonly suspensionReason: string | null;
+  readonly protocolVersion: string;
+}
+
+/** Inputs to register a validator (NET-W032; self-binding only). */
+export interface ApiRegisterValidatorInput {
+  readonly organizationScopeId: string;
+  readonly personId: string;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to suspend a validator (NET-W032; ONE-WAY). */
+export interface ApiSuspendValidatorInput {
+  readonly organizationScopeId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+/** One assignment-set entry view (NET-W032). */
+export interface ApiValidatorAssignmentEntryView {
+  readonly validatorPersonId: string;
+  readonly participantId: string;
+  readonly selectionOrder: number;
+  readonly stake: {
+    readonly requirementCredits: number;
+    readonly stakeId: string | null;
+    readonly bondedAt: string | null;
+  };
+}
+
+/** One excluded-candidate trace entry view (NET-W032). */
+export interface ApiValidatorExcludedCandidateView {
+  readonly personId: string;
+  readonly reason: string;
+}
+
+/** One append-only round event view (NET-W032). */
+export interface ApiValidationChallengeEventView {
+  readonly id: string;
+  readonly event: string;
+  readonly actorPersonId: string;
+  readonly reason: string | null;
+  readonly recordedAt: string;
+}
+
+/** The public view of a validation challenge round (NET-W032). */
+export interface ApiValidationChallengeView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly target: { readonly kind: string; readonly id: string };
+  readonly targetAnchorAt: string;
+  readonly targetSubjectPersonId: string | null;
+  readonly targetBeneficiaryPersonId: string | null;
+  readonly targetState: string;
+  readonly statement: string;
+  readonly reasonCodes: readonly string[];
+  readonly initiatedByPersonId: string;
+  readonly rechallengeOfChallengeId: string | null;
+  readonly effectiveAt: string;
+  readonly windowExpiresAt: string;
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly assignmentCardinality: number;
+  readonly minimumSubmitted: number;
+  readonly upholdThreshold: number;
+  readonly rejectThreshold: number;
+  readonly validatorStakeRequirementCredits: number;
+  readonly conflicts: readonly string[];
+  readonly assignment: {
+    readonly setId: string;
+    readonly derivedAt: string;
+    readonly policyId: string;
+    readonly policyVersion: number;
+    readonly entries: readonly ApiValidatorAssignmentEntryView[];
+    readonly excluded: readonly ApiValidatorExcludedCandidateView[];
+  } | null;
+  readonly outcome: { readonly outcomeId: string; readonly decidedAt: string } | null;
+  readonly events: readonly ApiValidationChallengeEventView[];
+  readonly protocolVersion: string;
+  readonly createdAt: string;
+}
+
+/** Inputs to open a validation challenge (NET-W032; opaque target ref). */
+export interface ApiOpenValidationChallengeInput {
+  readonly organizationScopeId: string;
+  readonly target: { readonly kind: string; readonly id: string };
+  readonly statement: string;
+  readonly reasonCodes: readonly string[];
+  readonly effectiveAt: string;
+  readonly policyId: string;
+  readonly rechallengeOfChallengeId?: string;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to mark a validator conflicted on a round (NET-W032; ONE-WAY). */
+export interface ApiMarkValidatorConflictInput {
+  readonly organizationScopeId: string;
+  readonly validatorPersonId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to derive a round's assignment set (NET-W032; explicit anchor). */
+export interface ApiDeriveValidatorAssignmentsInput {
+  readonly organizationScopeId: string;
+  readonly derivedAt: string;
+  readonly idempotencyKey: string;
+}
+
+/**
+ * Inputs to bond a validator's eligibility stake (NET-W032). The stake
+ * itself is COMMITTED through the settlement authority inside the
+ * composite command (compound idempotency keys — the W010
+ * bondDisputeStake precedent); the input carries no stakeId.
+ */
+export interface ApiBondValidatorStakeInput {
+  readonly organizationScopeId: string;
+  readonly validatorPersonId: string;
+  readonly idempotencyKey: string;
+}
+
+/** The public view of a validator observation (NET-W032). */
+export interface ApiValidationObservationView {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly challengeId: string;
+  readonly assignmentSetId: string;
+  readonly validatorPersonId: string;
+  readonly participantId: string;
+  readonly target: { readonly kind: string; readonly id: string };
+  readonly verdict: string;
+  readonly statement: string;
+  readonly evidenceRefs: readonly { readonly kind: string; readonly id: string }[];
+  readonly observedAt: string;
+  readonly protocolVersion: string;
+  readonly createdAt: string;
+}
+
+/** Inputs to submit one validator observation (NET-W032). */
+export interface ApiSubmitValidatorObservationInput {
+  readonly organizationScopeId: string;
+  readonly verdict: string;
+  readonly statement: string;
+  readonly evidenceRefs: readonly { readonly kind: string; readonly id: string }[];
+  readonly observedAt: string;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to derive the terminal outcome (NET-W032; explicit anchor). */
+export interface ApiResolveValidationRoundInput {
+  readonly organizationScopeId: string;
+  readonly evaluatedAt: string;
+  readonly idempotencyKey: string;
+}
+
+/** Inputs to apply an accepted outcome (NET-W032; ONE-WAY). */
+export interface ApiApplyValidationOutcomeInput {
+  readonly organizationScopeId: string;
+  readonly idempotencyKey: string;
+}
+
+/** One derivation-check view (NET-W032; machine-readable). */
+export interface ApiValidationOutcomeCheckView {
+  readonly check: string;
+  readonly subject: string | null;
+  readonly passed: boolean;
+  readonly reason: string;
+}
+
+/** One observation trace entry view (NET-W032). */
+export interface ApiValidationObservationTraceView {
+  readonly observationId: string;
+  readonly validatorPersonId: string;
+  readonly verdict: string;
+  readonly observedAt: string;
+  readonly included: boolean;
+  readonly exclusionReason: string | null;
+}
+
+/** One recorded validator-stake outcome view (NET-W032). */
+export interface ApiValidatorStakeOutcomeView {
+  readonly validatorPersonId: string;
+  readonly stakeId: string;
+  readonly disposition: string;
+  readonly recordedAt: string;
+}
+
+/** The public view of a terminal quorum outcome (NET-W032). */
+export interface ApiValidationOutcomeView {
+  readonly id: string;
+  readonly challengeId: string;
+  readonly organizationScopeId: string;
+  readonly target: { readonly kind: string; readonly id: string };
+  readonly evaluatedAt: string;
+  readonly decision: string;
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly assignment: {
+    readonly setId: string;
+    readonly derivedAt: string;
+    readonly assignedValidatorPersonIds: readonly string[];
+  };
+  readonly participation: {
+    readonly assignedCount: number;
+    readonly submittedCount: number;
+    readonly validCount: number;
+    readonly upholdCount: number;
+    readonly rejectCount: number;
+    readonly abstainCount: number;
+    readonly excludedCount: number;
+  };
+  readonly observations: readonly ApiValidationObservationTraceView[];
+  readonly checks: readonly ApiValidationOutcomeCheckView[];
+  readonly stakeOutcomes: readonly ApiValidatorStakeOutcomeView[];
+  readonly applied: {
+    readonly appliedAt: string;
+    readonly appliedByPersonId: string;
+    readonly application: string;
+  } | null;
+  readonly protocolVersion: string;
+  readonly createdAt: string;
+}
+
 // -- NET-W008 settlement views/inputs ----------------------------------
 
 /** The public view of an economic value record (pending/mature value). */
@@ -2217,6 +2481,190 @@ export interface ApiCommands {
     id: string,
     input: ApiRevokeReputationProofInput,
   ): Promise<ApiReputationProofView>;
+
+  // -----------------------------------------------------------------
+  // NET-W032 — decentralized validation/dispute coordination (issue
+  // #65). All commands are guarded, tenant-scoped and
+  // deny-by-default; cross-tenant and nonexistent identifiers are
+  // indistinguishable (no existence oracle).
+  // -----------------------------------------------------------------
+
+  /**
+   * Create a quorum policy version (NET-W032; guard action
+   * `validationPolicy.create`): the immutable, versioned policy
+   * lineage (exactly latest+1, org-scoped lineage) validated through
+   * the pure core shape validator.
+   */
+  createValidationPolicyVersion(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiCreateValidationPolicyInput,
+  ): Promise<ApiValidationQuorumPolicyView>;
+
+  /**
+   * Register a validator participant (NET-W032; guard action
+   * `validator.create`): self-binding only — the acting person is the
+   * registered person (server-side identity binding).
+   */
+  registerValidator(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiRegisterValidatorInput,
+  ): Promise<{ validator: ApiValidatorParticipantView; created: boolean }>;
+
+  /**
+   * Fetch a validator participant (NET-W032; guard action
+   * `validator.read`; tenant-scoped — null → 404, no oracle).
+   */
+  getValidator(
+    execution: ExecutionContext,
+    id: string,
+    input: { readonly organizationScopeId: string },
+  ): Promise<ApiValidatorParticipantView | null>;
+
+  /**
+   * Suspend a validator participant (NET-W032; guard action
+   * `validator.suspend`; ONE-WAY — a suspended validator is
+   * ineligible for every future assignment derivation).
+   */
+  suspendValidator(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    id: string,
+    input: ApiSuspendValidatorInput,
+  ): Promise<ApiValidatorParticipantView>;
+
+  /**
+   * Open a validation challenge (NET-W032; guard action
+   * `validation.challenge.create`): the deterministic eligibility gate
+   * + the frozen target facts and policy shape; a rechallenge names a
+   * CLOSED round and creates a NEW linked record.
+   */
+  openValidationChallenge(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    input: ApiOpenValidationChallengeInput,
+  ): Promise<{ challenge: ApiValidationChallengeView; created: boolean }>;
+
+  /**
+   * Fetch a validation challenge (NET-W032; guard action
+   * `validation.challenge.read`; tenant-scoped — null → 404).
+   */
+  getValidationChallenge(
+    execution: ExecutionContext,
+    id: string,
+    input: { readonly organizationScopeId: string },
+  ): Promise<ApiValidationChallengeView | null>;
+
+  /**
+   * Mark a validator explicitly conflicted on an OPEN round
+   * (NET-W032; guard action `validation.challenge.markConflict`;
+   * ONE-WAY append).
+   */
+  markValidatorConflict(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    challengeId: string,
+    input: ApiMarkValidatorConflictInput,
+  ): Promise<ApiValidationChallengeView>;
+
+  /**
+   * Derive the round's deterministic assignment set (NET-W032; guard
+   * action `validation.assignment.derive`): conflict-of-interest
+   * exclusions BEFORE the frozen (registeredAt, id) ordering, then
+   * the policy cardinality; fail-closed on an insufficient pool.
+   */
+  deriveValidatorAssignments(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    challengeId: string,
+    input: ApiDeriveValidatorAssignmentsInput,
+  ): Promise<{ challenge: ApiValidationChallengeView; created: boolean }>;
+
+  /**
+   * Bond a validator's eligibility stake (NET-W032; guard action
+   * `validation.assignment.bond`): the COMPOSITE — the settlement
+   * authority commits the escrow (purpose
+   * `validation_assignment:{challengeId}:{personId}`, compound key
+   * `${key}:stake`), then the domain verifies and bonds it
+   * (`${key}:bond`). The economic accounting lives ONLY in
+   * /settlement.
+   */
+  bondValidatorAssignmentStake(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    challengeId: string,
+    input: ApiBondValidatorStakeInput,
+  ): Promise<{
+    challenge: ApiValidationChallengeView;
+    stake: ApiStakeView;
+  }>;
+
+  /**
+   * Submit one validator observation (NET-W032; guard action
+   * `validation.observation.create`): actor-bound to the assigned
+   * validator; opaque evidence references; exactly one observation
+   * per (round, validator).
+   */
+  submitValidatorObservation(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    challengeId: string,
+    input: ApiSubmitValidatorObservationInput,
+  ): Promise<{
+    observation: ApiValidationObservationView;
+    created: boolean;
+  }>;
+
+  /**
+   * Resolve a validation round (NET-W032; guard action
+   * `validation.outcome.derive`): the COMPOSITE — the deterministic
+   * quorum derivation (the immutable outcome + the round's terminal
+   * back-pointer), then the economic consequences through the
+   * settlement authority (per bonded validator: submitted → RELEASE,
+   * bonded-silent → FORFEIT, compound keys `${key}:release|forfeit:
+   * ${stakeId}`), then the domain records what settlement executed
+   * (`${key}:record:${stakeId}`).
+   */
+  resolveValidationRound(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    challengeId: string,
+    input: ApiResolveValidationRoundInput,
+  ): Promise<{
+    outcome: ApiValidationOutcomeView;
+    stakes: readonly ApiStakeView[];
+  }>;
+
+  /**
+   * Apply an accepted outcome through the owning authority
+   * (NET-W032; guard action `validation.outcome.apply`): the
+   * COMPOSITE — for an UPHELD outcome on a reputation_proof target
+   * the /reputation authority's own one-way proof revocation
+   * (`${key}:revoke`), then the domain records the application
+   * (`${key}:mark`) after verifying the authority's mutation is
+   * observable. The applier must NOT be an assigned validator of the
+   * round.
+   */
+  applyValidationOutcome(
+    execution: ExecutionContext,
+    actorPersonId: string,
+    outcomeId: string,
+    input: ApiApplyValidationOutcomeInput,
+  ): Promise<{
+    outcome: ApiValidationOutcomeView;
+    proof: ApiReputationProofView;
+  }>;
+
+  /**
+   * Fetch a terminal quorum outcome (NET-W032; guard action
+   * `validation.outcome.read`; tenant-scoped — null → 404).
+   */
+  getValidationOutcome(
+    execution: ExecutionContext,
+    id: string,
+    input: { readonly organizationScopeId: string },
+  ): Promise<ApiValidationOutcomeView | null>;
 
   // -- NET-W008 settlement commands --------------------------------------
 

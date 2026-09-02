@@ -103,3 +103,56 @@ authoritative anchors/beneficiaries plus the read-only settlement
 stake lookup) — wired at the bootstrap composition root. A resolved
 risk CASE is citable as a supporting reference (`risk_case` source
 kind).
+
+## Scope in NET-W032 — decentralized validation/dispute coordination
+
+NET-W032 extends this boundary with an auditable decentralized
+validation/dispute coordination layer (issue #65; work order
+`spec/work-orders/NET-W032.md`). The `/disputes` boundary remains the
+SOLE risk/control/dispute authority: W032 coordinates independent
+validation and challenge without creating a second lifecycle,
+reputation, evidence or economic authority.
+
+- **Validator participants** — scoped registry records binding a
+  server-derived person identity to the validator role
+  (`validator-registry-service.ts`); one-way suspension; eligibility
+  is always DERIVED (tenant scope + recorded status + conflict facts
+  + the policy's stake requirement — never caller-asserted).
+- **Versioned quorum policies** — the immutable, versioned policy
+  contract (`validation-policy-service.ts`; the W007/W008/W009/W010
+  lineage pattern): count-based thresholds, the bounded round window,
+  the per-validator stake requirement. Frozen onto each round at open.
+- **Validation challenges (rounds)** — tenant-scoped records
+  referencing the target claim/proof/resource OPAQUELY with a frozen
+  target-facts snapshot; a bounded round window anchored at an
+  explicit `effectiveAt`; round state is IMMUTABLE FACTS (assignment
+  null/derived + outcome null/recorded) — no status machine; closed
+  rounds are immutable (rechallenge = a NEW linked round).
+- **Deterministic assignment** — exactly one set per round: the
+  conflict-of-interest exclusions (target subject/owner, beneficiary,
+  challenge initiator, explicitly conflicted, suspended) run BEFORE
+  the frozen (registeredAt, participant-id) ordering, then the policy
+  cardinality; fail-closed on an insufficient pool; the
+  considered-but-excluded trace is frozen on the set.
+- **Independent observations** — assignment-bound, actor-bound
+  (self-submission only), one per (round, validator); opaque
+  W029-attestation / W031-proof evidence references (resolved
+  same-scope, current); UPHOLD/REJECT verdicts are evidence-backed.
+- **Deterministic quorum outcomes** — the PURE
+  `quorum-engine.ts` derives the terminal decision from the RECORDED
+  inputs at an explicit evaluation anchor; closed decision +
+  check vocabularies; fail-closed for insufficient participation,
+  conflicted quorums, no-quorum and expired windows.
+- **Authority containment** — a quorum result is a DECISION, not a
+  mutation. Accepted outcomes apply ONLY through the owning
+  authority's sanctioned command at the composition root
+  (`reputation_proof_revocation` through the /reputation authority's
+  own one-way proof revocation); validator stakes commit/release/
+  forfeit ONLY through `/settlement` (compound idempotency keys); the
+  domain records what the authorities executed (`recordValidator-
+  StakeOutcome`, `markOutcomeApplied` — both verify the authority's
+  observable state first).
+
+New collections: `validation_policies`, `validator_participants`,
+`validation_challenges`, `validation_observations`,
+`validation_outcomes`.

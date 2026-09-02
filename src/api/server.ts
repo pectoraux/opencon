@@ -2792,6 +2792,359 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       return true;
     }
 
+    // ------------------------------------------------------------------
+    // NET-W032 — decentralized validation/dispute coordination routes.
+    //
+    // Every route is guarded (deny-by-default) and tenant-scoped; the
+    // guard actions form the flat validation.* / validator.* /
+    // validationPolicy.* vocabularies. Cross-tenant and nonexistent
+    // identifiers are indistinguishable (no existence oracle). All
+    // material mutations carry composite idempotency; the economic and
+    // owner-authority effects compose at the command layer (never in
+    // the transport).
+    // ------------------------------------------------------------------
+
+    // POST /api/validation/policies — create a quorum policy version
+    // (protected; guard action validationPolicy.create; the immutable
+    // versioned lineage: exactly latest+1, org-scoped).
+    if (path === "/api/validation/policies" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "validationPolicy.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseCreateValidationPolicyInput(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.createValidationPolicyVersion(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, view);
+      return true;
+    }
+
+    // POST /api/validation/validators — register a validator
+    // participant (protected; guard action validator.create;
+    // SELF-BINDING only — the acting person is the registered person).
+    if (path === "/api/validation/validators" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "validator.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.registerValidator(guarded.execution, guarded.personId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          personId: strField(obj, "personId"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/validation/validators/:id/read — fetch a validator
+    // participant (protected; guard action validator.read;
+    // tenant-scoped — cross-tenant and nonexistent are
+    // indistinguishable 404s).
+    if (
+      path.startsWith("/api/validation/validators/") &&
+      path.endsWith("/read") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/validation/validators/".length, -"/read".length);
+      const guarded = await guardMutation(ctx, req, "validator.read", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.getValidator(guarded.execution, id, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+        }),
+      );
+      if (!view) {
+        await send(res, 404, {
+          error: "not_found",
+          message: `validator not found: ${id}`,
+        });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/validation/validators/:id/suspension — suspend a
+    // validator (protected; guard action validator.suspend; ONE-WAY —
+    // a suspended validator is ineligible for every future assignment
+    // derivation).
+    if (
+      path.startsWith("/api/validation/validators/") &&
+      path.endsWith("/suspension") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/validation/validators/".length, -"/suspension".length);
+      const guarded = await guardMutation(ctx, req, "validator.suspend", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.suspendValidator(guarded.execution, guarded.personId, id, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          reason: strField(obj, "reason"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/validation/challenges — open a validation challenge
+    // (protected; guard action validation.challenge.create; the
+    // deterministic eligibility gate + the frozen target facts and
+    // policy shape; a rechallenge names a CLOSED round and creates a
+    // NEW linked record).
+    if (path === "/api/validation/challenges" && method === "POST" && opts.commands) {
+      const commands = opts.commands;
+      const guarded = await guardMutation(ctx, req, "validation.challenge.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseOpenValidationChallengeInput(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.openValidationChallenge(guarded.execution, guarded.personId, input),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/validation/challenges/:id/read — fetch a round
+    // (protected; guard action validation.challenge.read;
+    // tenant-scoped — cross-tenant and nonexistent are
+    // indistinguishable 404s, no existence oracle).
+    if (
+      path.startsWith("/api/validation/challenges/") &&
+      path.endsWith("/read") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/validation/challenges/".length, -"/read".length);
+      const guarded = await guardMutation(ctx, req, "validation.challenge.read", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.getValidationChallenge(guarded.execution, id, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+        }),
+      );
+      if (!view) {
+        await send(res, 404, {
+          error: "not_found",
+          message: `validation challenge not found: ${id}`,
+        });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/validation/challenges/:id/conflicts — mark a validator
+    // explicitly conflicted on an OPEN round (protected; guard action
+    // validation.challenge.markConflict; ONE-WAY append).
+    if (
+      path.startsWith("/api/validation/challenges/") &&
+      path.endsWith("/conflicts") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const challengeId = path.slice("/api/validation/challenges/".length, -"/conflicts".length);
+      const guarded = await guardMutation(ctx, req, "validation.challenge.markConflict", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.markValidatorConflict(guarded.execution, guarded.personId, challengeId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          validatorPersonId: strField(obj, "validatorPersonId"),
+          reason: strField(obj, "reason"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, view);
+      return true;
+    }
+
+    // POST /api/validation/challenges/:id/assignments — derive the
+    // deterministic assignment set (protected; guard action
+    // validation.assignment.derive; conflict-of-interest exclusions
+    // BEFORE the frozen (registeredAt, id) ordering, then the policy
+    // cardinality; fail-closed on an insufficient pool).
+    if (
+      path.startsWith("/api/validation/challenges/") &&
+      path.endsWith("/assignments") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const challengeId = path.slice("/api/validation/challenges/".length, -"/assignments".length);
+      const guarded = await guardMutation(ctx, req, "validation.assignment.derive", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.deriveValidatorAssignments(guarded.execution, guarded.personId, challengeId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          derivedAt: strField(obj, "derivedAt"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/validation/challenges/:id/validator-stake — bond a
+    // validator's eligibility stake (protected; guard action
+    // validation.assignment.bond; the COMPOSITE: the settlement
+    // authority commits the escrow, then the domain verifies and
+    // bonds it — the economic accounting lives ONLY in /settlement).
+    if (
+      path.startsWith("/api/validation/challenges/") &&
+      path.endsWith("/validator-stake") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const challengeId = path.slice("/api/validation/challenges/".length, -"/validator-stake".length);
+      const guarded = await guardMutation(ctx, req, "validation.assignment.bond", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.bondValidatorAssignmentStake(guarded.execution, guarded.personId, challengeId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          validatorPersonId: strField(obj, "validatorPersonId"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/validation/challenges/:id/observations — submit one
+    // validator observation (protected; guard action
+    // validation.observation.create; actor-bound to the assigned
+    // validator; opaque W029/W031 evidence references; exactly one
+    // observation per (round, validator)).
+    if (
+      path.startsWith("/api/validation/challenges/") &&
+      path.endsWith("/observations") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const challengeId = path.slice("/api/validation/challenges/".length, -"/observations".length);
+      const guarded = await guardMutation(ctx, req, "validation.observation.create", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const input = parseSubmitValidatorObservationInput(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.submitValidatorObservation(guarded.execution, guarded.personId, challengeId, input),
+      );
+      await send(res, 201, result);
+      return true;
+    }
+
+    // POST /api/validation/challenges/:id/resolution — resolve the
+    // round (protected; guard action validation.outcome.derive; the
+    // COMPOSITE: the deterministic quorum derivation, then the
+    // economic consequences through /settlement per bonded validator,
+    // then the recorded stake outcomes).
+    if (
+      path.startsWith("/api/validation/challenges/") &&
+      path.endsWith("/resolution") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const challengeId = path.slice("/api/validation/challenges/".length, -"/resolution".length);
+      const guarded = await guardMutation(ctx, req, "validation.outcome.derive", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.resolveValidationRound(guarded.execution, guarded.personId, challengeId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          evaluatedAt: strField(obj, "evaluatedAt"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/validation/outcomes/:id/application — apply an
+    // accepted outcome through the owning authority (protected; guard
+    // action validation.outcome.apply; ONE-WAY; the composite: the
+    // /reputation authority's own proof revocation, then the recorded
+    // application fact — the applier must NOT be an assigned validator
+    // of the round).
+    if (
+      path.startsWith("/api/validation/outcomes/") &&
+      path.endsWith("/application") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const outcomeId = path.slice("/api/validation/outcomes/".length, -"/application".length);
+      const guarded = await guardMutation(ctx, req, "validation.outcome.apply", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const result = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.applyValidationOutcome(guarded.execution, guarded.personId, outcomeId, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+          idempotencyKey: strField(obj, "idempotencyKey"),
+        }),
+      );
+      await send(res, 200, result);
+      return true;
+    }
+
+    // POST /api/validation/outcomes/:id/read — fetch a terminal quorum
+    // outcome (protected; guard action validation.outcome.read;
+    // tenant-scoped — cross-tenant and nonexistent are
+    // indistinguishable 404s).
+    if (
+      path.startsWith("/api/validation/outcomes/") &&
+      path.endsWith("/read") &&
+      method === "POST" &&
+      opts.commands
+    ) {
+      const commands = opts.commands;
+      const id = path.slice("/api/validation/outcomes/".length, -"/read".length);
+      const guarded = await guardMutation(ctx, req, "validation.outcome.read", "*", res);
+      if (!guarded) return true;
+      const body = await readBody(req);
+      const obj = requireBodyObject(body);
+      const view = await runWithExecutionContextAsync(guarded.execution, () =>
+        commands.getValidationOutcome(guarded.execution, id, {
+          organizationScopeId: strField(obj, "organizationScopeId"),
+        }),
+      );
+      if (!view) {
+        await send(res, 404, {
+          error: "not_found",
+          message: `validation outcome not found: ${id}`,
+        });
+        return true;
+      }
+      await send(res, 200, view);
+      return true;
+    }
+
+
     // GET /api/disputes — an org's disputes (public; optional state
     // filter).
     if (path === "/api/disputes" && method === "GET" && opts.commands) {
@@ -7323,6 +7676,117 @@ export function createApiServer(opts: ApiServerOptions): ApiServer {
       inputCount: numOrMinusOne(obj.inputCount),
       verifiedInputCount: numOrMinusOne(obj.verifiedInputCount),
       indicatedInputCount: numOrMinusOne(obj.indicatedInputCount),
+    };
+  }
+
+  // -- NET-W032 validation request-body parsers --------------------------
+
+  /**
+   * Parse the quorum-policy create body. The shape values are strict
+   * (finite numbers) — the DOMAIN core validator
+   * `validateValidationQuorumPolicyShape` is the authority on the
+   * cross-field contract and fails closed with precise context.
+   */
+  function parseCreateValidationPolicyInput(
+    body: unknown,
+  ): import("./port.ts").ApiCreateValidationPolicyInput {
+    const obj = requireBodyObject(body);
+    const description = obj.description;
+    if (description !== undefined && typeof description !== "string") {
+      throw apiValidationError('field "description", when provided, must be a string');
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      policyId: strField(obj, "policyId"),
+      version: numField(obj, "version"),
+      ...(description !== undefined ? { description } : {}),
+      assignmentCardinality: numField(obj, "assignmentCardinality"),
+      minimumSubmitted: numField(obj, "minimumSubmitted"),
+      upholdThreshold: numField(obj, "upholdThreshold"),
+      rejectThreshold: numField(obj, "rejectThreshold"),
+      challengeWindowMs: numField(obj, "challengeWindowMs"),
+      validatorStakeRequirementCredits: numField(obj, "validatorStakeRequirementCredits"),
+    };
+  }
+
+  /** Parse the validation-challenge open body (opaque target reference). */
+  function parseOpenValidationChallengeInput(
+    body: unknown,
+  ): import("./port.ts").ApiOpenValidationChallengeInput {
+    const obj = requireBodyObject(body);
+    const target = objField(obj, "target");
+    const targetKind = target.kind;
+    if (typeof targetKind !== "string" || !targetKind.trim()) {
+      throw apiValidationError('field "target.kind" must be a non-empty string');
+    }
+    const targetId = target.id;
+    if (typeof targetId !== "string" || !targetId.trim()) {
+      throw apiValidationError('field "target.id" must be a non-empty string');
+    }
+    const rechallengeOfChallengeId = obj.rechallengeOfChallengeId;
+    if (
+      rechallengeOfChallengeId !== undefined &&
+      typeof rechallengeOfChallengeId !== "string"
+    ) {
+      throw apiValidationError(
+        'field "rechallengeOfChallengeId", when provided, must be a string',
+      );
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      target: { kind: targetKind, id: targetId },
+      statement: strField(obj, "statement"),
+      reasonCodes: strArrayField(obj, "reasonCodes"),
+      effectiveAt: strField(obj, "effectiveAt"),
+      policyId: strField(obj, "policyId"),
+      ...(rechallengeOfChallengeId !== undefined ? { rechallengeOfChallengeId } : {}),
+      idempotencyKey: strField(obj, "idempotencyKey"),
+    };
+  }
+
+  /**
+   * Parse the validator-observation body. The evidence references are
+   * request-shape checked only ({ kind, id } objects); the DOMAIN
+   * resolution + scope/revocation checks are the authority on
+   * unresolvable or tampered references (fail closed downstream).
+   */
+  function parseSubmitValidatorObservationInput(
+    body: unknown,
+  ): import("./port.ts").ApiSubmitValidatorObservationInput {
+    const obj = requireBodyObject(body);
+    const evidenceRefsRaw = obj.evidenceRefs;
+    if (!Array.isArray(evidenceRefsRaw)) {
+      throw apiValidationError('field "evidenceRefs" must be an array (possibly empty)');
+    }
+    const evidenceRefs: { kind: string; id: string }[] = [];
+    for (const entry of evidenceRefsRaw) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw apiValidationError(
+          'field "evidenceRefs" must contain only { kind, id } objects',
+        );
+      }
+      const ref = entry as Record<string, unknown>;
+      const kind = ref.kind;
+      const id = ref.id;
+      if (typeof kind !== "string" || !kind.trim()) {
+        throw apiValidationError(
+          'field "evidenceRefs[].kind" must be a non-empty string',
+        );
+      }
+      if (typeof id !== "string" || !id.trim()) {
+        throw apiValidationError(
+          'field "evidenceRefs[].id" must be a non-empty string',
+        );
+      }
+      evidenceRefs.push({ kind, id });
+    }
+    return {
+      organizationScopeId: strField(obj, "organizationScopeId"),
+      verdict: strField(obj, "verdict"),
+      statement: strField(obj, "statement"),
+      evidenceRefs,
+      observedAt: strField(obj, "observedAt"),
+      idempotencyKey: strField(obj, "idempotencyKey"),
     };
   }
 

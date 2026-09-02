@@ -117,7 +117,12 @@ describe("NET-W009-AC-08 architecture/out-of-scope regression", () => {
       /\brecordSnapshot\b/,
       /\brequestTransition\b/,
       /\bslashStake\b/i,
-      /\bopenChallenge\b/i,
+      // NET-W032 (additive, sanctioned amendment — the exact pattern
+      // the W010 amendment above used): `openChallenge` is now the
+      // LEGITIMATE /disputes validation-coordination surface (the
+      // NET-W032 work order, issue #65). The economic/reputation/
+      // evidence/lifecycle mutation identifiers and the
+      // consensus/blockchain constructs REMAIN forbidden here.
       /\bfrom\s+["']pg["']/,
       /\bfrom\s+["']ioredis["']/,
       /openrtb/i,

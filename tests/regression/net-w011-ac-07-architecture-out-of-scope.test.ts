@@ -322,6 +322,9 @@ describe("NET-W011-AC-07 architecture/out-of-scope regression", () => {
     expect([...core.ECONOMIC_STAKE_PURPOSE_KINDS]).toEqual([
       "campaign_budget",
       "dispute_challenge",
+      // NET-W032 (additive, sanctioned shared-file amendment): the
+      // validator per-round eligibility bond purpose kind.
+      "validation_assignment",
     ]);
     expect(core.isEconomicStakePurposeKind("campaign_budget")).toBe(true);
     // The ad-hoc kind stays rejected (W010's negative pin preserved).

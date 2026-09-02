@@ -110,7 +110,12 @@ describe("NET-W010-AC-08 architecture/out-of-scope regression", () => {
       /\bverifyProofOfValue\b/i,
       /\brequestTransition\b/,
       /\bslashStake\b/i,
-      /\bopenChallenge\b/i,
+      // NET-W032 (additive, sanctioned amendment — the exact pattern
+      // the W010 amendment above used): `openChallenge` is now the
+      // LEGITIMATE /disputes validation-coordination surface (the
+      // NET-W032 work order, issue #65). The economic/reputation/
+      // evidence/lifecycle mutation identifiers and the
+      // consensus/blockchain constructs REMAIN forbidden here.
       /\bfrom\s+["']pg["']/,
       /\bfrom\s+["']ioredis["']/,
       /openrtb/i,
@@ -290,6 +295,9 @@ describe("NET-W010-AC-08 architecture/out-of-scope regression", () => {
     expect([...core.ECONOMIC_STAKE_PURPOSE_KINDS]).toEqual([
       "campaign_budget",
       "dispute_challenge",
+      // NET-W032 (additive, sanctioned shared-file amendment): the
+      // validator per-round eligibility bond purpose kind.
+      "validation_assignment",
     ]);
     expect(core.isEconomicStakeState("COMMITTED")).toBe(true);
     expect(core.isEconomicStakePurposeKind("ad_campaign")).toBe(false);

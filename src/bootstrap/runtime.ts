@@ -49,9 +49,20 @@ import type {
   ApiCommands,
   ApiReputationProofView,
   ApiSignedAttestationView,
+  // NET-W032 (additive): the validation view types consumed by the
+  // composition-root view mappers + commands.
+  ApiValidationChallengeView,
+  ApiValidationObservationView,
+  ApiValidationOutcomeView,
+  ApiValidationQuorumPolicyView,
+  ApiValidatorParticipantView,
 } from "../api/port.ts";
 import type { ApiServer } from "../api/server.ts";
 import type { PostgresAuthority } from "../core/postgres-authority.ts";
+// NET-W032 (additive): the deterministic closure→stake mapping used by
+// the resolveValidationRound composition (the pure core function — the
+// single source of truth for the disposition contract).
+import { validatorStakeDispositionForClosure } from "../core/validation.ts";
 import type { CoordinationService } from "../core/coordination.ts";
 import type { ProviderSelection } from "./provider-selection.ts";
 // NET-W002 domain wiring (composition root imports concrete in-memory
@@ -395,6 +406,18 @@ import { createRiskAssessmentService } from "../disputes/assessment-service.ts";
 import { createRiskCaseService } from "../disputes/case-service.ts";
 import { createRiskControlService } from "../disputes/control-service.ts";
 import { createDisputeService } from "../disputes/dispute-service.ts";
+// NET-W032 (additive): the decentralized validation/dispute
+// coordination layer — services + authority repositories (the /disputes
+// boundary, EXTENDED; the composition root is the ONLY join between
+// the domain and the owning authorities' repositories).
+import { createValidationPolicyService } from "../disputes/validation-policy-service.ts";
+import { createValidatorRegistryService } from "../disputes/validator-registry-service.ts";
+import { createValidationService } from "../disputes/validation-service.ts";
+import { createAuthorityValidationPolicyRepository } from "../disputes/authority-validation-policy-repository.ts";
+import { createAuthorityValidatorParticipantRepository } from "../disputes/authority-validator-participant-repository.ts";
+import { createAuthorityValidationChallengeRepository } from "../disputes/authority-validation-challenge-repository.ts";
+import { createAuthorityValidationObservationRepository } from "../disputes/authority-validation-observation-repository.ts";
+import { createAuthorityValidationOutcomeRepository } from "../disputes/authority-validation-outcome-repository.ts";
 import {
   createAuthorityCampaignRepository,
   createAuthorityCampaignPolicyRepository,
@@ -542,6 +565,20 @@ import type {
   RiskSignalService,
   SupersedeRiskSignalInput,
   DisputeService,
+  // NET-W032 (additive): the validation coordination types consumed
+  // by the composition root (wiring + view mappers + commands).
+  ValidationLookups,
+  ValidationPolicyService,
+  ValidationQuorumPolicy,
+  ValidationService,
+  ValidationTargetLookup,
+  ValidatorParticipant,
+  ValidatorRegistryService,
+} from "../disputes/port.ts";
+import type {
+  ValidationChallenge,
+  ValidationObservation,
+  ValidationOutcome,
 } from "../disputes/port.ts";
 import type {
   CampaignMatchInventoryItemView,
@@ -782,6 +819,11 @@ export interface Runtime {
   readonly riskControlService: RiskControlService;
   // NET-W010 disputes (challenges/disputes/appeals) service.
   readonly disputeService: DisputeService;
+  // NET-W032 decentralized validation/dispute coordination services
+  // (the /disputes boundary, EXTENDED — issue #65).
+  readonly validationPolicyService: ValidationPolicyService;
+  readonly validatorRegistryService: ValidatorRegistryService;
+  readonly validationService: ValidationService;
   // NET-W011 campaigns (campaign policy/configuration) service.
   readonly campaignService: CampaignService;
   // NET-W021 campaign matching and optimization (selection, not
@@ -2569,6 +2611,326 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     auditWriter,
     logger: logger.forModule("disputes"),
   });
+
+  // ------------------------------------------------------------------
+  // NET-W032 decentralized validation/dispute wiring (the /disputes
+  // boundary, EXTENDED — issue #65).
+  //
+  // The validation coordination layer COMPOSES the owning authorities'
+  // surfaces through NEUTRAL lookups wired HERE (the composition root
+  // is the ONLY join): the challenge-target lookup reads the owning
+  // domains' repositories (the W031 proof store, contributions,
+  // measured outcomes, economic values — read-only, opaque target
+  // facts); the attestation lookup reads the W029 signed-attestation
+  // store (scope + revocation state only — no covered content ever
+  // crosses); the proof lookup reads the W031 proof store (scope +
+  // subject + issuance + one-way revocation state — the
+  // post-application verification read); the stake lookup is the SAME
+  // disputeStakeLookup the W010 boundary uses. Economic consequences
+  // (validator stake commit/release/forfeit) and the owner-authority
+  // application (proof revocation) are composed in the apiCommands
+  // composites BELOW with COMPOUND idempotency keys — the /disputes
+  // domain code never calls /settlement or /reputation.
+  // ------------------------------------------------------------------
+  const validationTargetLookup: ValidationTargetLookup = {
+    async resolve(kind, id) {
+      switch (kind) {
+        case "reputation_proof": {
+          const proof = await reputationProofRepo.findById(id);
+          return proof
+            ? {
+                organizationScopeId: proof.organizationScopeId,
+                anchorAt: proof.issuedAt,
+                subjectPersonId: proof.subjectPersonId,
+                beneficiaryPersonId: proof.subjectPersonId,
+                state: proof.revokedAt !== null ? "REVOKED" : "ACTIVE",
+              }
+            : null;
+        }
+        case "contribution": {
+          const contribution = await contributionRepo.findById(id);
+          return contribution
+            ? {
+                organizationScopeId: contribution.organizationScopeId,
+                anchorAt: contribution.createdAt,
+                subjectPersonId: contribution.contributorId,
+                beneficiaryPersonId: contribution.contributorId,
+                state: contribution.state,
+              }
+            : null;
+        }
+        case "measured_outcome": {
+          const measurement = await measuredOutcomeRepo.findById(id);
+          return measurement
+            ? {
+                organizationScopeId: measurement.organizationScopeId,
+                anchorAt: measurement.createdAt,
+                subjectPersonId: measurement.ownerId,
+                beneficiaryPersonId: measurement.ownerId,
+                state: measurement.state,
+              }
+            : null;
+        }
+        case "economic_value": {
+          const value = await economicValueRepo.findById(id);
+          return value
+            ? {
+                organizationScopeId: value.organizationScopeId,
+                anchorAt: value.recordedAt,
+                subjectPersonId: null,
+                beneficiaryPersonId: value.beneficiaryPersonId,
+                state: value.state,
+              }
+            : null;
+        }
+        default:
+          return null;
+      }
+    },
+  };
+  const validationAttestationLookup = {
+    async resolve(id: string) {
+      const attestation = await signedAttestationRepo.findById(id);
+      return attestation
+        ? {
+            organizationScopeId: attestation.organizationScopeId,
+            revokedAt: attestation.revokedAt,
+          }
+        : null;
+    },
+  };
+  const validationProofLookup = {
+    async resolve(id: string) {
+      const proof = await reputationProofRepo.findById(id);
+      return proof
+        ? {
+            organizationScopeId: proof.organizationScopeId,
+            subjectPersonId: proof.subjectPersonId,
+            issuedAt: proof.issuedAt,
+            revokedAt: proof.revokedAt,
+          }
+        : null;
+    },
+  };
+  const validationPolicyRepo = createAuthorityValidationPolicyRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("disputes").debug(m, f) },
+  });
+  const validatorParticipantRepo = createAuthorityValidatorParticipantRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("disputes").debug(m, f) },
+  });
+  const validationChallengeRepo = createAuthorityValidationChallengeRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("disputes").debug(m, f) },
+  });
+  const validationObservationRepo = createAuthorityValidationObservationRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("disputes").debug(m, f) },
+  });
+  const validationOutcomeRepo = createAuthorityValidationOutcomeRepository({
+    authority: postgresAuthority,
+    logger: { debug: (m, f) => logger.forModule("disputes").debug(m, f) },
+  });
+  const validationPolicyService = createValidationPolicyService({
+    repository: validationPolicyRepo,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("disputes"),
+  });
+  const validatorRegistryService = createValidatorRegistryService({
+    repository: validatorParticipantRepo,
+    subjectLookup: riskSubjectLookup,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("disputes"),
+  });
+  const validationLookups: ValidationLookups = {
+    subject: riskSubjectLookup,
+    target: validationTargetLookup,
+    attestations: validationAttestationLookup,
+    proofs: validationProofLookup,
+    stake: disputeStakeLookup,
+  };
+  const validationService = createValidationService({
+    challengeRepository: validationChallengeRepo,
+    observationRepository: validationObservationRepo,
+    outcomeRepository: validationOutcomeRepo,
+    policyRepository: validationPolicyRepo,
+    participantRepository: validatorParticipantRepo,
+    lookups: validationLookups,
+    idempotency,
+    auditWriter,
+    logger: logger.forModule("disputes"),
+  });
+  function toApiValidationQuorumPolicyView(
+    policy: ValidationQuorumPolicy,
+  ): ApiValidationQuorumPolicyView {
+    return {
+      id: policy.id,
+      policyId: policy.policyId,
+      version: policy.version,
+      organizationScopeId: policy.organizationScopeId,
+      description: policy.description,
+      assignmentCardinality: policy.assignmentCardinality,
+      minimumSubmitted: policy.minimumSubmitted,
+      upholdThreshold: policy.upholdThreshold,
+      rejectThreshold: policy.rejectThreshold,
+      challengeWindowMs: policy.challengeWindowMs,
+      validatorStakeRequirementCredits: policy.validatorStakeRequirementCredits,
+      createdBy: policy.createdBy,
+      createdAt: policy.createdAt,
+    };
+  }
+  function toApiValidatorParticipantView(
+    validator: ValidatorParticipant,
+  ): ApiValidatorParticipantView {
+    return {
+      id: validator.id,
+      organizationScopeId: validator.organizationScopeId,
+      personId: validator.personId,
+      status: validator.status,
+      registeredAt: validator.registeredAt,
+      suspendedAt: validator.suspendedAt,
+      suspensionReason: validator.suspensionReason,
+      protocolVersion: validator.protocolVersion,
+    };
+  }
+  function toApiValidationChallengeView(
+    challenge: ValidationChallenge,
+  ): ApiValidationChallengeView {
+    return {
+      id: challenge.id,
+      organizationScopeId: challenge.organizationScopeId,
+      target: { kind: challenge.target.kind, id: challenge.target.id },
+      targetAnchorAt: challenge.targetAnchorAt,
+      targetSubjectPersonId: challenge.targetSubjectPersonId,
+      targetBeneficiaryPersonId: challenge.targetBeneficiaryPersonId,
+      targetState: challenge.targetState,
+      statement: challenge.statement,
+      reasonCodes: challenge.reasonCodes,
+      initiatedByPersonId: challenge.initiatedByPersonId,
+      rechallengeOfChallengeId: challenge.rechallengeOfChallengeId,
+      effectiveAt: challenge.effectiveAt,
+      windowExpiresAt: challenge.windowExpiresAt,
+      policyId: challenge.policyId,
+      policyVersion: challenge.policyVersion,
+      assignmentCardinality: challenge.assignmentCardinality,
+      minimumSubmitted: challenge.minimumSubmitted,
+      upholdThreshold: challenge.upholdThreshold,
+      rejectThreshold: challenge.rejectThreshold,
+      validatorStakeRequirementCredits: challenge.validatorStakeRequirementCredits,
+      conflicts: challenge.conflicts,
+      assignment:
+        challenge.assignment === null
+          ? null
+          : {
+              setId: challenge.assignment.setId,
+              derivedAt: challenge.assignment.derivedAt,
+              policyId: challenge.assignment.policyId,
+              policyVersion: challenge.assignment.policyVersion,
+              entries: challenge.assignment.entries.map((e) => ({
+                validatorPersonId: e.validatorPersonId,
+                participantId: e.participantId,
+                selectionOrder: e.selectionOrder,
+                stake: {
+                  requirementCredits: e.stake.requirementCredits,
+                  stakeId: e.stake.stakeId,
+                  bondedAt: e.stake.bondedAt,
+                },
+              })),
+              excluded: challenge.assignment.excluded.map((e) => ({
+                personId: e.personId,
+                reason: e.reason,
+              })),
+            },
+      outcome:
+        challenge.outcome === null
+          ? null
+          : {
+              outcomeId: challenge.outcome.outcomeId,
+              decidedAt: challenge.outcome.decidedAt,
+            },
+      events: challenge.events.map((e) => ({
+        id: e.id,
+        event: e.event,
+        actorPersonId: e.actorPersonId,
+        reason: e.reason,
+        recordedAt: e.recordedAt,
+      })),
+      protocolVersion: challenge.protocolVersion,
+      createdAt: challenge.createdAt,
+    };
+  }
+  function toApiValidationObservationView(
+    observation: ValidationObservation,
+  ): ApiValidationObservationView {
+    return {
+      id: observation.id,
+      organizationScopeId: observation.organizationScopeId,
+      challengeId: observation.challengeId,
+      assignmentSetId: observation.assignmentSetId,
+      validatorPersonId: observation.validatorPersonId,
+      participantId: observation.participantId,
+      target: { kind: observation.target.kind, id: observation.target.id },
+      verdict: observation.verdict,
+      statement: observation.statement,
+      evidenceRefs: observation.evidenceRefs,
+      observedAt: observation.observedAt,
+      protocolVersion: observation.protocolVersion,
+      createdAt: observation.createdAt,
+    };
+  }
+  function toApiValidationOutcomeView(
+    outcome: ValidationOutcome,
+  ): ApiValidationOutcomeView {
+    return {
+      id: outcome.id,
+      challengeId: outcome.challengeId,
+      organizationScopeId: outcome.organizationScopeId,
+      target: { kind: outcome.target.kind, id: outcome.target.id },
+      evaluatedAt: outcome.evaluatedAt,
+      decision: outcome.decision,
+      policyId: outcome.policyId,
+      policyVersion: outcome.policyVersion,
+      assignment: {
+        setId: outcome.assignment.setId,
+        derivedAt: outcome.assignment.derivedAt,
+        assignedValidatorPersonIds: outcome.assignment.assignedValidatorPersonIds,
+      },
+      participation: outcome.participation,
+      observations: outcome.observations.map((o) => ({
+        observationId: o.observationId,
+        validatorPersonId: o.validatorPersonId,
+        verdict: o.verdict,
+        observedAt: o.observedAt,
+        included: o.included,
+        exclusionReason: o.exclusionReason,
+      })),
+      checks: outcome.checks.map((c) => ({
+        check: c.check,
+        subject: c.subject,
+        passed: c.passed,
+        reason: c.reason,
+      })),
+      stakeOutcomes: outcome.stakeOutcomes.map((s) => ({
+        validatorPersonId: s.validatorPersonId,
+        stakeId: s.stakeId,
+        disposition: s.disposition,
+        recordedAt: s.recordedAt,
+      })),
+      applied:
+        outcome.applied === null
+          ? null
+          : {
+              appliedAt: outcome.applied.appliedAt,
+              appliedByPersonId: outcome.applied.appliedByPersonId,
+              application: outcome.applied.application,
+            },
+      protocolVersion: outcome.protocolVersion,
+      createdAt: outcome.createdAt,
+    };
+  }
 
   // ------------------------------------------------------------------
   // NET-W011 campaigns wiring (campaign policy/configuration).
@@ -6875,6 +7237,334 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
       return toApiReputationProofView(proof);
     },
 
+    // -- NET-W032 validation commands --------------------------------------
+    //
+    // COMPOSITION-ROOT ORCHESTRATION (the authority-separation
+    // pattern, the NET-W009/W010 precedent): the /disputes validation
+    // layer records the coordination DECISIONS (assignment sets,
+    // observations, quorum outcomes, application bookkeeping); the
+    // SETTLEMENT authority moves the validator stakes; the REPUTATION
+    // authority applies an accepted outcome against a W031 proof. The
+    // composition root sequences them with COMPOUND idempotency keys
+    // (`${key}:stake`, `${key}:release`, `${key}:forfeit`,
+    // `${key}:record`, `${key}:revoke`, `${key}:mark`) so a retried
+    // composite replays each step idempotently. The /disputes domain
+    // code never calls /settlement or /reputation.
+
+    async createValidationPolicyVersion(execution, _actorPersonId, input) {
+      const policy = await validationPolicyService.createPolicyVersion(execution, {
+        organizationScopeId: input.organizationScopeId,
+        policyId: input.policyId,
+        version: input.version,
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        assignmentCardinality: input.assignmentCardinality,
+        minimumSubmitted: input.minimumSubmitted,
+        upholdThreshold: input.upholdThreshold,
+        rejectThreshold: input.rejectThreshold,
+        challengeWindowMs: input.challengeWindowMs,
+        validatorStakeRequirementCredits: input.validatorStakeRequirementCredits,
+      });
+      return toApiValidationQuorumPolicyView(policy);
+    },
+
+    async registerValidator(execution, _actorPersonId, input) {
+      const result = await validatorRegistryService.registerValidator(execution, {
+        organizationScopeId: input.organizationScopeId,
+        personId: input.personId,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return {
+        validator: toApiValidatorParticipantView(result.validator),
+        created: result.created,
+      };
+    },
+
+    async getValidator(execution, id, input) {
+      try {
+        const validator = await validatorRegistryService.getValidator(
+          getExecutionContext() ?? execution,
+          input.organizationScopeId,
+          id,
+        );
+        return toApiValidatorParticipantView(validator);
+      } catch {
+        // Cross-tenant + nonexistent are indistinguishable (no
+        // existence oracle) — the route renders 404.
+        return null;
+      }
+    },
+
+    async suspendValidator(execution, _actorPersonId, id, input) {
+      const validator = await validatorRegistryService.suspendValidator(execution, {
+        organizationScopeId: input.organizationScopeId,
+        validatorId: id,
+        reason: input.reason,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return toApiValidatorParticipantView(validator);
+    },
+
+    async openValidationChallenge(execution, _actorPersonId, input) {
+      const result = await validationService.openChallenge(execution, {
+        organizationScopeId: input.organizationScopeId,
+        target: input.target,
+        statement: input.statement,
+        reasonCodes: input.reasonCodes,
+        effectiveAt: input.effectiveAt,
+        policyId: input.policyId,
+        ...(input.rechallengeOfChallengeId !== undefined
+          ? { rechallengeOfChallengeId: input.rechallengeOfChallengeId }
+          : {}),
+        idempotencyKey: input.idempotencyKey,
+      });
+      return {
+        challenge: toApiValidationChallengeView(result.challenge),
+        created: result.created,
+      };
+    },
+
+    async getValidationChallenge(execution, id, input) {
+      try {
+        const challenge = await validationService.getChallenge(
+          getExecutionContext() ?? execution,
+          input.organizationScopeId,
+          id,
+        );
+        return toApiValidationChallengeView(challenge);
+      } catch {
+        // Cross-tenant + nonexistent are indistinguishable (no
+        // existence oracle) — the route renders 404.
+        return null;
+      }
+    },
+
+    async markValidatorConflict(execution, _actorPersonId, challengeId, input) {
+      const challenge = await validationService.markConflict(execution, {
+        organizationScopeId: input.organizationScopeId,
+        challengeId,
+        validatorPersonId: input.validatorPersonId,
+        reason: input.reason,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return toApiValidationChallengeView(challenge);
+    },
+
+    async deriveValidatorAssignments(execution, _actorPersonId, challengeId, input) {
+      const result = await validationService.deriveAssignments(execution, {
+        organizationScopeId: input.organizationScopeId,
+        challengeId,
+        derivedAt: input.derivedAt,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return {
+        challenge: toApiValidationChallengeView(result.challenge),
+        created: result.created,
+      };
+    },
+
+    async bondValidatorAssignmentStake(execution, _actorPersonId, challengeId, input) {
+      // 1. Verify the assignment is bondable by this validator (the
+      //    validation service re-verifies everything in-transaction).
+      const challenge = await validationService.getChallenge(
+        execution,
+        input.organizationScopeId,
+        challengeId,
+      );
+      const entry = challenge.assignment?.entries.find(
+        (e) => e.validatorPersonId === input.validatorPersonId,
+      );
+      if (!entry) {
+        const { OpenConError: AssignmentError } = await import("../core/errors.ts");
+        throw new AssignmentError({
+          code: "VALIDATION_VALIDATION",
+          classification: "validation",
+          message: `person ${input.validatorPersonId} is not an assigned validator of validation challenge ${challengeId}`,
+          context: { challengeId, validatorPersonId: input.validatorPersonId },
+        });
+      }
+      // 2. THE STAKE through the settlement authority (the economic
+      //    authority — never the disputes domain). The purpose id binds
+      //    the (round, validator) assignment slot.
+      const staked = await stakeService.commitStake(execution, {
+        organizationScopeId: challenge.organizationScopeId,
+        ownerPersonId: input.validatorPersonId,
+        amount: entry.stake.requirementCredits,
+        purpose: {
+          kind: "validation_assignment",
+          id: `${challenge.id}:${input.validatorPersonId}`,
+        },
+        description: `validator eligibility stake for validation challenge ${challenge.id}`,
+        idempotencyKey: `${input.idempotencyKey}:stake`,
+      });
+      // 3. Bond it to the assignment entry (verifies owner/amount/
+      //    state/purpose linkage + the window through the read-only
+      //    stake lookup).
+      const bonded = await validationService.bondValidatorStake(execution, {
+        organizationScopeId: input.organizationScopeId,
+        challengeId: challenge.id,
+        validatorPersonId: input.validatorPersonId,
+        stakeId: staked.stake.id,
+        idempotencyKey: `${input.idempotencyKey}:bond`,
+      });
+      return {
+        challenge: toApiValidationChallengeView(bonded),
+        stake: toStakeView(staked.stake),
+      };
+    },
+
+    async submitValidatorObservation(execution, _actorPersonId, challengeId, input) {
+      const result = await validationService.submitObservation(execution, {
+        organizationScopeId: input.organizationScopeId,
+        challengeId,
+        verdict: input.verdict,
+        statement: input.statement,
+        evidenceRefs: input.evidenceRefs,
+        observedAt: input.observedAt,
+        idempotencyKey: input.idempotencyKey,
+      });
+      return {
+        observation: toApiValidationObservationView(result.observation),
+        created: result.created,
+      };
+    },
+
+    async resolveValidationRound(execution, _actorPersonId, challengeId, input) {
+      // 1. The deterministic quorum derivation (records the immutable
+      //    outcome + the round's terminal back-pointer).
+      const derived = await validationService.deriveOutcome(execution, {
+        organizationScopeId: input.organizationScopeId,
+        challengeId,
+        evaluatedAt: input.evaluatedAt,
+        idempotencyKey: input.idempotencyKey,
+      });
+      // 2. The economic consequences through the settlement authority
+      //    (per BONDED validator: submitted → RELEASE, bonded-silent →
+      //    FORFEIT — the deterministic core mapping), then 3. record
+      //    each outcome on the validation record (append-only
+      //    bookkeeping verified against settlement's terminal state).
+      const challenge = await validationService.getChallenge(
+        execution,
+        input.organizationScopeId,
+        challengeId,
+      );
+      const observations = await validationService.listObservations(
+        execution,
+        input.organizationScopeId,
+        challengeId,
+      );
+      const submitted = new Set(
+        observations.map((o) => o.validatorPersonId),
+      );
+      const stakeViews: ReturnType<typeof toStakeView>[] = [];
+      let outcome = derived.outcome;
+      for (const entry of challenge.assignment?.entries ?? []) {
+        if (entry.stake.stakeId === null) continue;
+        const disposition = validatorStakeDispositionForClosure(
+          submitted.has(entry.validatorPersonId),
+        );
+        // IDEMPOTENT-ORCHESTRATION: a retried composite must never
+        // re-execute a step the settlement authority already
+        // performed (its own commands gate on the COMMITTED state).
+        // Skip when the outcome already records this stake's
+        // disposition; when the stake is already in the matching
+        // terminal state (a mid-composite retry AFTER the economic
+        // movement committed but BEFORE the recording step) skip only
+        // the settlement call — the recording still happens.
+        const alreadyRecorded = outcome.stakeOutcomes.some(
+          (s) => s.stakeId === entry.stake.stakeId,
+        );
+        if (alreadyRecorded) {
+          stakeViews.push(
+            toStakeView(await stakeService.getStake(execution, entry.stake.stakeId)),
+          );
+          continue;
+        }
+        const expectedTerminal =
+          disposition === "RELEASE" ? "RELEASED" : "FORFEITED";
+        const currentStake = await stakeService.getStake(
+          execution,
+          entry.stake.stakeId,
+        );
+        const stake =
+          currentStake.state === expectedTerminal
+            ? currentStake
+            : disposition === "FORFEIT"
+              ? await stakeService.forfeitStake(execution, {
+                  stakeId: entry.stake.stakeId,
+                  reason: `validation challenge ${challengeId} closed ${outcome.decision}: validator did not submit an observation`,
+                  idempotencyKey: `${input.idempotencyKey}:forfeit:${entry.stake.stakeId}`,
+                })
+              : await stakeService.releaseStake(execution, {
+                  stakeId: entry.stake.stakeId,
+                  reason: `validation challenge ${challengeId} closed ${outcome.decision}`,
+                  idempotencyKey: `${input.idempotencyKey}:release:${entry.stake.stakeId}`,
+                });
+        outcome = await validationService.recordValidatorStakeOutcome(execution, {
+          organizationScopeId: input.organizationScopeId,
+          outcomeId: outcome.id,
+          validatorPersonId: entry.validatorPersonId,
+          stakeId: entry.stake.stakeId,
+          disposition,
+          idempotencyKey: `${input.idempotencyKey}:record:${entry.stake.stakeId}`,
+        });
+        stakeViews.push(toStakeView(stake));
+      }
+      return {
+        outcome: toApiValidationOutcomeView(outcome),
+        stakes: stakeViews,
+      };
+    },
+
+    async applyValidationOutcome(execution, _actorPersonId, outcomeId, input) {
+      // 1. Load the terminal outcome (fail-closed gates: ACCEPTED
+      //    decision + reputation_proof target are re-verified by the
+      //    domain when recording).
+      const outcome = await validationService.getOutcome(
+        execution,
+        input.organizationScopeId,
+        outcomeId,
+      );
+      // 2. THE OWNING AUTHORITY'S SANCTIONED MUTATION: the /reputation
+      //    authority's own one-way proof revocation (the composition
+      //    root is the ONLY join; the disputes domain never calls
+      //    /reputation). Re-revocation is an idempotent no-op — a
+      //    retried composite replays safely.
+      const proof = await reputationProofService.revokeProof(execution, {
+        organizationScopeId: outcome.organizationScopeId,
+        proofId: outcome.target.id,
+        reason: `validation challenge ${outcome.challengeId} upheld (${outcome.id})`,
+        idempotencyKey: `${input.idempotencyKey}:revoke`,
+      });
+      // 3. Record the application fact (the domain VERIFIES the
+      //    authority's mutation is observable — the proof's signed
+      //    one-way revocation state — BEFORE recording).
+      const marked = await validationService.markOutcomeApplied(execution, {
+        organizationScopeId: input.organizationScopeId,
+        outcomeId: outcome.id,
+        application: "reputation_proof_revocation",
+        idempotencyKey: `${input.idempotencyKey}:mark`,
+      });
+      return {
+        outcome: toApiValidationOutcomeView(marked),
+        proof: toApiReputationProofView(proof),
+      };
+    },
+
+    async getValidationOutcome(execution, id, input) {
+      try {
+        const outcome = await validationService.getOutcome(
+          getExecutionContext() ?? execution,
+          input.organizationScopeId,
+          id,
+        );
+        return toApiValidationOutcomeView(outcome);
+      } catch {
+        // Cross-tenant + nonexistent are indistinguishable (no
+        // existence oracle) — the route renders 404.
+        return null;
+      }
+    },
+
     // -- NET-W008 settlement commands ------------------------------------
 
     async createEconomicValue(execution, input) {
@@ -10766,6 +11456,10 @@ export function createRuntime(opts: CreateRuntimeOptions = {}): Runtime {
     riskControlService,
     // NET-W010 disputes (challenges/disputes/appeals) service.
     disputeService,
+    // NET-W032 decentralized validation/dispute coordination services.
+    validationPolicyService,
+    validatorRegistryService,
+    validationService,
     // NET-W011 campaigns (campaign policy/configuration) service.
     campaignService,
     // NET-W021 campaign matching and optimization.
