@@ -1,77 +1,102 @@
 # NET-W033 Evidence Ledger — Complete contribution lifecycle
 
-**Status:** ACTIVE / READY_FOR_IMPLEMENTATION  
+**Status:** IMPLEMENTED — full local verification gate GREEN  
 **Issue:** #67  
-**Architecture:** v1.0 frozen  
 **Dependencies:** NET-W014 + NET-W018 + NET-W023 + NET-W028 — merged/verified  
+**Architecture:** v1.0 frozen (byte-identical — no shared-file amendment)  
 **Implementation branch:** `feat/net-w033-complete-contribution-lifecycle`
 
 ## Scope
 
-W033 is a Phase-9 end-to-end composition proof. It must demonstrate one canonical contribution traversing the existing authoritative chain without adding a new authority:
+W033 is the Phase-9 end-to-end composition proof. ONE canonical contribution traverses the existing authoritative chain with no new authority, no new domain, no new source file — in the exact EXECUTABLE order (the PR #68 architect-remediation decision of record: publication and the /workflows lifecycle come FIRST; the /evidence and /outcomes stages run only after the lifecycle has reached the MEASURING point):
 
 ```text
-opportunity/contribution
-  → workflows lifecycle
-  → evidence / Proof-of-Value
-  → normalized outcome / measurement
-  → reputation
-  → settlement
-  → benefit allocation
+opportunity/contribution (DRAFT)
+  → /workflows publication (… → SUBMITTED)
+  → /workflows SUBMITTED → MEASURING (the measurement lifecycle point)
+  → /evidence Proof-of-Value (created + VERIFIED while IN MEASURING)
+  → /outcomes measurement (created + VERIFIED while IN MEASURING)
+  → the PoH evaluation (QUALIFIED while IN MEASURING)
+  → /workflows walk completion (MEASURING → … → VERIFIED)
+  → /reputation
+  → /settlement pending/mature
+  → /benefits allocation
 ```
+
+The entire W033 artifact set is composition tests (`tests/contribution-lifecycle/` — the shared harness + the full-path scenario + AC-01..AC-09 suites), the AC-10 regression suite (`tests/regression/`), and this ledger. Every mutation runs through an existing owning boundary; every cross-domain join is an existing sanctioned composition-root composite.
 
 ## Acceptance map
 
 | AC | Required proof | Delivered |
 |---|---|---|
-| AC-01 | Opportunity/contribution eligibility + sanctioned submission | TBD |
-| AC-02 | `/workflows` sole lifecycle authority; bypasses fail closed | TBD |
-| AC-03 | `/evidence` Proof-of-Value/provenance authority | TBD |
-| AC-04 | `/outcomes` normalized measurement, anchor, uncertainty/provenance | TBD |
-| AC-05 | `/reputation` authoritative contribution-derived reputation | TBD |
-| AC-06 | `/settlement` verified contribution value through pending/mature path | TBD |
-| AC-07 | `/benefits` composition with `/settlement` remaining economic authority | TBD |
-| AC-08 | End-to-end lineage, audit, privacy, tenancy | TBD |
-| AC-09 | Idempotency, concurrency, atomicity, rollback/fault injection | TBD |
-| AC-10 | Architecture/authority/scope regression | TBD |
+| AC-01 | Opportunity/contribution eligibility + sanctioned submission | ✅ AC-01 (5 tests): the sanctioned submission (DRAFT v0, org-scoped, PoH eligibility evaluated), the ineligible claimant fail-closed (HELPFUL_CONTRIBUTION_VALIDATION), the cross-tenant scope mismatch fail-closed, the non-HELPFUL opportunity refusal, the structural port pin (creation + reads only — no W033-reachable state mutation) |
+| AC-02 | `/workflows` sole lifecycle authority; bypasses fail closed | ✅ AC-02 (6 tests): the 10 legal transitions audited in order (tx-bound, version 10), the state-skip ILLEGAL_TRANSITION, the stale-writer CONCURRENT_TRANSITION, the non-authorized actor AUTHORIZATION (deny-by-default), the TERMINAL_STATE refusal, the structural no-second-state-machine pin |
+| AC-03 | `/evidence` Proof-of-Value/provenance authority | ✅ AC-03 (6 tests): the VERIFIED PoV over /evidence-created records (derived grades, recorded commitments, authoritative aggregation), the deterministic frozen grade table, the SELF_REPORTED basis failing the ATTESTED-minimum policy (the caller-asserted grade bypass fails), the verify gate (aggregation + cryptographic attestation required), the structural no-grade/no-value-field input pin |
+| AC-04 | `/outcomes` normalized measurement, anchor, uncertainty/provenance | ✅ AC-04 (6 tests): the VERIFIED measured outcome with the explicit IMMEDIATE anchor, uncertainty + provenance preserved on the observation, the full evidence lineage (outcome → observation → evidenceId → evidence → contribution), the server-derived rollup (exact chain-head ids), the finalize-without-rollup fail-closed gate, the verified-outcome subject read |
+| AC-05 | `/reputation` authoritative contribution-derived reputation | ✅ AC-05 (6 tests): BOTH canonical inputs carry the server-derived "verified" basis, the fact-anchored snapshot covers both inputs with deterministic reproducible scores + digest, the non-verified-source input derives "indicated" (non-purchasable), the settlement→reputation join on a PENDING record fails closed (REPUTATION_VALIDATION), the nonexistent-source NOT_FOUND, the structural no-score/no-basis/no-weight input pin |
+| AC-06 | `/settlement` verified contribution value through pending/mature path | ✅ AC-06 (7 tests): exactly ONE PENDING→MATURE record with reference sources resolved by /settlement's own gate, the maturation anchor + audit event, the HOLD risk control refusing the maturation (RISK_CONTROL, value stays PENDING, resolved → re-opens), the ACTIVE dispute refusing it (DISPUTE_CHALLENGE, review + resolution → re-opens), the NON-VERIFIED contribution recognition fail-closed (every other gate passed — the lifecycle gate is the sole blocker), the same-key recognition replay exactly-once, global conservation |
+| AC-07 | `/benefits` composition with `/settlement` remaining economic authority | ✅ AC-07 (6 tests): the funding REFERENCES-only pool, the draw through the settlement reward primitive (MATURE→CONSUMED, balanced ledger postings, post-commit audit with the draw transaction lineage), the deterministic 3/2/1 plan (minor-unit conservation), the no-second-ledger containment (one reward allocation referenced by the benefit record), the privacy-preserving member view (own shares + aggregates only), the same-key allocation replay exactly-once |
+| AC-08 | End-to-end lineage, audit, privacy, tenancy | ✅ AC-08 (6 tests): the full BACKWARD reconstruction from the benefit allocation through durable ids alone (every hop via its owning authority), exactly one auditable event per material stage (10 transitions, evidence, attestation, observation, recognition, maturation, 2 reputation inputs, allocation, draw), cross-tenant fail-closed (org-scoped reads clean, foreign pools indistinguishable NOT_FOUND, material mutations gated), the unauthorized pool-read AUTHORIZATION, the W031 portable proof disclosing ONLY aggregate dimension facts (no source ids/payloads), the payload-free audit reconstruction |
+| AC-09 | Idempotency, concurrency, atomicity, rollback/fault injection | ✅ AC-09 (6 tests): same-key recognition + settlement-effect replay verbatim, the concurrent same-key allocation race (exactly one committed composite), the concurrent same-key recognition race (exactly one value record), the draw-failure fault injection at the critical join (NO partial mutation — no allocation, no draw, no consumption, NO audit event), the mid-path dispute-gate fault injection (value frozen PENDING, no partial final state; resolution completes the path), the post-commit audit ordering (transactionId + drawTransactionId + idempotencyRecordId) + conservation after every scenario |
+| AC-10 | Architecture/authority/scope regression | ✅ AC-10 (10 tests): 0 violations across both guards (322 files), the frozen specs + the exact 33-directory src/ set, the work-order binding pins, the composed vocabularies pinned unchanged, NO source file added (the exact artifact list + directory), the composition-only structural pins (no repository writes), the no-W034/W035/W036 vocabulary bans, the composition-root wiring pins, the secret boundary, the no-W033-amendment frozen-file check |
 
-## Required design decisions to close before merge
+**67 tests** across the 12 W033 files (the full-path scenario suite — 3 tests, including the canonical traversal-ORDER proof — + the ten one-to-one AC suites + the shared harness).
 
-1. Canonical fixture contribution/opportunity and deterministic anchors.
-2. Exact sanctioned lifecycle path and legal transition sequence.
-3. Exact evidence/Proof-of-Value path and authoritative inputs required by downstream outcome/reputation/settlement logic.
-4. Exact normalized outcome measurement provider/fixture and uncertainty representation.
-5. Exact reputation mutation trigger and non-purchasability guard used by the scenario.
-6. Exact verified-value → settlement pending/mature path and risk/dispute gates exercised.
-7. Exact W028 benefit funding/allocation path and how the source lineage is reconstructed without duplicating economics.
-8. The cross-boundary transaction boundaries that must remain atomic, including the selected injected-failure point.
-9. The concurrency/replay probes and expected no-double-application invariants.
-10. The durable lineage/audit reconstruction contract and privacy/tenant assertions.
+## Verification record (executed on the remediation head)
 
-All decisions must reuse existing contracts. Missing semantics discovered during implementation are architectural/work-item gaps, not implicit W033 inventions.
+- `bun run typecheck` — **PASS**
+- `bun run arch:check` — **PASS: 322 files scanned, 0 violations**
+- `bun run authority:check` — **PASS: 322 files scanned, 0 violations**
+- `bun run verify` — **PASS: 2170 pass / 15 skip / 0 fail — 2185 tests / 277 files / 29,458 expect()** (the W032 baseline 2103/15/0 — 2118 tests ⇒ +67 W033 composition tests, including the canonical traversal-ORDER proof; every pre-existing suite preserved)
+- Targeted mutation driver (`opencon-tmp-w033/mutation-driver.py`, never committed): **9/9 behavioral mutations CAUGHT** — M1 the recognition VERIFIED-lifecycle gate (runtime.ts), M2 the refuseWhenGated risk-control gate, M3 the refuseWhenDisputed dispute gate, M4 the settlement→reputation MATURE/CONSUMED gate, M5 the benefit-pool in-tx funding qualification gate (consumed + MATURE-state pair — defense in depth), M6 the /workflows optimistic-concurrency stale-writer gate, M7 the /evidence deterministic grade derivation, M8 the /outcomes finalize-requires-rollup gate, M9 the /reputation server-derived basis — each removed exactly one material guard of the composed chain, each targeted AC suite FAILED, each source restored byte-identically (cmp-verified) — plus the AC-10 structural pins PRESENT (the composition-root wiring pins for every composite the canonical path runs through)
+- Secret scan — **CLEAN** (no key material in the W033 surface; `REQUIRED_IN_PRODUCTION` unchanged: `DATABASE_URL`, `REDIS_URL`, `OBJECT_STORAGE_BUCKET`; no new secret/config surface)
+- Real PostgreSQL 17 + Redis integration (locally provisioned, the CI service-container equivalents): `PG_TEST_DATABASE_URL=postgres://…:55432/opencon_test REDIS_TEST_URL=redis://…:56379 bun test tests/integration/` — **17 pass / 0 fail**
+- W033 real-PG end-to-end round-trip (`opencon-tmp-w033/real-pg-roundtrip.ts`, never committed): a DEDICATED round-trip database + a staging-classified runtime (the REAL provider-selection path — PostgresAuthorityAdapter + RedisCoordinationAdapter, no shims) + the same seeded guard/policy surface the W008→W028 harness chain builds + ONE contribution through the complete canonical chain — the terminal state verified (contribution VERIFIED v10, PoV VERIFIED, measured outcome VERIFIED, both reputation inputs verified-basis, value CONSUMED 100, the benefit allocation 100 across 3 members in minor units), the CANONICAL TRAVERSAL ORDER proven (the 13 ordered stage witnesses: publication SUBMITTED v4 + the MEASURING lifecycle point v5 BEFORE the /evidence and /outcomes stages, the completed VERIFIED v10 walk BEFORE reputation/settlement/benefits), 10 ordered transition audit events + the maturation/allocation events, global conservation over the 8 real ledger entries, the exhausted-pool fresh-key allocation failing closed — **ALL CHECKS PASSED**; the round-trip database dropped afterwards
+- CI push event — **PASS** (remediation head `80e13ffe`: run 33618581652 — verify + integration, both jobs success; the ledger-only follow-up heads: `2ea5f1d` run 33618815818 and `72af080` run 33619547441 — verify + integration, both jobs success on each; every later commit on this branch is ledger-only and re-runs the same two-job workflow — green)
+- CI pull_request event — **PASS** (remediation head `80e13ffe`: run 33618585588 — verify + integration, both jobs success; the ledger-only follow-up head `2ea5f1d`: run 33618820052 and `72af080`: run 33619551687 — each initial verify attempt hit a TRANSIENT pre-existing wall-clock flake in a LEGACY suite, unrelated to any W033 artifact; each failed verify job was re-run → success): (1) NET-W027-AC-02 "the counterfactual assumptions … window …" on `2ea5f1d` — `daysAgoIso()` in `tests/demand/_net-w027-harness.ts` reads `Date.now()` once per window endpoint, so a 1 ms gap between the two calls yields 7775999999 instead of 7776000000 (first occurrence in the last ~60 runs); (2) NET-W030-AC-01 "the tenant listing returns the tenant's facts in recording order" on `72af080` — two facts recorded within the same millisecond tie on `recordedAt` and the repository's documented tie-break is the record id (`ordered()` in `src/settlement/authority-external-settlement-repository.ts`: recordedAt, then id), so the test's strict-order assertion fails on a same-ms pair (first occurrence observed for this test). The PR #68 checks on each green head: 4/4 check-runs `success`; BOTH legacy de-flakes (the W027 shared-instant window endpoints + the W030 distinct-timestamp ordering fixture) are surfaced as candidate follow-up amendments, deliberately NOT fixed inside this W033-composition-only PR
 
-## Verification record
+## Required design decisions to close before merge — CLOSED
 
-| Gate | Result |
-|---|---|
-| `bun run typecheck` | TBD |
-| `bun run arch:check` | TBD |
-| `bun run authority:check` | TBD |
-| `bun run verify` | TBD |
-| Targeted mutation driver | TBD |
-| Secret scan | TBD |
-| Real PostgreSQL + Redis integration | TBD |
-| Real W033 end-to-end round-trip | TBD |
-| CI push event | TBD |
-| CI pull_request event | TBD |
+1. **Canonical fixture.** ONE helpful contribution: an ACTIVE zero-budget W011 campaign publishing a HELPFUL_RECOMMENDATION opportunity (eligibility rule `participant_class equals contributor`), submitted through the sanctioned W012 helpfulness composite (the same path the apiCommand takes) by an eligible claimant. Deterministic anchors: `OCCURRED_AT = 2024-03-01` (the reputation decay anchor), `REFERENCE_AT = 2024-07-01` (the snapshot anchor) — never a wall clock.
+2. **Sanctioned lifecycle path (executable order).** The PUBLICATION composite (DRAFT→READY→ASSIGNED→IN_PROGRESS→SUBMITTED — user-controlled, contributor-only) runs FIRST; the lifecycle then reaches the MEASUREMENT point (SUBMITTED→MEASURING) BEFORE every downstream /evidence and /outcomes stage; the PoH evaluation runs while still IN MEASURING (the engine's publication gate requires lifecycle state ≥ SUBMITTED, which MEASURING satisfies); the walk then completes MEASURING→EVALUATING→CHALLENGE_WINDOW→SETTLING→SETTLED→VERIFIED through `workflowService.requestTransition` with `policyActionFor` — the frozen table, never re-declared. The declared `requiresEvidenceReference` edge MEASURING→EVALUATING is entered only after every evidence/outcome basis exists and the PoH is QUALIFIED.
+3. **Evidence/Proof-of-Value path.** The ATTESTED evidence basis (W012) + a VERIFIED PoV (W014 chain: platform + provider /evidence records, an independent moderator attestation, recorded aggregation, cryptographic verification) + the PoH bases attached through the helpfulness service — all created and attached AFTER the lifecycle reached the MEASURING point (publication strictly first; `attachBasis`/`createEvidence` carry no lifecycle-state gate, so nothing pre-publication is needed).
+4. **Normalized outcome.** A platform observation (confidence 0.95 [0.9, 0.98], explicit `evidenceId` link to the PoV's platform evidence) → measured outcome with the IMMEDIATE maturation strategy → recorded rollup → finalize → VERIFIED — created and attached while the contribution is IN MEASURING, after the /evidence stage.
+5. **Reputation mutation trigger.** The direct verified input (sources: the VERIFIED contribution + PoV + measured outcome, occurredAt OCCURRED_AT) + the sanctioned `applySettlementReputationEffect` join after maturation + the snapshot at the fixed reference anchor. Non-purchasability: the server-derived basis (an input over non-verified sources derives "indicated", capped + weight-discounted by the policy).
+6. **Verified-value → settlement path.** The recognition composite (VERIFIED lifecycle + QUALIFIED PoH + moderation + quality floor gates → PENDING) then the maturation composite (risk/dispute-gated → MATURE), both through the runtime apiCommands; the risk (HOLD on value_maturation) and dispute (OPEN on the value record) gates exercised then resolved.
+7. **W028 benefit path.** A /settlement reward policy mirroring the three members (3/2/1) + the benefits policy (credits, last_member_absorbs, funding REFERENCES only) + the pool funded by the MATURE value record + the atomic `allocatePoolBenefits` (the economic draw executes INSIDE /settlement: MATURE→CONSUMED with balanced postings); the lineage reconstructed backward from the allocation through durable ids without duplicating any economics (the benefit record carries the draw reference only).
+8. **Atomic boundaries + the injected failure point.** The W028 allocation composite is ONE exactly-once economic unit (allocation + draw + consumption + audit commit together or not at all). Injected failures: (a) the draw failure at the critical join (a pre-consumed value record — the in-tx re-derivation fails closed, NO partial mutation survives); (b) the mid-path dispute gate (the maturation frozen at PENDING — no partial final state — then resolved).
+9. **Concurrency/replay probes.** Same-key recognition, settlement-effect and benefit-allocation replays (created=false, identical record ids, single records everywhere); two concurrent same-key races (the benefit allocation — the economic unit; the recognition — the value record). No double application of contribution value, reputation mutation, settlement posting or benefit allocation.
+10. **Lineage/audit contract + privacy/tenancy.** Every material object carries a durable id; every material stage leaves exactly one transactional audit event (published post-commit, tx-bound); the chain reconstructs backward from the benefit allocation through the owning authorities' reads alone; the portable surface (the W031 proof) discloses only aggregate dimension facts; the member view exposes own shares + pool aggregates; cross-tenant org-scoped reads resolve nothing and foreign pools read as nonexistent; material mutations are actor-gated.
+
+All decisions reuse existing contracts — no missing primitive was discovered (nothing surfaced as an architectural/work-item gap).
+
+## Design decisions of record
+
+1. **Placement.** W033 ships ZERO source files: the harness + suites live in `tests/contribution-lifecycle/`, the regression suite in `tests/regression/`. The composition joins are the EXISTING composites (`publishHelpfulContribution`, `recognizeContributionValue`, `matureEconomicValue`, `applySettlementReputationEffect`, the W028 benefit economic draw) — no new join was written.
+2. **The harness wraps the W014 chain** (the full helpful-contribution machinery) and adds exactly the missing composition surface: ACTIVE /organizations memberships for the three benefit-pool members (the sanctioned membership authority — the W024/W028 precedent), the W028 benefit transport guard actions, and the canonical scenario factory returning every durable identifier.
+3. **The benefit-pool members** are the contributor (3), the moderator (2) and the W010 dedicated reviewer (1) — three DISTINCT persons of the same org (the moderator IS the W008 second person in this harness chain).
+4. **The mutation discipline.** The mutation driver's M1 was initially masked by the composite's next gate (the PoH QUALIFIED check) — the AC-06 negative fixture was strengthened to a contribution passing EVERY OTHER gate (bases attached, PoH QUALIFIED, published) stopped at SUBMITTED, so the VERIFIED lifecycle gate is provably the sole blocker. M5 required removing the funding-qualification pair (the consumed + MATURE-state branches — defense in depth) because each alone is masked by the other; the settlement primitive's own gate still fails the draw closed behind them.
+5. **The real-PG round-trip** uses the REAL provider-selection path (staging classification: `DATABASE_URL`/`REDIS_URL`/`OBJECT_STORAGE_BUCKET`/`ATTESTATION_SIGNING_KEY` resolved through the env-backed SecretProvider — the fail-closed production discipline), a dedicated per-run database, and the scenario factory over a duck-typed minimal harness surface (the same factory the suites use — no duplicated composition logic).
+6. **The PG/Redis services** in this environment are the locally provisioned equivalents of the CI service containers; the `opencon` role + `opencon_test` database were (re)provisioned to match `docker-compose.yml` exactly.
 
 ## Implementation evidence
 
-Implementation PR: TBD  
-Reviewed head: TBD  
-Architect review: TBD  
+Implementation PR: #68 (the single W033 PR — initial implementation head `b4ccca1`; architect-remediation head `80e13ffe`; every later commit on the branch is ledger-only)  
+Reviewed head: TBD (awaiting re-review of the remediation head)  
+Architect review: CHANGES REQUIRED on the initial head (PR comment #5506195311) — remediated on the same PR/branch (see the remediation record)  
 Merge SHA: TBD
+
+## Remediation record (PR #68 architect review — comment #5506195311)
+
+**Finding (CHANGES REQUIRED, merge blocked):** the executable `runCanonicalScenario()` created and verified the evidence/PoV (Stage 3) and the normalized measured outcome (Stage 4) BEFORE publishing and walking the contribution through `/workflows` (Stage 2) — the executable order was `contribution creation → evidence/PoV → outcome → workflow → reputation → settlement → benefits`, while this ledger and the work order (§2, §3.3–§3.5) record the canonical sequence as `contribution submission → /workflows lifecycle → /evidence PoV → /outcomes measurement → reputation → settlement → benefits`. The implementation therefore proved eventual end-state lineage but NOT the declared canonical traversal order. (GitHub rejected a formal REQUEST_CHANGES from the integrated account — the PR author — so the architect recorded the decision as PR comment #5506195311 and explicitly withheld approval/merge authority.)
+
+**Remediation (same PR/branch — no second implementation PR, no architecture change, no source change):**
+
+1. **The reorder.** `runCanonicalScenario()` now executes: contribution creation (DRAFT v0) → the PUBLICATION composite (… → SUBMITTED v4) → the /workflows SUBMITTED → MEASURING transition (the measurement lifecycle point, v5) → the /evidence stage (the ATTESTED basis + the VERIFIED PoV, while IN MEASURING) → the /outcomes stage (the VERIFIED measured outcome, while IN MEASURING) → the PoH evaluation (QUALIFIED while IN MEASURING — the engine's publication gate `state ≥ SUBMITTED` is satisfied) → the /workflows walk completion (MEASURING → … → VERIFIED v10) → reputation → settlement → benefits. Every existing owning boundary and gate is preserved (assertPublishable requires no bases; attachBasis/createEvidence carry no lifecycle-state gate; the declared `requiresEvidenceReference` edge MEASURING → EVALUATING is entered only after every evidence basis exists). A new `advanceToMeasuring()` helper performs the single SUBMITTED → MEASURING transition; `walkToVerified()` walks the remaining forward transitions from MEASURING.
+2. **The strengthened order proof (not just the end state).** (a) The scenario now records an ordered `traversal` witness — the AUTHORITATIVE contribution state + version read through the owning boundary at EVERY stage boundary (13 witnesses); the version counter increments only on /workflows lifecycle mutations (v0 DRAFT → v4 SUBMITTED → v5 MEASURING → v10 VERIFIED), so the array is a strictly deterministic executable-order proof. (b) A new full-path test pins the EXACT witness array AND the durable audit commit order (the global append-only log preserves insertion order = committed-mutation order): 16 canonical stage markers — publication → the MEASURING lifecycle point → /evidence (basis, PoV, attestation, aggregation) → /outcomes (observation, rollup, VERIFIED) → the walk resumption + completion → reputation → settlement → the settlement→reputation join → benefits — appear in strictly ascending positions. (c) The real-PG round-trip re-ran the same scenario on the REAL provider-selection path and asserted the identical 13-witness traversal order.
+3. **Ledger agreement.** This ledger's Scope chain, Design Decision #2 (the sanctioned lifecycle path — now titled "executable order"), and Decisions #3/#4 were brought into EXACT agreement with the executable order above.
+4. **Re-verification.** The complete W033 gate re-ran on the remediation head: the full verification record above (verify 2170/15/0 — +1 test, the traversal-order proof; the 9/9 mutation checks; the real PostgreSQL/Redis integration 17/0; the real-PG round-trip ALL CHECKS PASSED including the traversal-order witness) AND current-head CI on both event paths (push run 33618581652 + pull_request run 33618585588 — verify + integration, both jobs success, head `80e13ffe`; the ledger-only follow-up heads `2ea5f1d`/`72af080` — each pull_request run green after re-running one transiently flaked verify job in a legacy suite — see the verification record's CI note for the two disclosed W027/W030 wall-clock flakes, unrelated to the W033 artifacts).
 
 ## Scope guard
 
-W033 must not introduce W034 advertising lifecycle, W035 creator lifecycle, W036 demand/procurement lifecycle, a new domain, a second ledger, new crypto, a second workflow engine, or new authority semantics.
+W033 introduced NO W034 advertising lifecycle, NO W035 creator lifecycle, NO W036 demand/procurement lifecycle, NO new domain, NO second ledger, NO new crypto, NO second workflow engine, and NO new authority semantics — pinned by the AC-10 regression suite.
