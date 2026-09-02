@@ -31,6 +31,17 @@
  * idempotency record + the audit event in ONE authoritative
  * transaction (IdempotencyStore.applyIdempotent).
  *
+ * REPLAY-ORDERING (NET-W032 architect re-review on PR #66): the
+ * person-existence resolution and the duplicate ACTIVE-participant
+ * gate (mutable state reads) run INSIDE the applyIdempotent callback;
+ * only pure, request-deterministic input-shape validation runs
+ * before the store. A completed same-key replay short-circuits at
+ * the store's committed record BEFORE any state is read — even when
+ * the participant has since been suspended and a new ACTIVE
+ * registration exists — per the repository-wide exactly-once /
+ * same-key replay contract. A fresh key still fails closed
+ * in-transaction.
+ *
  * Lock ordering: per-person registration mutex (the duplicate gate
  * invariant) → the org-scoped idempotency key; per-record mutex → the
  * idempotency key for suspensions (never reversed).
@@ -146,7 +157,8 @@ export function createValidatorRegistryService(
 
       // IDENTITY BINDING: the acting person must be the person being
       // registered (server-side; caller-supplied identity claims are
-      // never trusted — one cannot register someone else).
+      // never trusted — one cannot register someone else) — a
+      // request-deterministic authorization comparison.
       const actor = actingPersonId(execution);
       if (actor !== input.personId) {
         throw validatorValidationError(
@@ -154,34 +166,18 @@ export function createValidatorRegistryService(
           { personId: input.personId, actorPersonId: actor },
         );
       }
-      if (!(await subjectLookup.exists(input.personId))) {
-        throw new NotFoundError(
-          `validator person does not exist: ${input.personId}`,
-          { personId: input.personId },
-        );
-      }
 
-      // Duplicate gate: at most ONE ACTIVE participant binds a person
-      // in an organization scope. The caller's OWN replay (same
-      // idempotency key) is not a duplicate.
-      const existingActive = await repository.findActiveByPerson(
-        input.organizationScopeId,
-        input.personId,
-      );
-      if (
-        existingActive !== null &&
-        existingActive.idempotencyKey !== input.idempotencyKey
-      ) {
-        throw new ConflictError(
-          `person ${input.personId} already has an ACTIVE validator participant in organization scope ${input.organizationScopeId} (${existingActive.id})`,
-          {
-            personId: input.personId,
-            organizationScopeId: input.organizationScopeId,
-            existingValidatorId: existingActive.id,
-          },
-        );
-      }
-
+      // REPLAY-ORDERING (architect re-review on PR #66): the person's
+      // existence resolution AND the duplicate ACTIVE-participant gate
+      // (mutable state reads) run INSIDE the applyIdempotent callback.
+      // A completed same-key replay short-circuits at the idempotency
+      // store's committed record BEFORE those reads (the exactly-once
+      // / same-key replay contract): replaying a registration whose
+      // participant has since been SUSPENDED (and a NEW active
+      // registration created) still returns the cached original
+      // participant instead of tripping the duplicate gate. A
+      // genuinely fresh key executes every gate in-transaction and
+      // fails closed.
       const key = `validator_register:${input.organizationScopeId}:${input.personId}:${input.idempotencyKey}`;
       // The per-person mutex serializes concurrent registrations of the
       // SAME person (the idempotency key alone is too narrow — the
@@ -195,7 +191,18 @@ export function createValidatorRegistryService(
             key,
             async (ctx) => {
               const tx = ctx.transaction;
-              // In-tx duplicate re-check (tx-scoped scan).
+              // The person must exist through the neutral identity
+              // lookup (in-callback so replays short-circuit first).
+              if (!(await subjectLookup.exists(input.personId))) {
+                throw new NotFoundError(
+                  `validator person does not exist: ${input.personId}`,
+                  { personId: input.personId },
+                );
+              }
+              // In-tx duplicate re-check (tx-scoped scan): at most ONE
+              // ACTIVE participant binds a person in an organization
+              // scope. The caller's OWN replay (same idempotency key)
+              // is not a duplicate; a foreign one fails closed.
               const activeInTx = await repository.findActiveByPersonWithinTx(
                 input.organizationScopeId,
                 input.personId,
@@ -209,6 +216,7 @@ export function createValidatorRegistryService(
                   `person ${input.personId} already has an ACTIVE validator participant in organization scope ${input.organizationScopeId} (${activeInTx.id})`,
                   {
                     personId: input.personId,
+                    organizationScopeId: input.organizationScopeId,
                     existingValidatorId: activeInTx.id,
                   },
                 );

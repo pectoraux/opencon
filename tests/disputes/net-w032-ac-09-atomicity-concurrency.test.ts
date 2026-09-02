@@ -21,6 +21,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { randomUUID } from "node:crypto";
 import type { AuthorityTransaction } from "../../src/core/postgres-authority.ts";
 import type { TransactionalAuditWriter } from "../../src/core/audit.ts";
 import type { TransactionalAuditBuffer } from "../../src/core/audit.ts";
@@ -51,6 +52,7 @@ import {
   openDefaultChallenge,
   personCtx,
   runFullRound,
+  seedProofTarget,
   shiftIso,
   type NetW032Harness,
 } from "./_net-w032-harness.ts";
@@ -441,5 +443,301 @@ describe("NET-W032-AC-09 atomicity + concurrency + audit", () => {
       expect(observation.executionId).toBeDefined();
       expect(observation.correlationId).toBeDefined();
     }
+  });
+
+  // ------------------------------------------------------------------
+  // REPLAY-ORDERING regressions (architect re-review on PR #66): the
+  // audit of the other W032 mutations found the same "mutable
+  // pre-check before the idempotency lookup" pattern in
+  // bondValidatorStake (settlement stake state), openChallenge
+  // (duplicate live-round gate), registerValidator (duplicate
+  // ACTIVE gate) and recordValidatorStakeOutcome (settlement terminal
+  // state). Every state-dependent acceptance check now runs INSIDE
+  // the applyIdempotent callback; these regressions pin that a
+  // completed same-key replay survives the authority-state changes
+  // that FOLLOW a successful first execution.
+  // ------------------------------------------------------------------
+
+  test("a bond's same-key replay after /settlement dispositioned the stake returns the CACHED round (replay ordering)", async () => {
+    const stakedPolicyId = await createStakedPolicy(harness);
+    const opened = await openDefaultChallenge(harness, {
+      policyId: stakedPolicyId,
+    });
+    const assigned = await deriveAssignments(harness, opened.challenge);
+    const entry = assigned.assignment!.entries[0]!;
+    const validatorCtx = personCtx(
+      harness,
+      entry.validatorPersonId,
+      "ac09-bond-replay",
+    );
+    // Commit the stake through the SETTLEMENT authority (the economic
+    // authority — the same way the composite does).
+    const committed = await harness.runtime.stakeService.commitStake(
+      validatorCtx,
+      {
+        organizationScopeId: harness.organizationScopeId,
+        ownerPersonId: entry.validatorPersonId,
+        amount: 10,
+        purpose: {
+          kind: "validation_assignment",
+          id: `${assigned.id}:${entry.validatorPersonId}`,
+        },
+        description: "replay-ordering probe stake",
+        idempotencyKey: key("ac09-bond-replay-stake"),
+      },
+    );
+    // Bond it (key K).
+    const bondInput = (k: string) => ({
+      organizationScopeId: harness.organizationScopeId,
+      challengeId: assigned.id,
+      validatorPersonId: entry.validatorPersonId,
+      stakeId: committed.stake.id,
+      idempotencyKey: k,
+    });
+    const k = key("ac09-bond-replay");
+    const bonded = await harness.runtime.validationService.bondValidatorStake(
+      validatorCtx,
+      bondInput(k),
+    );
+    expect(
+      bonded.assignment!.entries.find(
+        (e) => e.validatorPersonId === entry.validatorPersonId,
+      )!.stake.stakeId,
+    ).toBe(committed.stake.id);
+
+    // The round closes and /settlement dispositioned the stake
+    // (COMMITTED → RELEASED — terminal, never reverts).
+    await observe(harness, assigned, 0, { verdict: "UPHOLD" });
+    await deriveOutcome(harness, assigned);
+    await harness.runtime.stakeService.releaseStake(
+      personCtx(harness, harness.reviewerPersonId, "ac09-bond-replay-release"),
+      {
+        stakeId: committed.stake.id,
+        reason: "released after close (replay-ordering probe)",
+        idempotencyKey: key("ac09-bond-replay-release"),
+      },
+    );
+
+    // SAME-KEY replay: the cached bonded round. The stake's CURRENT
+    // terminal state (RELEASED, not COMMITTED) can no longer break a
+    // completed replay.
+    const replay = await harness.runtime.validationService.bondValidatorStake(
+      validatorCtx,
+      bondInput(k),
+    );
+    expect(replay.id).toBe(bonded.id);
+    expect(
+      replay.assignment!.entries.find(
+        (e) => e.validatorPersonId === entry.validatorPersonId,
+      )!.stake.stakeId,
+    ).toBe(committed.stake.id);
+    // Exactly ONE bonding audit event (no re-execution).
+    const events = await harness.runtime.auditWriter.query({
+      eventType: "validation_challenge.stake_bonded",
+      resourceId: assigned.id,
+    });
+    expect(events).toHaveLength(1);
+  });
+
+  test("an open's same-key replay after the round CLOSED and was rechallenged returns the CACHED round (replay ordering)", async () => {
+    const seeded = await seedProofTarget(harness);
+    const openCtx = personCtx(
+      harness,
+      harness.challengerPersonId,
+      "ac09-open-replay",
+    );
+    const openInput = (k: string) => ({
+      organizationScopeId: harness.organizationScopeId,
+      target: { kind: "reputation_proof", id: seeded.proof.id },
+      statement: "replay-ordering probe round",
+      reasonCodes: ["contested_claim"],
+      effectiveAt: shiftIso(seeded.proof.issuedAt, 3600_000),
+      policyId: harness.defaultPolicyId,
+      idempotencyKey: k,
+    });
+    const k = key("ac09-open-replay");
+    const opened = await harness.runtime.validationService.openChallenge(
+      openCtx,
+      openInput(k),
+    );
+    expect(opened.created).toBe(true);
+
+    // Close the round, then RECHALLENGE the same target (a NEW live
+    // round with a foreign idempotency key now exists on the target).
+    const assigned = await deriveAssignments(harness, opened.challenge);
+    await observe(harness, assigned, 0, { verdict: "UPHOLD" });
+    await observe(harness, assigned, 1, { verdict: "UPHOLD" });
+    await deriveOutcome(harness, assigned);
+    const rechallenged = await openDefaultChallenge(harness, {
+      targetId: seeded.proof.id,
+      proof: seeded.proof,
+      rechallengeOfChallengeId: opened.challenge.id,
+      idempotencyKey: key("ac09-open-rechallenge"),
+    });
+    expect(rechallenged.challenge.rechallengeOfChallengeId).toBe(
+      opened.challenge.id,
+    );
+
+    // SAME-KEY replay of the ORIGINAL open: the duplicate gate (a
+    // foreign LIVE round on the target) can no longer break the
+    // replay — the cached ORIGINAL round is returned.
+    const replay = await harness.runtime.validationService.openChallenge(
+      openCtx,
+      openInput(k),
+    );
+    expect(replay.created).toBe(false);
+    expect(replay.challenge.id).toBe(opened.challenge.id);
+    // Exactly ONE opened audit event for the original round.
+    const events = await harness.runtime.auditWriter.query({
+      eventType: "validation_challenge.opened",
+      resourceId: opened.challenge.id,
+    });
+    expect(events).toHaveLength(1);
+  });
+
+  test("a registration's same-key replay after suspension + re-registration returns the CACHED participant (replay ordering)", async () => {
+    // A FRESH person registers THEMSELVES with key K.
+    const person = await harness.runtime.identityService.createIdentity(
+      harness.bootstrapCtx,
+      {
+        displayName: "Replay Ordering Person",
+        subjectReferences: [
+          {
+            subjectId: `w032-replay-${randomUUID().slice(0, 8)}@example.com`,
+            providerKind: "internal",
+          },
+        ],
+      },
+    );
+    const regCtx = personCtx(harness, person.id, "ac09-register-replay");
+    const regInput = (k: string) => ({
+      organizationScopeId: harness.organizationScopeId,
+      personId: person.id,
+      idempotencyKey: k,
+    });
+    const k = key("ac09-register-replay");
+    const first =
+      await harness.runtime.validatorRegistryService.registerValidator(
+        regCtx,
+        regInput(k),
+      );
+    expect(first.created).toBe(true);
+
+    // Suspend the participant (one-way), then register AGAIN with a
+    // fresh key (the person slot is free — a NEW ACTIVE participant
+    // with a foreign idempotency key now exists).
+    await harness.runtime.validatorRegistryService.suspendValidator(
+      personCtx(harness, harness.reviewerPersonId, "ac09-suspend-replay"),
+      {
+        organizationScopeId: harness.organizationScopeId,
+        validatorId: first.validator.id,
+        reason: "replay-ordering probe suspension",
+        idempotencyKey: key("ac09-suspend-replay"),
+      },
+    );
+    const second =
+      await harness.runtime.validatorRegistryService.registerValidator(
+        regCtx,
+        regInput(key("ac09-register-second")),
+      );
+    expect(second.created).toBe(true);
+    expect(second.validator.id).not.toBe(first.validator.id);
+
+    // SAME-KEY replay of the ORIGINAL registration: the duplicate
+    // gate (a foreign ACTIVE participant) can no longer break the
+    // replay — the CACHED original participant (as committed) returns.
+    const replay =
+      await harness.runtime.validatorRegistryService.registerValidator(
+        regCtx,
+        regInput(k),
+      );
+    expect(replay.created).toBe(false);
+    expect(replay.validator.id).toBe(first.validator.id);
+    // Exactly ONE registration audit event for the original participant.
+    const events = await harness.runtime.auditWriter.query({
+      eventType: "validator.registered",
+      resourceId: first.validator.id,
+    });
+    expect(events).toHaveLength(1);
+  });
+
+  test("the stake-outcome recording's same-key replay short-circuits at the store (single entry, single audit event)", async () => {
+    const stakedPolicyId = await createStakedPolicy(harness);
+    const opened = await openDefaultChallenge(harness, {
+      policyId: stakedPolicyId,
+    });
+    const assigned = await deriveAssignments(harness, opened.challenge);
+    const entry = assigned.assignment!.entries[0]!;
+    const validatorCtx = personCtx(
+      harness,
+      entry.validatorPersonId,
+      "ac09-record-replay",
+    );
+    await harness.runtime.apiCommands.bondValidatorAssignmentStake(
+      validatorCtx,
+      entry.validatorPersonId,
+      assigned.id,
+      {
+        organizationScopeId: harness.organizationScopeId,
+        validatorPersonId: entry.validatorPersonId,
+        idempotencyKey: key("ac09-record-bond"),
+      },
+    );
+    await observe(harness, assigned, 0, { verdict: "UPHOLD" });
+    const outcome = await deriveOutcome(harness, assigned);
+    // The bonded stake id (from the assignment entry).
+    const bonded = await harness.runtime.validationService.getChallenge(
+      personCtx(harness, harness.reviewerPersonId, "ac09-record-read"),
+      harness.organizationScopeId,
+      assigned.id,
+    );
+    const stakeId = bonded.assignment!.entries.find(
+      (e) => e.validatorPersonId === entry.validatorPersonId,
+    )!.stake.stakeId!;
+    // /settlement executes the disposition (RELEASE), THEN the domain
+    // records it — the terminal-state verification now runs inside
+    // the apply callback.
+    await harness.runtime.stakeService.releaseStake(
+      personCtx(harness, harness.reviewerPersonId, "ac09-record-release"),
+      {
+        stakeId,
+        reason: "released for the replay-ordering probe",
+        idempotencyKey: key("ac09-record-release"),
+      },
+    );
+    const reviewerCtx = personCtx(
+      harness,
+      harness.reviewerPersonId,
+      "ac09-record-replay",
+    );
+    const recordInput = (kk: string) => ({
+      organizationScopeId: harness.organizationScopeId,
+      outcomeId: outcome.id,
+      validatorPersonId: entry.validatorPersonId,
+      stakeId,
+      disposition: "RELEASE" as const,
+      idempotencyKey: kk,
+    });
+    const k = key("ac09-record-replay");
+    const first =
+      await harness.runtime.validationService.recordValidatorStakeOutcome(
+        reviewerCtx,
+        recordInput(k),
+      );
+    expect(first.stakeOutcomes).toHaveLength(1);
+    // SAME-KEY replay: the cached outcome — no duplicate entry, no
+    // second audit event (the settlement-state read never re-executes).
+    const replay =
+      await harness.runtime.validationService.recordValidatorStakeOutcome(
+        reviewerCtx,
+        recordInput(k),
+      );
+    expect(replay.id).toBe(first.id);
+    expect(replay.stakeOutcomes).toHaveLength(1);
+    const events = await harness.runtime.auditWriter.query({
+      eventType: "validation_outcome.stake_outcome_recorded",
+      resourceId: outcome.id,
+    });
+    expect(events).toHaveLength(1);
   });
 });

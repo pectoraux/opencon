@@ -60,6 +60,21 @@
  * record + the audit event in ONE authoritative transaction
  * (IdempotencyStore.applyIdempotent; NET-W004-AC-07).
  *
+ * REPLAY-ORDERING (NET-W032 architect re-review on PR #66): every
+ * state-dependent acceptance check (mutable repository/authority
+ * reads — target/evidence/stake/proof resolution, duplicate gates,
+ * assignment/lifecycle projections) runs INSIDE the
+ * applyIdempotent callback. Only pure, request-deterministic
+ * input-shape validation runs before the store. The store's
+ * committed-record short-circuit therefore precedes ALL state
+ * reads: a completed same-key replay returns its cached result even
+ * when the referenced authority state has since changed (revoked
+ * W029/W031 evidence, a dispositioned validator stake, a closed +
+ * rechallenged round, a suspended + re-registered participant) —
+ * the repository-wide exactly-once / same-key replay contract. A
+ * genuinely fresh key still executes every gate in-transaction and
+ * fails closed.
+ *
  * Lock ordering (documented, never reversed): per-target round mutex
  * (duplicate gate) → idempotency key; per-round record mutex →
  * idempotency key; per-(round, validator) observation-slot mutex →
@@ -389,101 +404,20 @@ export function createValidationService(
 
       // Authorization: a person actor (server-side identity).
       const initiator = actingPersonId(execution);
-      if (!(await lookups.subject.exists(initiator))) {
-        throw validationError(
-          `challenge initiator person does not exist: ${initiator}`,
-          { initiatedByPersonId: initiator },
-        );
-      }
 
-      // The target must resolve to an authoritative record in the same
-      // organization scope (tenant isolation).
-      const resolvedTarget = await lookups.target.resolve(
-        input.target.kind,
-        input.target.id,
-      );
-      if (!resolvedTarget) {
-        throw new NotFoundError(
-          `validation target ${input.target.kind}:${input.target.id} does not resolve to an authoritative record`,
-          {
-            targetKind: input.target.kind,
-            targetId: input.target.id,
-          },
-        );
-      }
-      if (resolvedTarget.organizationScopeId !== input.organizationScopeId) {
-        throw validationError(
-          `validation target ${input.target.kind}:${input.target.id} belongs to organization scope ${resolvedTarget.organizationScopeId}, not ${input.organizationScopeId}`,
-          {
-            targetKind: input.target.kind,
-            targetId: input.target.id,
-            targetScope: resolvedTarget.organizationScopeId,
-            requestedScope: input.organizationScopeId,
-          },
-        );
-      }
-      validateValidationTimestamp("targetAnchorAt", resolvedTarget.anchorAt);
-
-      // The round's creation anchor must not precede the target's own
-      // authoritative anchor (a challenge cannot predate its target).
-      if (Date.parse(input.effectiveAt) < Date.parse(resolvedTarget.anchorAt)) {
-        throw validationError(
-          `challenge effectiveAt ${input.effectiveAt} precedes the target's authoritative anchor ${resolvedTarget.anchorAt}`,
-          {
-            effectiveAt: input.effectiveAt,
-            targetAnchorAt: resolvedTarget.anchorAt,
-          },
-        );
-      }
-
-      // The rechallenge target (when given) must be a CLOSED round in
-      // the same scope — checked BEFORE the duplicate gate so the
-      // precise one-way rule surfaces (rechallenging a LIVE round is
-      // specifically "the round is not closed", not a generic
-      // duplicate). Re-verified in-transaction below.
-      if (input.rechallengeOfChallengeId !== undefined) {
-        const rechallengeOf = await challengeRepository.findById(
-          input.rechallengeOfChallengeId,
-        );
-        if (
-          !rechallengeOf ||
-          rechallengeOf.organizationScopeId !== input.organizationScopeId
-        ) {
-          throw new NotFoundError(
-            `rechallenge target not found: ${input.rechallengeOfChallengeId}`,
-            { rechallengeOfChallengeId: input.rechallengeOfChallengeId },
-          );
-        }
-        if (rechallengeOf.outcome === null) {
-          throw validationError(
-            `rechallenge target ${rechallengeOf.id} is not a closed round (no outcome) — only a CLOSED round can be rechallenged`,
-            { rechallengeOfChallengeId: rechallengeOf.id },
-          );
-        }
-      }
-
-      // Duplicate gate: a target with a LIVE (outcome-less) round
-      // cannot be challenged again — the round must close first (then
-      // a rechallenge opens a NEW linked round).
-      const live = await challengeRepository.findLiveByTarget(
-        input.organizationScopeId,
-        input.target.kind,
-        input.target.id,
-      );
-      const foreignLive = live.filter(
-        (c) => c.idempotencyKey !== input.idempotencyKey,
-      );
-      if (foreignLive.length > 0) {
-        throw new ConflictError(
-          `target ${input.target.kind}:${input.target.id} already has a live validation round (${foreignLive[0]!.id})`,
-          {
-            targetKind: input.target.kind,
-            targetId: input.target.id,
-            existingChallengeId: foreignLive[0]!.id,
-          },
-        );
-      }
-
+      // REPLAY-ORDERING (architect re-review on PR #66): every
+      // state-dependent acceptance check — the initiator's existence,
+      // target resolution + scope + anchor, the rechallenge one-way
+      // rule, the duplicate live-round gate and the policy freeze —
+      // runs INSIDE the applyIdempotent callback. A completed
+      // same-key replay short-circuits at the idempotency store's
+      // committed record BEFORE any state is read (the exactly-once /
+      // same-key replay contract): replaying an open whose round has
+      // since CLOSED and been RECHALLENGED (a new live round on the
+      // same target) still returns the cached original round instead
+      // of tripping the duplicate gate. Only pure, request-
+      // deterministic input-shape validation stays above; a genuinely
+      // fresh key executes every gate in-transaction and fails closed.
       const key = `validation_challenge_open:${input.organizationScopeId}:${input.idempotencyKey}`;
       // The target mutex serializes concurrent opens of the SAME
       // target (the duplicate gate guards the TARGET, not the key).
@@ -498,29 +432,70 @@ export function createValidationService(
             key,
             async (ctx) => {
               const tx = ctx.transaction;
-              // In-tx duplicate re-check.
-              const liveInTx = await challengeRepository.findLiveByTargetWithinTx(
-                input.organizationScopeId,
+              // The initiator must exist (identity; state-dependent —
+              // resolved in-callback so completed same-key replays
+              // short-circuit at the store before any state read).
+              if (!(await lookups.subject.exists(initiator))) {
+                throw validationError(
+                  `challenge initiator person does not exist: ${initiator}`,
+                  { initiatedByPersonId: initiator },
+                );
+              }
+
+              // The target must resolve to an authoritative record in
+              // the same organization scope (tenant isolation).
+              const resolvedTarget = await lookups.target.resolve(
                 input.target.kind,
                 input.target.id,
-                tx,
               );
-              const foreign = liveInTx.filter(
-                (c) => c.idempotencyKey !== input.idempotencyKey,
-              );
-              if (foreign.length > 0) {
-                throw new ConflictError(
-                  `target ${input.target.kind}:${input.target.id} already has a live validation round (${foreign[0]!.id})`,
+              if (!resolvedTarget) {
+                throw new NotFoundError(
+                  `validation target ${input.target.kind}:${input.target.id} does not resolve to an authoritative record`,
                   {
                     targetKind: input.target.kind,
                     targetId: input.target.id,
-                    existingChallengeId: foreign[0]!.id,
+                  },
+                );
+              }
+              if (
+                resolvedTarget.organizationScopeId !== input.organizationScopeId
+              ) {
+                throw validationError(
+                  `validation target ${input.target.kind}:${input.target.id} belongs to organization scope ${resolvedTarget.organizationScopeId}, not ${input.organizationScopeId}`,
+                  {
+                    targetKind: input.target.kind,
+                    targetId: input.target.id,
+                    targetScope: resolvedTarget.organizationScopeId,
+                    requestedScope: input.organizationScopeId,
+                  },
+                );
+              }
+              validateValidationTimestamp(
+                "targetAnchorAt",
+                resolvedTarget.anchorAt,
+              );
+
+              // The round's creation anchor must not precede the
+              // target's own authoritative anchor (a challenge cannot
+              // predate its target).
+              if (
+                Date.parse(input.effectiveAt) <
+                Date.parse(resolvedTarget.anchorAt)
+              ) {
+                throw validationError(
+                  `challenge effectiveAt ${input.effectiveAt} precedes the target's authoritative anchor ${resolvedTarget.anchorAt}`,
+                  {
+                    effectiveAt: input.effectiveAt,
+                    targetAnchorAt: resolvedTarget.anchorAt,
                   },
                 );
               }
 
               // The rechallenge target (when given) must be a CLOSED
-              // round in the same scope (rechallenge = a NEW round).
+              // round in the same scope — BEFORE the duplicate gate so
+              // the precise one-way rule surfaces (rechallenging a
+              // LIVE round is specifically "the round is not closed",
+              // not a generic duplicate).
               let rechallengeOf: ValidationChallenge | null = null;
               if (input.rechallengeOfChallengeId !== undefined) {
                 rechallengeOf = await challengeRepository.findByIdWithinTx(
@@ -542,6 +517,31 @@ export function createValidationService(
                     { rechallengeOfChallengeId: rechallengeOf.id },
                   );
                 }
+              }
+
+              // In-tx duplicate re-check: a target with a LIVE
+              // (outcome-less) round cannot be challenged again — the
+              // round must close first (then a rechallenge opens a NEW
+              // linked round). The caller's OWN round (same
+              // idempotency key) is not a duplicate.
+              const liveInTx = await challengeRepository.findLiveByTargetWithinTx(
+                input.organizationScopeId,
+                input.target.kind,
+                input.target.id,
+                tx,
+              );
+              const foreign = liveInTx.filter(
+                (c) => c.idempotencyKey !== input.idempotencyKey,
+              );
+              if (foreign.length > 0) {
+                throw new ConflictError(
+                  `target ${input.target.kind}:${input.target.id} already has a live validation round (${foreign[0]!.id})`,
+                  {
+                    targetKind: input.target.kind,
+                    targetId: input.target.id,
+                    existingChallengeId: foreign[0]!.id,
+                  },
+                );
               }
 
               // Freeze the policy INSIDE the transaction (the latest
@@ -1005,125 +1005,30 @@ export function createValidationService(
     async bondValidatorStake(execution, input) {
       assertIdempotencyKey(input.idempotencyKey);
       const actor = actingPersonId(execution);
-      const found = await loadChallengeScoped(
-        input.organizationScopeId,
-        input.challengeId,
-      );
-      const assignment = found.assignment;
-      if (assignment === null) {
-        throw validationError(
-          `validation challenge ${found.id} has no derived assignment set — derive assignments before bonding validator stakes`,
-          { challengeId: found.id },
-        );
-      }
-      const entry = assignment.entries.find(
-        (e) => e.validatorPersonId === input.validatorPersonId,
-      );
-      if (!entry) {
-        throw validationError(
-          `person ${input.validatorPersonId} is not an assigned validator of validation challenge ${found.id}`,
-          { challengeId: found.id, validatorPersonId: input.validatorPersonId },
-        );
-      }
-      // Self-bonding only (actor == the assigned validator).
-      if (actor !== input.validatorPersonId) {
-        throw validationError(
-          `validator stakes are self-bonded: actor ${actor} cannot bond the assignment of validator ${input.validatorPersonId}`,
-          { challengeId: found.id, actorPersonId: actor, validatorPersonId: input.validatorPersonId },
-        );
-      }
-      if (entry.stake.requirementCredits === 0) {
-        throw validationError(
-          `the round's policy requires no validator stake (requirement 0) — nothing to bond for validation challenge ${found.id}`,
-          { challengeId: found.id, validatorPersonId: input.validatorPersonId },
-        );
-      }
-      // NOTE: the closed-round and already-bonded state gates live ONLY
-      // in the in-tx re-check below (same-key replays must reach the
-      // idempotency store; fresh keys fail closed in-transaction).
 
-      // VERIFY the settlement authority's record (read-only lookup —
-      // the escrow itself was posted by /settlement, never here).
-      const stake = await lookups.stake.resolveStake(input.stakeId);
-      if (!stake) {
-        throw new NotFoundError(
-          `stake not found in the settlement authority: ${input.stakeId}`,
-          { stakeId: input.stakeId },
-        );
-      }
-      if (stake.organizationScopeId !== found.organizationScopeId) {
-        throw validationError(
-          `stake ${input.stakeId} belongs to organization scope ${stake.organizationScopeId}, not ${found.organizationScopeId}`,
-          {
-            stakeId: input.stakeId,
-            stakeScope: stake.organizationScopeId,
-            requestedScope: found.organizationScopeId,
-          },
-        );
-      }
-      if (stake.ownerPersonId !== input.validatorPersonId) {
-        throw validationError(
-          `stake ${input.stakeId} is owned by ${stake.ownerPersonId}, not the assigned validator ${input.validatorPersonId}`,
-          { stakeId: input.stakeId, ownerPersonId: stake.ownerPersonId },
-        );
-      }
-      if (stake.state !== "COMMITTED") {
-        throw validationError(
-          `stake ${input.stakeId} is ${stake.state}, not COMMITTED`,
-          { stakeId: input.stakeId, state: stake.state },
-        );
-      }
-      if (stake.unit !== "credits") {
-        throw validationError(
-          `stake ${input.stakeId} is denominated in ${stake.unit}, not credits`,
-          { stakeId: input.stakeId, unit: stake.unit },
-        );
-      }
-      if (stake.amount !== entry.stake.requirementCredits) {
-        throw validationError(
-          `stake ${input.stakeId} amount ${String(stake.amount)} does not match the frozen requirement ${String(entry.stake.requirementCredits)}`,
-          { stakeId: input.stakeId, amount: stake.amount },
-        );
-      }
-      const expectedPurposeId = `${found.id}:${input.validatorPersonId}`;
-      if (
-        stake.purposeKind !== "validation_assignment" ||
-        stake.purposeId !== expectedPurposeId
-      ) {
-        throw validationError(
-          `stake ${input.stakeId} purpose ${stake.purposeKind}:${stake.purposeId} does not link validator assignment ${expectedPurposeId}`,
-          {
-            stakeId: input.stakeId,
-            purposeKind: stake.purposeKind,
-            purposeId: stake.purposeId,
-            expectedPurposeId,
-          },
-        );
-      }
-      // The bonding deadline: within the round window.
-      if (
-        Date.parse(stake.committedAt) > Date.parse(found.windowExpiresAt)
-      ) {
-        throw validationError(
-          `stake ${input.stakeId} was committed at ${stake.committedAt}, after the round window expired ${found.windowExpiresAt}`,
-          {
-            stakeId: input.stakeId,
-            committedAt: stake.committedAt,
-            windowExpiresAt: found.windowExpiresAt,
-          },
-        );
-      }
-
-      const key = `validator_stake_bond:${input.organizationScopeId}:${found.id}:${input.validatorPersonId}:${input.idempotencyKey}`;
+      // REPLAY-ORDERING (architect re-review on PR #66): the
+      // assignment gates (existence, entry binding, self-bonding,
+      // zero-requirement, already-bonded) AND the full
+      // settlement-authority stake verification (scope, owner,
+      // COMMITTED state, unit, amount, purpose linkage, the window
+      // deadline) run INSIDE the applyIdempotent callback. A
+      // completed same-key replay short-circuits at the idempotency
+      // store's committed record BEFORE the stake is re-read from
+      // the settlement authority: the stake may already have been
+      // RELEASED/FORFEITED after the round closed — the replay must
+      // still return the cached bonded round (the exactly-once /
+      // same-key replay contract). A genuinely fresh key executes
+      // every gate in-transaction and fails closed.
+      const key = `validator_stake_bond:${input.organizationScopeId}:${input.challengeId}:${input.validatorPersonId}:${input.idempotencyKey}`;
       const applied = await idempotency.withLock(
-        challengeRecordLockKey(found.id),
+        challengeRecordLockKey(input.challengeId),
         () =>
           idempotency.applyIdempotent(
             key,
             async (ctx) => {
               const tx = ctx.transaction;
               const current = await challengeRepository.findByIdWithinTx(
-                found.id,
+                input.challengeId,
                 tx,
               );
               if (
@@ -1131,8 +1036,8 @@ export function createValidationService(
                 current.organizationScopeId !== input.organizationScopeId
               ) {
                 throw new NotFoundError(
-                  `validation challenge not found: ${found.id}`,
-                  { challengeId: found.id },
+                  `validation challenge not found: ${input.challengeId}`,
+                  { challengeId: input.challengeId },
                 );
               }
               if (current.outcome !== null) {
@@ -1144,7 +1049,7 @@ export function createValidationService(
               const currentAssignment = current.assignment;
               if (currentAssignment === null) {
                 throw validationError(
-                  `validation challenge ${current.id} has no derived assignment set`,
+                  `validation challenge ${current.id} has no derived assignment set — derive assignments before bonding validator stakes`,
                   { challengeId: current.id },
                 );
               }
@@ -1157,6 +1062,20 @@ export function createValidationService(
                   { challengeId: current.id, validatorPersonId: input.validatorPersonId },
                 );
               }
+              // Self-bonding only (actor == the assigned validator; a
+              // request-deterministic authorization comparison).
+              if (actor !== input.validatorPersonId) {
+                throw validationError(
+                  `validator stakes are self-bonded: actor ${actor} cannot bond the assignment of validator ${input.validatorPersonId}`,
+                  { challengeId: current.id, actorPersonId: actor, validatorPersonId: input.validatorPersonId },
+                );
+              }
+              if (currentEntry.stake.requirementCredits === 0) {
+                throw validationError(
+                  `the round's policy requires no validator stake (requirement 0) — nothing to bond for validation challenge ${current.id}`,
+                  { challengeId: current.id, validatorPersonId: input.validatorPersonId },
+                );
+              }
               if (currentEntry.stake.stakeId !== null) {
                 throw new ConflictError(
                   `validator ${input.validatorPersonId} already bonded stake ${currentEntry.stake.stakeId} on validation challenge ${current.id}`,
@@ -1164,6 +1083,82 @@ export function createValidationService(
                     challengeId: current.id,
                     validatorPersonId: input.validatorPersonId,
                     stakeId: currentEntry.stake.stakeId,
+                  },
+                );
+              }
+              // VERIFY the settlement authority's record (read-only
+              // lookup — the escrow itself was posted by /settlement,
+              // never here). Resolved INSIDE the callback: the replay
+              // short-circuit precedes it, so a post-closure stake
+              // disposition can never break a completed same-key
+              // replay.
+              const stake = await lookups.stake.resolveStake(input.stakeId);
+              if (!stake) {
+                throw new NotFoundError(
+                  `stake not found in the settlement authority: ${input.stakeId}`,
+                  { stakeId: input.stakeId },
+                );
+              }
+              if (stake.organizationScopeId !== current.organizationScopeId) {
+                throw validationError(
+                  `stake ${input.stakeId} belongs to organization scope ${stake.organizationScopeId}, not ${current.organizationScopeId}`,
+                  {
+                    stakeId: input.stakeId,
+                    stakeScope: stake.organizationScopeId,
+                    requestedScope: current.organizationScopeId,
+                  },
+                );
+              }
+              if (stake.ownerPersonId !== input.validatorPersonId) {
+                throw validationError(
+                  `stake ${input.stakeId} is owned by ${stake.ownerPersonId}, not the assigned validator ${input.validatorPersonId}`,
+                  { stakeId: input.stakeId, ownerPersonId: stake.ownerPersonId },
+                );
+              }
+              if (stake.state !== "COMMITTED") {
+                throw validationError(
+                  `stake ${input.stakeId} is ${stake.state}, not COMMITTED`,
+                  { stakeId: input.stakeId, state: stake.state },
+                );
+              }
+              if (stake.unit !== "credits") {
+                throw validationError(
+                  `stake ${input.stakeId} is denominated in ${stake.unit}, not credits`,
+                  { stakeId: input.stakeId, unit: stake.unit },
+                );
+              }
+              if (stake.amount !== currentEntry.stake.requirementCredits) {
+                throw validationError(
+                  `stake ${input.stakeId} amount ${String(stake.amount)} does not match the frozen requirement ${String(currentEntry.stake.requirementCredits)}`,
+                  { stakeId: input.stakeId, amount: stake.amount },
+                );
+              }
+              const expectedPurposeId = `${current.id}:${input.validatorPersonId}`;
+              if (
+                stake.purposeKind !== "validation_assignment" ||
+                stake.purposeId !== expectedPurposeId
+              ) {
+                throw validationError(
+                  `stake ${input.stakeId} purpose ${stake.purposeKind}:${stake.purposeId} does not link validator assignment ${expectedPurposeId}`,
+                  {
+                    stakeId: input.stakeId,
+                    purposeKind: stake.purposeKind,
+                    purposeId: stake.purposeId,
+                    expectedPurposeId,
+                  },
+                );
+              }
+              // The bonding deadline: within the round window.
+              if (
+                Date.parse(stake.committedAt) >
+                Date.parse(current.windowExpiresAt)
+              ) {
+                throw validationError(
+                  `stake ${input.stakeId} was committed at ${stake.committedAt}, after the round window expired ${current.windowExpiresAt}`,
+                  {
+                    stakeId: input.stakeId,
+                    committedAt: stake.committedAt,
+                    windowExpiresAt: current.windowExpiresAt,
                   },
                 );
               }
@@ -1248,106 +1243,35 @@ export function createValidationService(
       // does not cross into callbacks — the W010 discipline).
       const verdict: ValidationVerdict = input.verdict;
       const actor = actingPersonId(execution);
-      const found = await loadChallengeScoped(
-        input.organizationScopeId,
-        input.challengeId,
-      );
-      const assignment = found.assignment;
-      if (assignment === null) {
-        throw validationError(
-          `validation challenge ${found.id} has no derived assignment set — observations require an assignment`,
-          { challengeId: found.id },
-        );
-      }
-      // ACTOR BINDING (§3.4): the acting person must be an ASSIGNED
-      // validator (never on behalf of another validator).
-      const entry = assignment.entries.find(
-        (e) => e.validatorPersonId === actor,
-      );
-      if (!entry) {
-        throw validationError(
-          `actor ${actor} is not an assigned validator of validation challenge ${found.id} (validators cannot observe outside their assignment)`,
-          { challengeId: found.id, actorPersonId: actor },
-        );
-      }
-      // The eligibility bond: when the policy requires a stake, it
-      // must be bonded before the observation is accepted (fail
-      // closed — §3.1 stake requirements are eligibility inputs).
-      if (
-        entry.stake.requirementCredits > 0 &&
-        entry.stake.stakeId === null
-      ) {
-        throw validationError(
-          `validator ${actor} has not bonded the required stake (${String(entry.stake.requirementCredits)} credits) on validation challenge ${found.id} — observations are accepted only from bonded assignments`,
-          {
-            challengeId: found.id,
-            validatorPersonId: actor,
-            requirementCredits: entry.stake.requirementCredits,
-          },
-        );
-      }
-      // The observation anchor must fall within the round window
-      // (inclusive bounds).
-      if (
-        Date.parse(input.observedAt) < Date.parse(found.effectiveAt) ||
-        Date.parse(input.observedAt) > Date.parse(found.windowExpiresAt)
-      ) {
-        throw validationError(
-          `observation anchor ${input.observedAt} is outside the round window [${found.effectiveAt}, ${found.windowExpiresAt}]`,
-          {
-            observedAt: input.observedAt,
-            effectiveAt: found.effectiveAt,
-            windowExpiresAt: found.windowExpiresAt,
-          },
-        );
-      }
-      // Evidence references: opaque, resolving, same-scope, current
-      // (W029/W031 integrity composition). UPHOLD/REJECT verdicts are
-      // evidence-backed; ABSTAIN may carry none.
-      const evidenceRefs = await resolveEvidenceRefs(
-        input.organizationScopeId,
-        input.evidenceRefs ?? [],
-      );
-      if (
-        (input.verdict === "UPHOLD" || input.verdict === "REJECT") &&
-        evidenceRefs.length === 0
-      ) {
-        throw validationError(
-          `a ${input.verdict} verdict requires at least one evidence reference (evidence-backed verdicts only)`,
-          { challengeId: found.id, verdict: input.verdict },
-        );
-      }
 
-      // Duplicate gate: exactly ONE observation per (round, validator).
-      const existing = await observationRepository.findByChallengeAndValidator(
-        input.organizationScopeId,
-        found.id,
-        actor,
-      );
-      if (existing !== null && existing.idempotencyKey !== input.idempotencyKey) {
-        throw new ConflictError(
-          `validator ${actor} already submitted observation ${existing.id} on validation challenge ${found.id} (exactly one observation per validator per round)`,
-          {
-            challengeId: found.id,
-            validatorPersonId: actor,
-            existingObservationId: existing.id,
-          },
-        );
-      }
-
-      const key = `validation_observation:${input.organizationScopeId}:${found.id}:${actor}:${input.idempotencyKey}`;
+      // REPLAY-ORDERING (architect re-review on PR #66): every
+      // mutable/state-dependent acceptance check — the assignment
+      // existence, the actor binding, the stake-bond eligibility, the
+      // window bounds, the evidence-reference resolution (W029/W031
+      // revocation state!) and the duplicate-observation gate — runs
+      // INSIDE the applyIdempotent callback. A completed same-key
+      // replay short-circuits at the idempotency store's committed
+      // record BEFORE any state is read (the exactly-once / same-key
+      // replay contract): revoking the cited W029/W031 evidence after
+      // a successful submission can never break a completed same-key
+      // replay — the cached observation is returned directly. Only
+      // pure, request-deterministic input-shape validation stays
+      // above; a genuinely fresh key executes every gate
+      // in-transaction and fails closed (revoked evidence with a NEW
+      // key is still rejected).
+      const key = `validation_observation:${input.organizationScopeId}:${input.challengeId}:${actor}:${input.idempotencyKey}`;
       // The per-(round, validator) slot mutex serializes concurrent
       // submissions by the SAME validator (the one-observation
       // invariant is broader than the idempotency key).
       const applied = await idempotency.withLock(
-        observationSlotLockKey(input.organizationScopeId, found.id, actor),
+        observationSlotLockKey(input.organizationScopeId, input.challengeId, actor),
         () =>
           idempotency.applyIdempotent(
             key,
             async (ctx) => {
               const tx = ctx.transaction;
               const current = await challengeRepository.findByIdWithinTx(
-                found.id,
+                input.challengeId,
                 tx,
               );
               if (
@@ -1355,8 +1279,8 @@ export function createValidationService(
                 current.organizationScopeId !== input.organizationScopeId
               ) {
                 throw new NotFoundError(
-                  `validation challenge not found: ${found.id}`,
-                  { challengeId: found.id },
+                  `validation challenge not found: ${input.challengeId}`,
+                  { challengeId: input.challengeId },
                 );
               }
               if (current.outcome !== null) {
@@ -1368,21 +1292,81 @@ export function createValidationService(
               const currentAssignment = current.assignment;
               if (currentAssignment === null) {
                 throw validationError(
-                  `validation challenge ${current.id} has no derived assignment set`,
+                  `validation challenge ${current.id} has no derived assignment set — observations require an assignment`,
                   { challengeId: current.id },
                 );
               }
+              // ACTOR BINDING (§3.4): the acting person must be an
+              // ASSIGNED validator (never on behalf of another
+              // validator).
               const currentEntry = currentAssignment.entries.find(
                 (e) => e.validatorPersonId === actor,
               );
               if (!currentEntry) {
                 throw validationError(
-                  `actor ${actor} is not an assigned validator of validation challenge ${current.id}`,
+                  `actor ${actor} is not an assigned validator of validation challenge ${current.id} (validators cannot observe outside their assignment)`,
                   { challengeId: current.id, actorPersonId: actor },
                 );
               }
-              // In-tx duplicate re-check (the slot mutex guarantees the
-              // prior submitter's record is COMMITTED-visible).
+              // The eligibility bond: when the policy requires a
+              // stake, it must be bonded before the observation is
+              // accepted (fail closed — §3.1 stake requirements are
+              // eligibility inputs).
+              if (
+                currentEntry.stake.requirementCredits > 0 &&
+                currentEntry.stake.stakeId === null
+              ) {
+                throw validationError(
+                  `validator ${actor} has not bonded the required stake (${String(currentEntry.stake.requirementCredits)} credits) on validation challenge ${current.id} — observations are accepted only from bonded assignments`,
+                  {
+                    challengeId: current.id,
+                    validatorPersonId: actor,
+                    requirementCredits: currentEntry.stake.requirementCredits,
+                  },
+                );
+              }
+              // The observation anchor must fall within the round
+              // window (inclusive bounds — frozen round facts).
+              if (
+                Date.parse(input.observedAt) <
+                  Date.parse(current.effectiveAt) ||
+                Date.parse(input.observedAt) >
+                  Date.parse(current.windowExpiresAt)
+              ) {
+                throw validationError(
+                  `observation anchor ${input.observedAt} is outside the round window [${current.effectiveAt}, ${current.windowExpiresAt}]`,
+                  {
+                    observedAt: input.observedAt,
+                    effectiveAt: current.effectiveAt,
+                    windowExpiresAt: current.windowExpiresAt,
+                  },
+                );
+              }
+              // Evidence references: opaque, resolving, same-scope,
+              // current (W029/W031 integrity composition).
+              // UPHOLD/REJECT verdicts are evidence-backed; ABSTAIN
+              // may carry none. Resolved INSIDE the callback: the
+              // replay short-circuit precedes it, so revoking the
+              // cited evidence after a successful submission can
+              // never break a completed same-key replay.
+              const evidenceRefs = await resolveEvidenceRefs(
+                input.organizationScopeId,
+                input.evidenceRefs ?? [],
+              );
+              if (
+                (verdict === "UPHOLD" || verdict === "REJECT") &&
+                evidenceRefs.length === 0
+              ) {
+                throw validationError(
+                  `a ${verdict} verdict requires at least one evidence reference (evidence-backed verdicts only)`,
+                  { challengeId: current.id, verdict },
+                );
+              }
+              // Duplicate gate: exactly ONE observation per (round,
+              // validator). The caller's OWN observation (same
+              // idempotency key) is not a duplicate; a foreign one
+              // fails closed (the slot mutex guarantees the prior
+              // submitter's record is COMMITTED-visible in-tx).
               const existingInTx =
                 await observationRepository.findByChallengeAndValidatorWithinTx(
                   input.organizationScopeId,
@@ -1395,7 +1379,7 @@ export function createValidationService(
                 existingInTx.idempotencyKey !== input.idempotencyKey
               ) {
                 throw new ConflictError(
-                  `validator ${actor} already submitted observation ${existingInTx.id} on validation challenge ${current.id}`,
+                  `validator ${actor} already submitted observation ${existingInTx.id} on validation challenge ${current.id} (exactly one observation per validator per round)`,
                   {
                     challengeId: current.id,
                     validatorPersonId: actor,
@@ -1669,61 +1653,26 @@ export function createValidationService(
       if (!input.stakeId?.trim()) {
         throw validationError("stakeId is required", { field: "stakeId" });
       }
-      const outcome = await loadOutcomeScoped(
-        input.organizationScopeId,
-        input.outcomeId,
-      );
-      // NOTE: the already-recorded state gate lives ONLY in the in-tx
-      // re-check below (same-key replays must reach the idempotency
-      // store; fresh keys fail closed in-transaction). The stake must
-      // be the one bonded to the validator's assignment entry on the
-      // challenge (server-side linkage verification).
-      const challenge = await loadChallengeScoped(
-        input.organizationScopeId,
-        outcome.challengeId,
-      );
-      const entry = challenge.assignment?.entries.find(
-        (e) => e.validatorPersonId === input.validatorPersonId,
-      );
-      if (!entry || entry.stake.stakeId !== input.stakeId) {
-        throw validationError(
-          `stake ${input.stakeId} is not the stake bonded to validator ${input.validatorPersonId}'s assignment on validation challenge ${challenge.id}`,
-          {
-            outcomeId: outcome.id,
-            challengeId: challenge.id,
-            validatorPersonId: input.validatorPersonId,
-            stakeId: input.stakeId,
-          },
-        );
-      }
-      // VERIFY the settlement authority actually executed the outcome
-      // (read-only): the stake must be in the matching terminal state.
-      const stake = await lookups.stake.resolveStake(input.stakeId);
-      if (!stake) {
-        throw new NotFoundError(
-          `stake not found in the settlement authority: ${input.stakeId}`,
-          { stakeId: input.stakeId },
-        );
-      }
-      const expected =
-        input.disposition === "RELEASE" ? "RELEASED" : "FORFEITED";
-      if (stake.state !== expected) {
-        throw validationError(
-          `stake ${input.stakeId} is ${stake.state} in the settlement authority — cannot record disposition ${input.disposition}`,
-          { stakeId: input.stakeId, settlementState: stake.state },
-        );
-      }
 
+      // REPLAY-ORDERING (architect re-review on PR #66): the
+      // outcome/challenge linkage verification AND the
+      // settlement-authority terminal-state verification (mutable
+      // records of ANOTHER authority) run INSIDE the applyIdempotent
+      // callback. A completed same-key replay short-circuits at the
+      // idempotency store's committed record BEFORE those reads
+      // (the exactly-once / same-key replay contract); a genuinely
+      // fresh key executes every gate in-transaction and fails
+      // closed.
       const key = `validation_stake_outcome:${input.outcomeId}:${input.stakeId}:${input.idempotencyKey}`;
       const applied = await idempotency.withLock(
-        outcomeRecordLockKey(outcome.id),
+        outcomeRecordLockKey(input.outcomeId),
         () =>
           idempotency.applyIdempotent(
             key,
             async (ctx) => {
               const tx = ctx.transaction;
               const current = await outcomeRepository.findByIdWithinTx(
-                outcome.id,
+                input.outcomeId,
                 tx,
               );
               if (
@@ -1731,8 +1680,8 @@ export function createValidationService(
                 current.organizationScopeId !== input.organizationScopeId
               ) {
                 throw new NotFoundError(
-                  `validation outcome not found: ${outcome.id}`,
-                  { outcomeId: outcome.id },
+                  `validation outcome not found: ${input.outcomeId}`,
+                  { outcomeId: input.outcomeId },
                 );
               }
               if (
@@ -1741,6 +1690,54 @@ export function createValidationService(
                 throw new ConflictError(
                   `validation outcome ${current.id} already records a stake outcome for stake ${input.stakeId}`,
                   { outcomeId: current.id, stakeId: input.stakeId },
+                );
+              }
+              // The stake must be the one bonded to the validator's
+              // assignment entry on the challenge (server-side
+              // linkage verification — in-transaction).
+              const challenge = await challengeRepository.findByIdWithinTx(
+                current.challengeId,
+                tx,
+              );
+              if (
+                !challenge ||
+                challenge.organizationScopeId !== input.organizationScopeId
+              ) {
+                throw new NotFoundError(
+                  `validation challenge not found: ${current.challengeId}`,
+                  { challengeId: current.challengeId },
+                );
+              }
+              const entry = challenge.assignment?.entries.find(
+                (e) => e.validatorPersonId === input.validatorPersonId,
+              );
+              if (!entry || entry.stake.stakeId !== input.stakeId) {
+                throw validationError(
+                  `stake ${input.stakeId} is not the stake bonded to validator ${input.validatorPersonId}'s assignment on validation challenge ${challenge.id}`,
+                  {
+                    outcomeId: current.id,
+                    challengeId: challenge.id,
+                    validatorPersonId: input.validatorPersonId,
+                    stakeId: input.stakeId,
+                  },
+                );
+              }
+              // VERIFY the settlement authority actually executed the
+              // disposition (read-only, in-callback): the stake must
+              // be in the matching terminal state.
+              const stake = await lookups.stake.resolveStake(input.stakeId);
+              if (!stake) {
+                throw new NotFoundError(
+                  `stake not found in the settlement authority: ${input.stakeId}`,
+                  { stakeId: input.stakeId },
+                );
+              }
+              const expected =
+                input.disposition === "RELEASE" ? "RELEASED" : "FORFEITED";
+              if (stake.state !== expected) {
+                throw validationError(
+                  `stake ${input.stakeId} is ${stake.state} in the settlement authority — cannot record disposition ${input.disposition}`,
+                  { stakeId: input.stakeId, settlementState: stake.state },
                 );
               }
               const updated: ValidationOutcome = Object.freeze({
@@ -1804,88 +1801,26 @@ export function createValidationService(
       // Narrowed const BEFORE the idempotent closure.
       const application: ValidationOutcomeApplication = input.application;
       const applier = actingPersonId(execution);
-      const outcome = await loadOutcomeScoped(
-        input.organizationScopeId,
-        input.outcomeId,
-      );
-      // NOTE: the already-applied state gate lives ONLY in the in-tx
-      // re-check below (same-key replays must reach the idempotency
-      // store; fresh keys fail closed in-transaction).
-      if (!isAcceptedValidationDecision(outcome.decision)) {
-        throw validationError(
-          `validation outcome ${outcome.id} decided ${outcome.decision} — only ACCEPTED decisions (UPHELD/DENIED) can be applied`,
-          { outcomeId: outcome.id, decision: outcome.decision },
-        );
-      }
-      // THE CONFLICT GATE: the applier must NOT be an assigned
-      // validator of the round (validators influence decisions only
-      // through the protocol — never by applying them).
-      const challenge = await loadChallengeScoped(
-        input.organizationScopeId,
-        outcome.challengeId,
-      );
-      const assignedIds = challenge.assignment?.entries.map(
-        (e) => e.validatorPersonId,
-      );
-      if (assignedIds?.includes(applier)) {
-        throw validationError(
-          `person ${applier} is an assigned validator of validation challenge ${challenge.id} and cannot apply its outcome (conflict of interest)`,
-          {
-            outcomeId: outcome.id,
-            challengeId: challenge.id,
-            appliedByPersonId: applier,
-            conflict: "assigned_validator",
-          },
-        );
-      }
 
-      // VERIFY the OWNING AUTHORITY's mutation is observable BEFORE the
-      // application fact is recorded (failed authority application can
-      // never be recorded as success). For
-      // `reputation_proof_revocation`: the W031 proof's one-way
-      // revocation state, read through the neutral proof lookup.
-      if (application === "reputation_proof_revocation") {
-        if (outcome.target.kind !== "reputation_proof") {
-          throw validationError(
-            `outcome ${outcome.id} target is ${outcome.target.kind}, not a reputation_proof — reputation_proof_revocation does not apply`,
-            { outcomeId: outcome.id, targetKind: outcome.target.kind },
-          );
-        }
-        const proof = await lookups.proofs.resolve(outcome.target.id);
-        if (!proof) {
-          throw new NotFoundError(
-            `reputation proof not found: ${outcome.target.id}`,
-            { proofId: outcome.target.id },
-          );
-        }
-        if (proof.organizationScopeId !== input.organizationScopeId) {
-          throw validationError(
-            `reputation proof ${outcome.target.id} belongs to organization scope ${proof.organizationScopeId}, not ${input.organizationScopeId}`,
-            {
-              proofId: outcome.target.id,
-              proofScope: proof.organizationScopeId,
-              requestedScope: input.organizationScopeId,
-            },
-          );
-        }
-        if (proof.revokedAt === null) {
-          throw validationError(
-            `reputation proof ${outcome.target.id} is NOT revoked in the reputation authority — the owning authority's mutation must be observable before the application is recorded`,
-            { proofId: outcome.target.id },
-          );
-        }
-      }
-
+      // REPLAY-ORDERING (architect re-review on PR #66): the
+      // accepted-decision gate, the assigned-validator conflict gate
+      // AND the owning authority's observable-mutation verification
+      // (the W031 proof's one-way revocation state) run INSIDE the
+      // applyIdempotent callback. A completed same-key replay
+      // short-circuits at the idempotency store's committed record
+      // BEFORE those reads (the exactly-once / same-key replay
+      // contract); a genuinely fresh key executes every gate
+      // in-transaction and fails closed.
       const key = `validation_outcome_application:${input.outcomeId}:${input.idempotencyKey}`;
       const applied = await idempotency.withLock(
-        outcomeRecordLockKey(outcome.id),
+        outcomeRecordLockKey(input.outcomeId),
         () =>
           idempotency.applyIdempotent(
             key,
             async (ctx) => {
               const tx = ctx.transaction;
               const current = await outcomeRepository.findByIdWithinTx(
-                outcome.id,
+                input.outcomeId,
                 tx,
               );
               if (
@@ -1893,8 +1828,8 @@ export function createValidationService(
                 current.organizationScopeId !== input.organizationScopeId
               ) {
                 throw new NotFoundError(
-                  `validation outcome not found: ${outcome.id}`,
-                  { outcomeId: outcome.id },
+                  `validation outcome not found: ${input.outcomeId}`,
+                  { outcomeId: input.outcomeId },
                 );
               }
               if (current.applied !== null) {
@@ -1902,6 +1837,81 @@ export function createValidationService(
                   `validation outcome ${current.id} is already applied`,
                   { outcomeId: current.id },
                 );
+              }
+              if (!isAcceptedValidationDecision(current.decision)) {
+                throw validationError(
+                  `validation outcome ${current.id} decided ${current.decision} — only ACCEPTED decisions (UPHELD/DENIED) can be applied`,
+                  { outcomeId: current.id, decision: current.decision },
+                );
+              }
+              // THE CONFLICT GATE: the applier must NOT be an assigned
+              // validator of the round (validators influence decisions
+              // only through the protocol — never by applying them).
+              const challenge = await challengeRepository.findByIdWithinTx(
+                current.challengeId,
+                tx,
+              );
+              if (
+                !challenge ||
+                challenge.organizationScopeId !== input.organizationScopeId
+              ) {
+                throw new NotFoundError(
+                  `validation challenge not found: ${current.challengeId}`,
+                  { challengeId: current.challengeId },
+                );
+              }
+              const assignedIds = challenge.assignment?.entries.map(
+                (e) => e.validatorPersonId,
+              );
+              if (assignedIds?.includes(applier)) {
+                throw validationError(
+                  `person ${applier} is an assigned validator of validation challenge ${challenge.id} and cannot apply its outcome (conflict of interest)`,
+                  {
+                    outcomeId: current.id,
+                    challengeId: challenge.id,
+                    appliedByPersonId: applier,
+                    conflict: "assigned_validator",
+                  },
+                );
+              }
+
+              // VERIFY the OWNING AUTHORITY's mutation is observable
+              // BEFORE the application fact is recorded (failed
+              // authority application can never be recorded as
+              // success). For `reputation_proof_revocation`: the W031
+              // proof's one-way revocation state, read through the
+              // neutral proof lookup — INSIDE the callback, so the
+              // replay short-circuit precedes it.
+              if (application === "reputation_proof_revocation") {
+                if (current.target.kind !== "reputation_proof") {
+                  throw validationError(
+                    `outcome ${current.id} target is ${current.target.kind}, not a reputation_proof — reputation_proof_revocation does not apply`,
+                    { outcomeId: current.id, targetKind: current.target.kind },
+                  );
+                }
+                const proof = await lookups.proofs.resolve(current.target.id);
+                if (!proof) {
+                  throw new NotFoundError(
+                    `reputation proof not found: ${current.target.id}`,
+                    { proofId: current.target.id },
+                  );
+                }
+                if (proof.organizationScopeId !== input.organizationScopeId) {
+                  throw validationError(
+                    `reputation proof ${current.target.id} belongs to organization scope ${proof.organizationScopeId}, not ${input.organizationScopeId}`,
+                    {
+                      proofId: current.target.id,
+                      proofScope: proof.organizationScopeId,
+                      requestedScope: input.organizationScopeId,
+                    },
+                  );
+                }
+                if (proof.revokedAt === null) {
+                  throw validationError(
+                    `reputation proof ${current.target.id} is NOT revoked in the reputation authority — the owning authority's mutation must be observable before the application is recorded`,
+                    { proofId: current.target.id },
+                  );
+                }
               }
               const updated: ValidationOutcome = Object.freeze({
                 ...current,

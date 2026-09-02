@@ -440,4 +440,133 @@ describe("NET-W032-AC-04 independent validator observations", () => {
       transactionId: expect.any(String),
     });
   });
+
+  // ------------------------------------------------------------------
+  // REPLAY-ORDERING regressions (architect re-review on PR #66): the
+  // idempotency contract requires a COMPLETED same-key replay to
+  // return its cached result WITHOUT re-executing the acceptance
+  // checks — including when the cited W029/W031 evidence has since
+  // been REVOKED by its owning authority. The mutable evidence checks
+  // run inside the applyIdempotent callback; the store's
+  // committed-record short-circuit precedes them. A NEW key against
+  // the same revoked evidence must still fail closed.
+  // ------------------------------------------------------------------
+
+  test("same-key replay AFTER the cited W031 reputation proof is revoked returns the CACHED observation (exactly-once replay ordering)", async () => {
+    const opened = await openDefaultChallenge(harness);
+    const assigned = await deriveAssignments(harness, opened.challenge);
+    // A SECOND proof as the cited evidence (independent of the round's target).
+    const other = await openDefaultChallenge(harness);
+    const entry = assigned.assignment!.entries[0]!;
+    const ctx = personCtx(harness, entry.validatorPersonId, "ac04-replay-proof");
+    const input = (k: string) => ({
+      organizationScopeId: harness.organizationScopeId,
+      challengeId: assigned.id,
+      verdict: "UPHOLD",
+      statement: "cites evidence that will later be revoked",
+      evidenceRefs: [{ kind: "reputation_proof", id: other.proof.id }],
+      observedAt: shiftIso(assigned.effectiveAt, 7200_000),
+      idempotencyKey: k,
+    });
+    const k = key("ac04-replay-proof");
+    const first = await harness.runtime.validationService.submitObservation(
+      ctx,
+      input(k),
+    );
+    expect(first.created).toBe(true);
+
+    // The owning authority REVOKES the cited evidence (the W031
+    // one-way mutation through the reputation authority's own command).
+    await harness.runtime.reputationProofService.revokeProof(
+      personCtx(harness, harness.reviewerPersonId, "ac04-replay-proof-revoke"),
+      {
+        organizationScopeId: harness.organizationScopeId,
+        proofId: other.proof.id,
+        reason: "revoked after a successful observation (replay-ordering probe)",
+        idempotencyKey: key("ac04-replay-proof-revoke"),
+      },
+    );
+
+    // SAME-KEY replay: created=false + the ORIGINAL cached observation
+    // (the revocation can no longer break a completed replay).
+    const replay = await harness.runtime.validationService.submitObservation(
+      ctx,
+      input(k),
+    );
+    expect(replay.created).toBe(false);
+    expect(replay.observation.id).toBe(first.observation.id);
+    expect(replay.observation.verdict).toBe("UPHOLD");
+    expect(replay.observation.evidenceRefs).toEqual([
+      { kind: "reputation_proof", id: other.proof.id },
+    ]);
+
+    // The complementary fresh-key case: the SAME revoked evidence with
+    // a NEW key still FAILS CLOSED.
+    await expect(
+      harness.runtime.validationService.submitObservation(
+        ctx,
+        input(key("ac04-replay-proof-fresh")),
+      ),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_VALIDATION",
+      message: expect.stringContaining("REVOKED reputation proof"),
+    });
+  });
+
+  test("same-key replay AFTER the cited W029 signed attestation is revoked returns the CACHED observation (W029 variant)", async () => {
+    const opened = await openDefaultChallenge(harness);
+    const assigned = await deriveAssignments(harness, opened.challenge);
+    const attestation = await createAttestation(harness, opened.evidenceId);
+    const entry = assigned.assignment!.entries[1]!;
+    const ctx = personCtx(harness, entry.validatorPersonId, "ac04-replay-att");
+    const input = (k: string) => ({
+      organizationScopeId: harness.organizationScopeId,
+      challengeId: assigned.id,
+      verdict: "UPHOLD",
+      statement: "cites an attestation that will later be revoked",
+      evidenceRefs: [{ kind: "signed_attestation", id: attestation.id }],
+      observedAt: shiftIso(assigned.effectiveAt, 7200_000),
+      idempotencyKey: k,
+    });
+    const k = key("ac04-replay-att");
+    const first = await harness.runtime.validationService.submitObservation(
+      ctx,
+      input(k),
+    );
+    expect(first.created).toBe(true);
+
+    // The owning authority REVOKES the cited attestation (the W029
+    // one-way mutation through the evidence authority's own command).
+    await harness.runtime.signedAttestationService.revokeSignedAttestation(
+      personCtx(harness, harness.reviewerPersonId, "ac04-replay-att-revoke"),
+      {
+        organizationScopeId: harness.organizationScopeId,
+        attestationId: attestation.id,
+        reason: "revoked after a successful observation (replay-ordering probe)",
+        idempotencyKey: key("ac04-replay-att-revoke"),
+      },
+    );
+
+    // SAME-KEY replay: created=false + the ORIGINAL cached observation.
+    const replay = await harness.runtime.validationService.submitObservation(
+      ctx,
+      input(k),
+    );
+    expect(replay.created).toBe(false);
+    expect(replay.observation.id).toBe(first.observation.id);
+    expect(replay.observation.evidenceRefs).toEqual([
+      { kind: "signed_attestation", id: attestation.id },
+    ]);
+
+    // Fresh key against the SAME revoked attestation fails closed.
+    await expect(
+      harness.runtime.validationService.submitObservation(
+        ctx,
+        input(key("ac04-replay-att-fresh")),
+      ),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_VALIDATION",
+      message: expect.stringContaining("REVOKED signed attestation"),
+    });
+  });
 });
