@@ -69,13 +69,15 @@ Important lineage checkpoints:
 
 - GitHub issue: #71 — OPEN
 - Status: READY_FOR_IMPLEMENTATION
-- Branch: to be created from W034 merge SHA `7c19a19addd44a07965fa25ee7cab021bab2016a`
+- Documentation preparation PR: #72 — squash-merged at `d480b71521a72de6bee63a7dc9cf58ff1cfedc3a`
+- Work order: `spec/work-orders/NET-W035.md` — merged and frozen for implementation
+- Evidence ledger: `docs/net-w035-complete-creator-lifecycle.md` — merged and frozen for implementation
+- Implementation branch: `feat/net-w035-complete-creator-lifecycle`
+- Implementation branch base: W034 merge SHA `7c19a19addd44a07965fa25ee7cab021bab2016a`
 - Dependencies: NET-W018 + NET-W034 — VERIFIED/MERGED
 - Requirements/scope: prove creator discovery → contract/terms → UGC/rights → disclosure/compliance → measurement → evidence/Proof-of-Value → settlement/payment using existing frozen authorities.
-- Work order: author `spec/work-orders/NET-W035.md` before coding.
-- Evidence ledger: author `docs/net-w035-complete-creator-lifecycle.md` before coding.
 
-W035 is a composition/proof milestone. Do not add a new domain or authority. `/creators` remains creator identity/matching/creator-record authority; `/campaigns` remains campaign policy; `/inventory` remains supply/placement; `/workflows` remains lifecycle; `/evidence` remains provenance/PoV; `/outcomes` and `/measurement` remain measurement authority/integration; `/disputes` remains risk/control; `/settlement` remains payment/economic authority; `/adapters` remains provider-specific integration.
+W035 is a composition/proof milestone. Do not add a new domain or authority. `/creators` remains creator identity/matching/creator-record authority; `/campaigns` remains campaign policy; `/inventory` remains supply/placement; `/workflows` remains lifecycle; `/evidence` remains provenance/PoV; `/outcomes` and `/measurement` remain measurement authority/integration; `/disputes` remains risk/control; `/settlement` remains payment/economic authority; `/adapters` remains provider-specific integration; `/payments` remains provider transaction integration only.
 
 Required proof shape:
 
@@ -84,12 +86,14 @@ creator discovery
   → contract / campaign terms
   → UGC production / rights
   → disclosure / compliance
-  → measurement
+  → /workflows MEASURING
+  → measurement / /outcomes
   → evidence / Proof-of-Value
-  → settlement / payment
+  → workflow completion / risk + dispute controls
+  → settlement / optional external payment
 ```
 
-The exact executable order must be established in the W035 work order and proven with authoritative state/version and durable audit witnesses; terminal payment alone is insufficient.
+The exact executable order is frozen in the W035 work order and must be proven with authoritative state/version and durable audit witnesses; terminal payment alone is insufficient.
 
 ## Review lessons that must persist
 
@@ -185,4 +189,4 @@ Never merge merely because CI is green. Never create a second implementation PR 
 
 ## Current action
 
-W034 is merged and architect-approved. Confirm/create the canonical NET-W035 issue from `spec/work-items.md`, then author `spec/work-orders/NET-W035.md` and `docs/net-w035-complete-creator-lifecycle.md` on a branch created from merge SHA `7c19a19addd44a07965fa25ee7cab021bab2016a`. Read the frozen architecture/lock, dependency graph, W018, W033 and W034 evidence/work orders before implementation. Do not introduce W036 behavior or alter frozen architecture.
+W035 is ready for implementation. The work order and evidence ledger are merged on `main`, and the implementation branch `feat/net-w035-complete-creator-lifecycle` is rooted directly at the W034 merge SHA `7c19a19addd44a07965fa25ee7cab021bab2016a`. Read the frozen architecture/lock, dependency graph, W017, W018, W033 and W034 evidence/work orders before implementation. Do not introduce W036 behavior or alter frozen architecture.
