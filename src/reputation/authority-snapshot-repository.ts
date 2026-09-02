@@ -89,6 +89,15 @@ export function createAuthorityReputationSnapshotRepository(
       return rec ? rec.value : null;
     },
 
+    // NET-W031 (additive): the in-tx twin of listBySubject — proof
+    // issuance resolves the subject's LATEST snapshot INSIDE the
+    // issuance transaction over the transaction-consistent store.
+    async listBySubjectWithinTx(organizationScopeId, subjectPersonId, tx) {
+      return historyFrom(organizationScopeId, subjectPersonId, () =>
+        tx.scan<ReputationSnapshot>(COLLECTION),
+      );
+    },
+
     async createWithinTx(snapshot, tx) {
       await tx.put(COLLECTION, snapshot.id, snapshot);
       logger?.debug("reputation_snapshot.created_within_tx", {
