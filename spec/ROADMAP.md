@@ -72,8 +72,8 @@ W019, W020, W021, W022, W023 — **COMPLETE**.
 
 ### Phase 9 — End-to-end proof
 - W033 — **COMPLETE**. PR #68 merged `92482c6ea3b3dc18f8286d37b9c6236f9ef1c001`. Final reviewed head `476b57971a06a9e74d1545fa30824904cbc2359b`. The complete contribution traversal is proven in executable order: sanctioned `/workflows` publication to SUBMITTED, MEASURING point, `/evidence` + `/outcomes`, PoH evaluation, lifecycle completion to VERIFIED, reputation, settlement, then benefits. The same PR remediated initial sequencing drift and added deterministic traversal/audit-order witnesses.
-- W034 — **CURRENT IMPLEMENTATION TARGET**. Complete advertising lifecycle composition proof: advertiser/campaign → inventory/creator supply → measurement → Evidence/Proof-of-Value → applicable risk/privacy controls → settlement.
-- W035 — **PLANNED**. Complete creator lifecycle: creator discovery → contract → UGC → disclosure → measurement → payment.
+- W034 — **COMPLETE**. PR #70 squash-merged `7c19a19addd44a07965fa25ee7cab021bab2016a`. Final reviewed head `f66cb4f380afde56ed23716453a297d0280b2411`. The advertising lifecycle composition proof traversed campaign/policy → supply/provenance → W021 selection → placement → campaign opportunity/contribution lifecycle → MEASURING → real W022 measurement → outcomes → evidence/PoV → workflow completion → risk/dispute gates → `/settlement` pending/mature → declared clearing. The architect initially blocked AC-09 because its first fault fixture proved only stale-state refusal; the same PR added a genuine composite-level commit-failure rollback proof and replaced the dispute fixture's wall-clock anchor with the authoritative subject timestamp. Final evidence recorded 2258 pass / 15 skip / 0 fail, 322/0 architecture + authority checks, 12/12 targeted mutations caught with byte-identical restoration, real PostgreSQL/Redis integration 17/0, clean real-provider round-trip 11/11, and exact-head CI green on push and pull_request.
+- W035 — **CURRENT IMPLEMENTATION TARGET**. Issue #71 — Complete creator lifecycle: creator discovery → contract/terms → UGC/rights → disclosure/compliance → measurement → evidence/Proof-of-Value → settlement/payment.
 - W036 — **PLANNED**. Complete demand/procurement/benefit lifecycle: demand → supplier → fulfillment → verified savings → benefit allocation.
 
 ## Dependency sequence
@@ -95,6 +95,12 @@ W028/W033 → W036
 W033 is merged and closes the first Phase-9 composition milestone for the contribution side. The implementation deliberately added no new source-domain authority: the final scenario uses existing owning boundaries and proves the declared executable order with authoritative contribution state/version witnesses plus durable audit order. The final merge is PR #68 at `92482c6ea3b3dc18f8286d37b9c6236f9ef1c001` (reviewed head `476b57971a06a9e74d1545fa30824904cbc2359b`).
 
 The final W033 evidence record is `docs/net-w033-complete-contribution-lifecycle.md`.
+
+## W034 merge record
+
+W034 is merged and closes the advertising Phase-9 composition milestone. No production `src/` file changed. The final scenario uses the existing W019/W020/W021/W022/W023 and downstream authorities, with authoritative traversal witnesses and ordered durable audit markers. The architect CHANGES REQUESTED decision on PR #70 was remediated on the same PR with a genuine composite-level commit-failure rollback proof and deterministic dispute anchoring. Final merge: PR #70 at `7c19a19addd44a07965fa25ee7cab021bab2016a`, reviewed head `f66cb4f380afde56ed23716453a297d0280b2411`.
+
+The final W034 evidence record is `docs/net-w034-complete-advertising-lifecycle.md`.
 
 ## Operating procedure
 
