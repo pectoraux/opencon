@@ -185,6 +185,9 @@ describe("NET-W015-AC-07 architecture / out-of-scope", () => {
     expect([...ECONOMIC_STAKE_PURPOSE_KINDS]).toEqual([
       "campaign_budget",
       "dispute_challenge",
+      // NET-W032 (additive, sanctioned shared-file amendment): the
+      // validator per-round eligibility bond purpose kind.
+      "validation_assignment",
     ]);
     expect([...ECONOMIC_LEDGER_TX_KINDS]).toEqual([
       "value_recognition",

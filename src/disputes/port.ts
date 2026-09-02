@@ -84,6 +84,19 @@ import type {
   DisputeState,
   DisputeSubjectType,
 } from "../core/disputes.ts";
+// NET-W032 (additive): the shared validation vocabulary lives in
+// core/validation.ts (pure data + validation only). The protocol
+// version is imported as a VALUE because the record types pin it via
+// `typeof VALIDATION_PROTOCOL_VERSION` (drift-proof frozen marker).
+import { VALIDATION_PROTOCOL_VERSION } from "../core/validation.ts";
+import type {
+  ValidationDecision,
+  ValidationOutcomeApplication,
+  ValidationVerdict,
+  ValidatorExclusionReason,
+  ValidatorStakeDisposition,
+} from "../core/validation.ts";
+import type { Logger } from "../core/logger.ts";
 
 // ---------------------------------------------------------------------------
 // Risk signals (work order §3.2)
@@ -1408,8 +1421,993 @@ export interface DisputeService {
 }
 
 // ---------------------------------------------------------------------------
-// The boundary port
+// Validators, challenges and deterministic quorum (NET-W032 work order §3)
 // ---------------------------------------------------------------------------
+
+/**
+ * NET-W032 — Decentralized validation/dispute coordination (issue #65).
+ *
+ * EXTENDS the W009/W010 /disputes authority — never rewrites it.
+ * Everything above (signals, policies, assessments, cases, controls,
+ * challenges/disputes/appeals) stays byte-identical; everything below
+ * is ADDITIVE.
+ *
+ * W032 adds, inside the SAME frozen /disputes boundary (the sole
+ * validation/dispute coordination authority — no seventeenth domain):
+ *  - SCOPED VALIDATOR PARTICIPANTS with explicit eligibility state and
+ *    server-enforced identity binding (work order §3.1): the caller
+ *    never asserts eligibility — it derives from the recorded
+ *    participant state, the tenant scope, the conflict facts and the
+ *    versioned policy's stake requirement;
+ *  - DETERMINISTIC ASSIGNMENT for an explicit derivation anchor
+ *    (§3.2): eligibility filtering (conflict-of-interest exclusions
+ *    §3.6) THEN stable (registeredAt, id) ordering THEN the policy
+ *    cardinality — frozen in code and tests, never a wall clock;
+ *  - VALIDATION CHALLENGES as tenant-scoped records referencing the
+ *    target claim/proof/resource OPAQUELY (§3.3): a bounded round
+ *    window anchored at an explicit effectiveAt, terminal outcome
+ *    records (immutable facts + explicit outcome records — NO second
+ *    workflow engine, NO status machine), idempotent creation, and
+ *    rechallenge as a NEW linked round (closed rounds immutable);
+ *  - INDEPENDENT VALIDATOR OBSERVATIONS (§3.4): assignment-bound,
+ *    actor-bound (never on behalf of another validator), with opaque
+ *    W029-attestation / W031-proof evidence references;
+ *  - DETERMINISTIC QUORUM/OUTCOME DERIVATION (§3.5) through the PURE
+ *    quorum-engine.ts over a VERSIONED policy contract (count-based
+ *    thresholds, explicit abstention semantics, fail-closed decisions
+ *    for insufficient participation / conflicts / expired windows,
+ *    closed decision + check vocabularies);
+ *  - AUTHORITY CONTAINMENT (§3.8): the quorum result is a DECISION
+ *    produced by /disputes — the owning authority alone applies it
+ *    (composition-root orchestration through the owner's sanctioned
+ *    command; validator stakes commit/release/forfeit ONLY through
+ *    /settlement with compound idempotency keys).
+ *
+ * Work order: spec/work-orders/NET-W032.md; issue #65; requirements
+ * GOV-001..003.
+ */
+
+/** A validation challenge's opaque target reference (claim/proof/resource). */
+export interface ValidationTargetRef {
+  readonly kind: string;
+  readonly id: string;
+}
+
+/**
+ * Structural view of a resolved validation target, resolved through
+ * the NEUTRAL target lookup (composition-root wired over the OWNING
+ * domain's repository — never a domain-to-domain import):
+ *  - `anchorAt` — the target's AUTHORITATIVE timestamp (the proof's
+ *    issuedAt, the claim's recorded/created timestamp);
+ *  - `subjectPersonId` — the target's principal (the proof's subject,
+ *    the contribution's contributor); null when the record carries no
+ *    single principal;
+ *  - `beneficiaryPersonId` — the target's directly interested economic
+ *    beneficiary; null when none.
+ * Both person fields feed the conflict-of-interest exclusions (§3.6:
+ * the target subject, the target owner/controller and the economic
+ * beneficiary are all barred from validating their own claim).
+ */
+export interface ValidationResolvedTarget {
+  readonly organizationScopeId: string;
+  readonly anchorAt: string;
+  readonly subjectPersonId: string | null;
+  readonly beneficiaryPersonId: string | null;
+  readonly state: string;
+}
+
+/** Over the target-owning domains (read-only). */
+export interface ValidationTargetLookup {
+  resolve(kind: string, id: string): Promise<ValidationResolvedTarget | null>;
+}
+
+/**
+ * Structural view of a W029 signed attestation as seen by the
+ * validation layer (read-only, opaque): scope + revocation state only
+ * — the attestation's covered content NEVER crosses (PRIV: minimum
+ * aggregate disclosure, work order §3.7).
+ */
+export interface ValidationAttestationFacts {
+  readonly organizationScopeId: string;
+  readonly revokedAt: string | null;
+}
+
+/** Over the evidence domain's W029 signed-attestation records (read-only). */
+export interface ValidationAttestationLookup {
+  resolve(id: string): Promise<ValidationAttestationFacts | null>;
+}
+
+/**
+ * Structural view of a W031 portable reputation proof as seen by the
+ * validation layer (read-only, opaque): scope + subject + issuance +
+ * one-way revocation state only — the proof's aggregate dimension
+ * facts and signature envelope are NOT needed to reference it.
+ */
+export interface ValidationProofFacts {
+  readonly organizationScopeId: string;
+  readonly subjectPersonId: string;
+  readonly issuedAt: string;
+  readonly revokedAt: string | null;
+}
+
+/** Over the reputation domain's W031 proof records (read-only). */
+export interface ValidationProofLookup {
+  resolve(id: string): Promise<ValidationProofFacts | null>;
+}
+
+export interface ValidationLookups {
+  /** Person existence (identity) — for initiator/validator registration. */
+  readonly subject: RiskSubjectLookup;
+  /** Challenge-target resolution (the owning domains' records). */
+  readonly target: ValidationTargetLookup;
+  /** W029 signed-attestation evidence references (opaque). */
+  readonly attestations: ValidationAttestationLookup;
+  /** W031 portable-proof references + the post-application verification read. */
+  readonly proofs: ValidationProofLookup;
+  /** Validator-stake verification (the settlement authority's records). */
+  readonly stake: DisputeStakeLookup;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W032 §3.5 — the versioned quorum policy
+// ---------------------------------------------------------------------------
+
+/**
+ * A ValidationQuorumPolicy — an immutable, versioned record of the
+ * deterministic quorum contract (work order §3.5: "these rules must be
+ * represented by a versioned policy/contract in /disputes, not
+ * encoded as undocumented constants"). The shape is validated by the
+ * PURE core `validateValidationQuorumPolicyShape`.
+ *
+ * Versioning follows the FULL NET-W007/NET-W008/NET-W009 policy
+ * lineage pattern: a lineage starts at version 1; every create must
+ * name exactly latest+1; the (policyId, version) tuple is the
+ * idempotency key; existing versions are NEVER rewritten; all
+ * versions of a lineage share one organization scope.
+ */
+export interface ValidationQuorumPolicy {
+  readonly id: string;
+  readonly policyId: string;
+  readonly version: number;
+  readonly organizationScopeId: string;
+  readonly description: string | null;
+  readonly assignmentCardinality: number;
+  readonly minimumSubmitted: number;
+  readonly upholdThreshold: number;
+  readonly rejectThreshold: number;
+  readonly challengeWindowMs: number;
+  readonly validatorStakeRequirementCredits: number;
+  readonly createdBy: string;
+  readonly createdAt: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+export interface CreateValidationPolicyVersionInput {
+  readonly organizationScopeId: string;
+  readonly policyId: string;
+  readonly version: number;
+  readonly description?: string;
+  readonly assignmentCardinality: number;
+  readonly minimumSubmitted: number;
+  readonly upholdThreshold: number;
+  readonly rejectThreshold: number;
+  readonly challengeWindowMs: number;
+  readonly validatorStakeRequirementCredits: number;
+}
+
+export interface ValidationPolicyRepository {
+  save(
+    policy: ValidationQuorumPolicy,
+    execution: ExecutionContext,
+  ): Promise<ValidationQuorumPolicy>;
+  findById(id: string): Promise<ValidationQuorumPolicy | null>;
+  findVersion(
+    policyId: string,
+    version: number,
+  ): Promise<ValidationQuorumPolicy | null>;
+  findLatestVersion(
+    policyId: string,
+    organizationScopeId?: string,
+  ): Promise<ValidationQuorumPolicy | null>;
+  listVersions(
+    policyId: string,
+    organizationScopeId: string,
+  ): Promise<readonly ValidationQuorumPolicy[]>;
+  findVersionWithinTx(
+    policyId: string,
+    version: number,
+    tx: AuthorityTransaction,
+  ): Promise<ValidationQuorumPolicy | null>;
+  findLatestVersionWithinTx(
+    policyId: string,
+    organizationScopeId: string | undefined,
+    tx: AuthorityTransaction,
+  ): Promise<ValidationQuorumPolicy | null>;
+  createWithinTx(
+    policy: ValidationQuorumPolicy,
+    tx: AuthorityTransaction,
+  ): Promise<ValidationQuorumPolicy>;
+}
+
+export interface ValidationPolicyService {
+  /**
+   * Create the next immutable policy version (guard action
+   * `validationPolicy.create`). Runs the org-independent lineage mutex
+   * → (policyId, version) idempotency key → in-tx lineage checks
+   * (scope + exactly latest+1) → create + audit
+   * `validation_policy.version_created`, all in ONE authoritative
+   * transaction.
+   */
+  createPolicyVersion(
+    execution: ExecutionContext,
+    input: CreateValidationPolicyVersionInput,
+  ): Promise<ValidationQuorumPolicy>;
+  /** Read one exact version (read-only; NotFound when absent). */
+  getPolicyVersion(
+    execution: ExecutionContext,
+    policyId: string,
+    version: number,
+  ): Promise<ValidationQuorumPolicy>;
+  /** List a lineage's versions within one organization scope. */
+  listPolicyVersions(
+    execution: ExecutionContext,
+    policyId: string,
+    organizationScopeId: string,
+  ): Promise<readonly ValidationQuorumPolicy[]>;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W032 §3.1 — the scoped validator participants
+// ---------------------------------------------------------------------------
+
+/**
+ * A ValidatorParticipant — a tenant-scoped registry record binding a
+ * PERSON identity to the validator role (work order §3.1: "validator
+ * identity must be bound to the authenticated participant;
+ * caller-supplied identity claims are not trusted" — the acting
+ * person is derived server-side from the execution actor, and the
+ * participant record is the persisted eligibility state).
+ *
+ * `status` is a ONE-WAY derived fact (the W032 "immutable facts +
+ * explicit outcome records" discipline — no status machine): ACTIVE
+ * from registration; `SUSPENDED` is terminal (a one-way append like
+ * the W031 revocation — re-registration for the same person creates a
+ * NEW participant record only after the old one is suspended).
+ */
+export interface ValidatorParticipant {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  /** The bound person identity (the server-derived actor at registration). */
+  readonly personId: string;
+  readonly status: "ACTIVE" | "SUSPENDED";
+  readonly registeredAt: string;
+  readonly suspendedAt: string | null;
+  readonly suspensionReason: string | null;
+  readonly protocolVersion: typeof VALIDATION_PROTOCOL_VERSION;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+}
+
+export interface ValidatorParticipantRepository {
+  save(
+    validator: ValidatorParticipant,
+    execution: ExecutionContext,
+  ): Promise<ValidatorParticipant>;
+  findById(id: string): Promise<ValidatorParticipant | null>;
+  findByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<ValidatorParticipant | null>;
+  /** The org's participants in deterministic (registeredAt, id) order. */
+  listByOrganization(
+    organizationScopeId: string,
+    status?: string,
+  ): Promise<readonly ValidatorParticipant[]>;
+  /** The ACTIVE participant binding a person in an organization scope. */
+  findActiveByPerson(
+    organizationScopeId: string,
+    personId: string,
+  ): Promise<ValidatorParticipant | null>;
+  findActiveByPersonWithinTx(
+    organizationScopeId: string,
+    personId: string,
+    tx: AuthorityTransaction,
+  ): Promise<ValidatorParticipant | null>;
+  createWithinTx(
+    validator: ValidatorParticipant,
+    tx: AuthorityTransaction,
+  ): Promise<ValidatorParticipant>;
+  saveWithinTx(
+    validator: ValidatorParticipant,
+    tx: AuthorityTransaction,
+  ): Promise<ValidatorParticipant>;
+}
+
+export interface RegisterValidatorInput {
+  readonly organizationScopeId: string;
+  /** The person to bind (must exist; the ACTING person must be them). */
+  readonly personId: string;
+  readonly idempotencyKey: string;
+}
+
+export interface RegisterValidatorResult {
+  readonly validator: ValidatorParticipant;
+  /** false when a participant with the same idempotency key already existed. */
+  readonly created: boolean;
+}
+
+export interface SuspendValidatorInput {
+  readonly organizationScopeId: string;
+  readonly validatorId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+export interface ValidatorRegistryService {
+  /**
+   * Register a validator participant (guard action `validator.create`):
+   * the acting person MUST be the person being registered (server-side
+   * identity binding — one cannot register someone else), the person
+   * must exist and no other ACTIVE participant may bind the same
+   * person in the scope. Commits atomically with the
+   * `validator.registered` audit event.
+   */
+  registerValidator(
+    execution: ExecutionContext,
+    input: RegisterValidatorInput,
+  ): Promise<RegisterValidatorResult>;
+  /**
+   * Suspend a validator participant (guard action `validator.suspend`;
+   * ONE-WAY — a suspended participant is ineligible for every future
+   * assignment derivation; the record is never re-activated). Commits
+   * atomically with the `validator.suspended` audit event.
+   */
+  suspendValidator(
+    execution: ExecutionContext,
+    input: SuspendValidatorInput,
+  ): Promise<ValidatorParticipant>;
+  /**
+   * Fetch a participant (guard action `validator.read`; tenant-scoped —
+   * cross-tenant and nonexistent are indistinguishable NotFound).
+   */
+  getValidator(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    validatorId: string,
+  ): Promise<ValidatorParticipant>;
+  /** The org's participants (deterministic order; read-only). */
+  listValidators(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    status?: string,
+  ): Promise<readonly ValidatorParticipant[]>;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W032 §3.3 — validation challenges (immutable facts + outcome records)
+// ---------------------------------------------------------------------------
+
+/** The challenge lifecycle events (append-only history entries). */
+export const VALIDATION_CHALLENGE_EVENTS = [
+  "opened",
+  "conflict_marked",
+  "assignments_derived",
+  "validator_stake_bonded",
+  "outcome_derived",
+] as const;
+
+export type ValidationChallengeEventKind =
+  (typeof VALIDATION_CHALLENGE_EVENTS)[number];
+
+export function isValidationChallengeEventKind(
+  value: string,
+): value is ValidationChallengeEventKind {
+  return (VALIDATION_CHALLENGE_EVENTS as readonly string[]).includes(value);
+}
+
+/**
+ * One append-only event in a validation challenge's history. Actor
+ * identity is the EXECUTION ACTOR (server-side; never
+ * caller-asserted — AUD-006).
+ */
+export interface ValidationChallengeEvent {
+  readonly id: string;
+  readonly event: ValidationChallengeEventKind;
+  readonly actorPersonId: string;
+  readonly reason: string | null;
+  readonly recordedAt: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+}
+
+/**
+ * One SELECTED validator in the derived assignment set. The stake
+ * block carries the FROZEN per-assignment requirement and the
+ * settlement authority's stake record id once bonded (bookkeeping
+ * only — the escrow itself is committed/released/forfeited by
+ * /settlement at the composition root, never by this domain).
+ */
+export interface ValidatorAssignmentEntry {
+  readonly validatorPersonId: string;
+  readonly participantId: string;
+  /** 1-based selection order in the deterministic ordering. */
+  readonly selectionOrder: number;
+  readonly stake: {
+    readonly requirementCredits: number;
+    readonly stakeId: string | null;
+    readonly bondedAt: string | null;
+  };
+}
+
+/**
+ * One CONSIDERED-BUT-EXCLUDED candidate with its machine-readable
+ * exclusion reason (the auditable eligibility trace, work order
+ * §3.6).
+ */
+export interface ValidatorExcludedCandidate {
+  readonly personId: string;
+  readonly reason: ValidatorExclusionReason;
+}
+
+/**
+ * The derived assignment set (embedded in the challenge record —
+ * derived EXACTLY ONCE per round: deterministic eligibility filtering,
+ * (registeredAt, participant.id) ordering, the policy cardinality).
+ * The set is IMMUTABLE after derivation except for the per-entry
+ * stake bonding bookkeeping while the round is open.
+ */
+export interface ValidatorAssignmentBlock {
+  readonly setId: string;
+  /** The explicit derivation anchor input (never a wall clock). */
+  readonly derivedAt: string;
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly entries: readonly ValidatorAssignmentEntry[];
+  readonly excluded: readonly ValidatorExcludedCandidate[];
+}
+
+/**
+ * A ValidationChallenge — a tenant-scoped, round record referencing
+ * the target claim/proof/resource opaquely (work order §3.3). Round
+ * state is IMMUTABLE FACTS, never a status machine:
+ *  - `assignment === null` → the round is OPEN, unassigned;
+ *  - `assignment !== null && outcome === null` → OPEN, assigned (the
+ *    observation window);
+ *  - `outcome !== null` → TERMINAL (closed; the record and its
+ *    outcome are immutable — rechallenge creates a NEW linked record
+ *    carrying `rechallengeOfChallengeId`).
+ * The target facts (anchor, subject, beneficiary, state) are the
+ * frozen resolution snapshot the deterministic eligibility gate used.
+ */
+export interface ValidationChallenge {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly target: ValidationTargetRef;
+  readonly targetAnchorAt: string;
+  readonly targetSubjectPersonId: string | null;
+  readonly targetBeneficiaryPersonId: string | null;
+  readonly targetState: string;
+  readonly statement: string;
+  readonly reasonCodes: readonly string[];
+  readonly initiatedByPersonId: string;
+  /** Set on RECHALLENGE records: the closed round being re-challenged. */
+  readonly rechallengeOfChallengeId: string | null;
+  /** The EXPLICIT creation anchor (the round window's start). */
+  readonly effectiveAt: string;
+  /** Derived: effectiveAt + the frozen policy's challengeWindowMs. */
+  readonly windowExpiresAt: string;
+  /** The frozen policy snapshot (full determinism from recorded inputs). */
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly assignmentCardinality: number;
+  readonly minimumSubmitted: number;
+  readonly upholdThreshold: number;
+  readonly rejectThreshold: number;
+  readonly validatorStakeRequirementCredits: number;
+  /** Explicitly conflicted person ids (append-only, one-way marks). */
+  readonly conflicts: readonly string[];
+  readonly assignment: ValidatorAssignmentBlock | null;
+  /** The terminal outcome back-pointer (one-way; never cleared). */
+  readonly outcome: { readonly outcomeId: string; readonly decidedAt: string } | null;
+  readonly events: readonly ValidationChallengeEvent[];
+  readonly protocolVersion: typeof VALIDATION_PROTOCOL_VERSION;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+  readonly createdAt: string;
+}
+
+export interface OpenValidationChallengeInput {
+  readonly organizationScopeId: string;
+  readonly target: { readonly kind: string; readonly id: string };
+  readonly statement: string;
+  readonly reasonCodes: readonly string[];
+  /**
+   * The EXPLICIT creation anchor (the round window anchors here — a
+   * bounded challenge window; must not precede the target's own
+   * authoritative anchor; no wall clock).
+   */
+  readonly effectiveAt: string;
+  /** The quorum policy lineage to freeze onto the round. */
+  readonly policyId: string;
+  /** A closed round to rechallenge (must be terminal; NEW record). */
+  readonly rechallengeOfChallengeId?: string;
+  readonly idempotencyKey: string;
+}
+
+export interface OpenValidationChallengeResult {
+  readonly challenge: ValidationChallenge;
+  /** false when a challenge with the same idempotency key already existed. */
+  readonly created: boolean;
+}
+
+export interface MarkValidatorConflictInput {
+  readonly organizationScopeId: string;
+  readonly challengeId: string;
+  readonly validatorPersonId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+export interface DeriveValidatorAssignmentsInput {
+  readonly organizationScopeId: string;
+  readonly challengeId: string;
+  /** The EXPLICIT derivation anchor (within the round window). */
+  readonly derivedAt: string;
+  readonly idempotencyKey: string;
+}
+
+export interface DeriveValidatorAssignmentsResult {
+  readonly challenge: ValidationChallenge;
+  /** false when an assignment set with the same key already existed. */
+  readonly created: boolean;
+}
+
+export interface BondValidatorStakeInput {
+  readonly organizationScopeId: string;
+  readonly challengeId: string;
+  /** The ASSIGNED validator bonding THEIR OWN stake (actor-bound). */
+  readonly validatorPersonId: string;
+  /** The settlement authority's committed stake record id. */
+  readonly stakeId: string;
+  readonly idempotencyKey: string;
+}
+
+export interface ValidationChallengeRepository {
+  save(
+    challenge: ValidationChallenge,
+    execution: ExecutionContext,
+  ): Promise<ValidationChallenge>;
+  findById(id: string): Promise<ValidationChallenge | null>;
+  findByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<ValidationChallenge | null>;
+  listByOrganization(
+    organizationScopeId: string,
+  ): Promise<readonly ValidationChallenge[]>;
+  /** Rounds about a target with NO outcome yet (the duplicate gate). */
+  findLiveByTarget(
+    organizationScopeId: string,
+    targetKind: string,
+    targetId: string,
+  ): Promise<readonly ValidationChallenge[]>;
+  findLiveByTargetWithinTx(
+    organizationScopeId: string,
+    targetKind: string,
+    targetId: string,
+    tx: AuthorityTransaction,
+  ): Promise<readonly ValidationChallenge[]>;
+  createWithinTx(
+    challenge: ValidationChallenge,
+    tx: AuthorityTransaction,
+  ): Promise<ValidationChallenge>;
+  saveWithinTx(
+    challenge: ValidationChallenge,
+    tx: AuthorityTransaction,
+  ): Promise<ValidationChallenge>;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W032 §3.4 — independent validator observations
+// ---------------------------------------------------------------------------
+
+/**
+ * A ValidationObservation — one validator's independently auditable
+ * verdict on a round's target (work order §3.4: tied to the validator
+ * identity, the assignment, the target reference, the explicit
+ * observation anchor and the opaque evidence/attestation references
+ * that explain the decision).
+ */
+export interface ValidationObservation {
+  readonly id: string;
+  readonly organizationScopeId: string;
+  readonly challengeId: string;
+  readonly assignmentSetId: string;
+  readonly validatorPersonId: string;
+  readonly participantId: string;
+  /** The challenge's target copied at submission (binding, opaque). */
+  readonly target: ValidationTargetRef;
+  readonly verdict: ValidationVerdict;
+  readonly statement: string;
+  /** Opaque evidence references (resolved + scope-checked at submission). */
+  readonly evidenceRefs: readonly { readonly kind: string; readonly id: string }[];
+  /** The EXPLICIT observation anchor (within the round window). */
+  readonly observedAt: string;
+  readonly protocolVersion: typeof VALIDATION_PROTOCOL_VERSION;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+  readonly createdAt: string;
+}
+
+export interface SubmitValidatorObservationInput {
+  readonly organizationScopeId: string;
+  readonly challengeId: string;
+  /** UPHOLD | REJECT | ABSTAIN (the closed verdict vocabulary). */
+  readonly verdict: string;
+  readonly statement: string;
+  /** ≥1 required for UPHOLD/REJECT (evidence-backed verdicts); 0..n for ABSTAIN. */
+  readonly evidenceRefs: readonly { readonly kind: string; readonly id: string }[];
+  /** The EXPLICIT observation anchor (deterministic — no wall clock). */
+  readonly observedAt: string;
+  readonly idempotencyKey: string;
+}
+
+export interface SubmitValidatorObservationResult {
+  readonly observation: ValidationObservation;
+  /** false when an observation with the same idempotency key already existed. */
+  readonly created: boolean;
+}
+
+export interface ValidationObservationRepository {
+  save(
+    observation: ValidationObservation,
+    execution: ExecutionContext,
+  ): Promise<ValidationObservation>;
+  findById(id: string): Promise<ValidationObservation | null>;
+  /** The round's observations in deterministic (observedAt, id) order. */
+  listByChallenge(
+    organizationScopeId: string,
+    challengeId: string,
+  ): Promise<readonly ValidationObservation[]>;
+  listByChallengeWithinTx(
+    organizationScopeId: string,
+    challengeId: string,
+    tx: AuthorityTransaction,
+  ): Promise<readonly ValidationObservation[]>;
+  /** The (at most one) observation a validator submitted on a round. */
+  findByChallengeAndValidator(
+    organizationScopeId: string,
+    challengeId: string,
+    validatorPersonId: string,
+  ): Promise<ValidationObservation | null>;
+  findByChallengeAndValidatorWithinTx(
+    organizationScopeId: string,
+    challengeId: string,
+    validatorPersonId: string,
+    tx: AuthorityTransaction,
+  ): Promise<ValidationObservation | null>;
+  createWithinTx(
+    observation: ValidationObservation,
+    tx: AuthorityTransaction,
+  ): Promise<ValidationObservation>;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W032 §3.5 — the deterministic quorum outcome records
+// ---------------------------------------------------------------------------
+
+/** One machine-readable derivation check (window → participation → quorum). */
+export interface ValidationOutcomeCheck {
+  readonly check: "window" | "participation" | "quorum";
+  readonly subject: string | null;
+  readonly passed: boolean;
+  readonly reason: string;
+}
+
+/**
+ * One observation's inclusion/exclusion entry in the derivation trace
+ * (the engine's re-validated view of the recorded observations —
+ * machine-readable, reproducible).
+ */
+export interface ValidationObservationTraceEntry {
+  readonly observationId: string;
+  readonly validatorPersonId: string;
+  readonly verdict: string;
+  readonly observedAt: string;
+  readonly included: boolean;
+  readonly exclusionReason: string | null;
+}
+
+/** The deterministic participation counts. */
+export interface ValidationParticipation {
+  readonly assignedCount: number;
+  readonly submittedCount: number;
+  readonly validCount: number;
+  readonly upholdCount: number;
+  readonly rejectCount: number;
+  readonly abstainCount: number;
+  readonly excludedCount: number;
+}
+
+/** The disposition recorded for a bonded validator's stake at closure. */
+export interface ValidatorStakeOutcomeEntry {
+  readonly validatorPersonId: string;
+  readonly stakeId: string;
+  readonly disposition: ValidatorStakeDisposition;
+  readonly recordedAt: string;
+}
+
+/**
+ * A ValidationOutcome — the IMMUTABLE terminal decision record derived
+ * by the deterministic quorum engine at an explicit evaluation anchor
+ * (work order §3.5: reproducible from recorded inputs; decision,
+ * participation, trace and checks NEVER change after creation).
+ * The application/stake-outcome facts append AFTER the owning
+ * authority acted (bookkeeping that mirrors what settlement/reputation
+ * executed — never the mutation itself).
+ */
+export interface ValidationOutcome {
+  readonly id: string;
+  readonly challengeId: string;
+  readonly organizationScopeId: string;
+  readonly target: ValidationTargetRef;
+  /** The EXPLICIT evaluation anchor the derivation used. */
+  readonly evaluatedAt: string;
+  readonly decision: ValidationDecision;
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly assignment: {
+    readonly setId: string;
+    readonly derivedAt: string;
+    readonly assignedValidatorPersonIds: readonly string[];
+  };
+  readonly participation: ValidationParticipation;
+  readonly observations: readonly ValidationObservationTraceEntry[];
+  readonly checks: readonly ValidationOutcomeCheck[];
+  readonly stakeOutcomes: readonly ValidatorStakeOutcomeEntry[];
+  readonly applied: {
+    readonly appliedAt: string;
+    readonly appliedByPersonId: string;
+    readonly application: ValidationOutcomeApplication;
+  } | null;
+  readonly protocolVersion: typeof VALIDATION_PROTOCOL_VERSION;
+  readonly idempotencyKey: string;
+  readonly executionId: string;
+  readonly correlationId: string;
+  readonly causationId: string | null;
+  readonly createdAt: string;
+}
+
+export interface DeriveValidationOutcomeInput {
+  readonly organizationScopeId: string;
+  readonly challengeId: string;
+  /** The EXPLICIT evaluation anchor (deterministic — no wall clock). */
+  readonly evaluatedAt: string;
+  readonly idempotencyKey: string;
+}
+
+export interface DeriveValidationOutcomeResult {
+  readonly outcome: ValidationOutcome;
+  /** false when an outcome with the same idempotency key already existed. */
+  readonly created: boolean;
+}
+
+export interface RecordValidatorStakeOutcomeInput {
+  readonly organizationScopeId: string;
+  readonly outcomeId: string;
+  readonly validatorPersonId: string;
+  readonly stakeId: string;
+  readonly disposition: string;
+  readonly idempotencyKey: string;
+}
+
+export interface MarkValidationOutcomeAppliedInput {
+  readonly organizationScopeId: string;
+  readonly outcomeId: string;
+  /** The closed application vocabulary (core: VALIDATION_OUTCOME_APPLICATIONS). */
+  readonly application: string;
+  readonly idempotencyKey: string;
+}
+
+export interface ValidationOutcomeRepository {
+  save(
+    outcome: ValidationOutcome,
+    execution: ExecutionContext,
+  ): Promise<ValidationOutcome>;
+  findById(id: string): Promise<ValidationOutcome | null>;
+  findByIdWithinTx(
+    id: string,
+    tx: AuthorityTransaction,
+  ): Promise<ValidationOutcome | null>;
+  createWithinTx(
+    outcome: ValidationOutcome,
+    tx: AuthorityTransaction,
+  ): Promise<ValidationOutcome>;
+  saveWithinTx(
+    outcome: ValidationOutcome,
+    tx: AuthorityTransaction,
+  ): Promise<ValidationOutcome>;
+}
+
+// ---------------------------------------------------------------------------
+// NET-W032 — the validation service (the coordination aggregate)
+// ---------------------------------------------------------------------------
+
+export interface ValidationServiceDeps {
+  readonly challengeRepository: ValidationChallengeRepository;
+  readonly observationRepository: ValidationObservationRepository;
+  readonly outcomeRepository: ValidationOutcomeRepository;
+  readonly policyRepository: ValidationPolicyRepository;
+  readonly participantRepository: ValidatorParticipantRepository;
+  readonly lookups: ValidationLookups;
+  readonly idempotency: IdempotencyStore;
+  readonly auditWriter: TransactionalAuditWriter;
+  readonly logger: Logger;
+}
+
+export interface ValidationService {
+  /**
+   * Open a validation challenge (guard action
+   * `validation.challenge.create`). Runs the deterministic eligibility
+   * gate — the acting person exists, the target resolves same-scope
+   * with a valid anchor, `effectiveAt` does not precede the target
+   * anchor, the policy lineage resolves in scope, no LIVE round
+   * covers the target, a rechallenge target is terminal — then FREEZES
+   * the target facts + the policy shape onto the round and commits the
+   * record atomically with the `validation_challenge.opened` audit
+   * event. NO economic/lifecycle/reputation mutation happens here.
+   */
+  openChallenge(
+    execution: ExecutionContext,
+    input: OpenValidationChallengeInput,
+  ): Promise<OpenValidationChallengeResult>;
+  /**
+   * Fetch a round (guard action `validation.challenge.read`;
+   * tenant-scoped — cross-tenant and nonexistent are indistinguishable
+   * NotFound; no existence oracle).
+   */
+  getChallenge(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    challengeId: string,
+  ): Promise<ValidationChallenge>;
+  /**
+   * Mark a validator explicitly conflicted on an OPEN round (guard
+   * action `validation.challenge.markConflict`; ONE-WAY append —
+   * conflicts are never un-marked; the exclusion takes effect at the
+   * next assignment derivation). Commits atomically with the
+   * `validation_challenge.conflict_marked` audit event.
+   */
+  markConflict(
+    execution: ExecutionContext,
+    input: MarkValidatorConflictInput,
+  ): Promise<ValidationChallenge>;
+  /**
+   * Derive the round's assignment set (guard action
+   * `validation.assignment.derive`; exactly ONE set per round):
+   * deterministic eligibility filtering (tenant scope, participant
+   * status, the §3.6 conflict-of-interest exclusions) THEN stable
+   * (registeredAt, id) ordering THEN the policy cardinality — at the
+   * EXPLICIT `derivedAt` anchor within the round window. Fails closed
+   * when fewer eligible validators than the cardinality exist (no set
+   * is recorded; the round stays open). The auditable
+   * considered-but-excluded trace is frozen on the set. Commits
+   * atomically with the `validation_challenge.assignments_derived`
+   * audit event.
+   */
+  deriveAssignments(
+    execution: ExecutionContext,
+    input: DeriveValidatorAssignmentsInput,
+  ): Promise<DeriveValidatorAssignmentsResult>;
+  /**
+   * Bond a validator's committed stake to their assignment entry
+   * (guard action `validation.assignment.bond`): VERIFIES the
+   * settlement authority's record read-only (same scope, owner ==
+   * the assigned validator, state COMMITTED, exact requirement
+   * amount, purpose `validation_assignment:{challengeId}:{personId}`,
+   * committed within the round window) — the escrow itself is
+   * committed through /settlement at the composition root. The actor
+   * MUST be the assigned validator (self-bonding only). Commits
+   * atomically with the `validation_challenge.stake_bonded` audit
+   * event.
+   */
+  bondValidatorStake(
+    execution: ExecutionContext,
+    input: BondValidatorStakeInput,
+  ): Promise<ValidationChallenge>;
+  /**
+   * Submit one validator observation (guard action
+   * `validation.observation.create`): the acting person MUST be an
+   * assigned validator of the OPEN round (server-bound identity —
+   * never on behalf of another validator), the assignment's stake
+   * must be bonded when the policy requires one, `observedAt` must
+   * fall within the round window (inclusive), the verdict is from the
+   * closed vocabulary, and UPHOLD/REJECT verdicts require ≥1
+   * RESOLVING same-scope evidence reference (W029 attestations /
+   * W031 proofs — referenced opaquely; revoked references fail
+   * closed). Exactly ONE observation per (round, validator) — a
+   * second submission with a fresh key is a CONFLICT. Commits
+   * atomically with the `validation_observation.recorded` audit
+   * event.
+   */
+  submitObservation(
+    execution: ExecutionContext,
+    input: SubmitValidatorObservationInput,
+  ): Promise<SubmitValidatorObservationResult>;
+  /**
+   * Derive the terminal quorum outcome (guard action
+   * `validation.outcome.derive`): loads the RECORDED inputs (the
+   * frozen policy shape, the assignment set, the observations) and
+   * runs the PURE quorum engine at the EXPLICIT `evaluatedAt` anchor;
+   * the immutable outcome record + the round's one-way terminal
+   * back-pointer commit in ONE transaction with the
+   * `validation_outcome.derived` audit event. The round closes —
+   * closed rounds are immutable (rechallenge opens a NEW round).
+   * Economic consequences execute separately through /settlement at
+   * the composition root (the `recordValidatorStakeOutcome`
+   * bookkeeping).
+   */
+  deriveOutcome(
+    execution: ExecutionContext,
+    input: DeriveValidationOutcomeInput,
+  ): Promise<DeriveValidationOutcomeResult>;
+  /**
+   * RECORD the stake disposition the settlement authority EXECUTED
+   * for a bonded validator at closure (append-only bookkeeping; the
+   * escrow is never touched here — VERIFIES the stake's terminal
+   * settlement state first, the W010 markStakeOutcome discipline).
+   * Commits atomically with the `validation_outcome.stake_outcome_recorded`
+   * audit event.
+   */
+  recordValidatorStakeOutcome(
+    execution: ExecutionContext,
+    input: RecordValidatorStakeOutcomeInput,
+  ): Promise<ValidationOutcome>;
+  /**
+   * Mark an ACCEPTED outcome applied (guard action
+   * `validation.outcome.apply`; ONE-WAY — exactly once). The applier
+   * MUST NOT be an assigned validator of the round (conflict of
+   * interest — validators influence decisions only through the
+   * protocol, never through applying them), the decision must be
+   * ACCEPTED, and the OWNING AUTHORITY's mutation must already be
+   * observable (for `reputation_proof_revocation` the W031 proof's
+   * one-way revocation state is verified read-only through the
+   * neutral proof lookup BEFORE the application fact is recorded —
+   * failed authority application can never be recorded as success).
+   * Commits atomically with the `validation_outcome.applied` audit
+   * event.
+   */
+  markOutcomeApplied(
+    execution: ExecutionContext,
+    input: MarkValidationOutcomeAppliedInput,
+  ): Promise<ValidationOutcome>;
+  /**
+   * Fetch an outcome record (guard action `validation.outcome.read`;
+   * tenant-scoped — cross-tenant and nonexistent are indistinguishable
+   * NotFound).
+   */
+  getOutcome(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    outcomeId: string,
+  ): Promise<ValidationOutcome>;
+  /** The round's observations (read-only, deterministic order). */
+  listObservations(
+    execution: ExecutionContext,
+    organizationScopeId: string,
+    challengeId: string,
+  ): Promise<readonly ValidationObservation[]>;
+}
+
+
 
 /**
  * The DisputesPort describes the boundary's readiness. After NET-W009
@@ -1438,6 +2436,19 @@ export interface DisputesPort {
     readonly disputeAppealed: "dispute.appealed";
     readonly disputeWithdrawn: "dispute.withdrawn";
     readonly disputeStakeOutcomeRecorded: "dispute.stake_outcome_recorded";
+    // NET-W032 (additive) — decentralized validation/dispute
+    // coordination audit events.
+    readonly validationPolicyVersionCreated: "validation_policy.version_created";
+    readonly validatorRegistered: "validator.registered";
+    readonly validatorSuspended: "validator.suspended";
+    readonly validationChallengeOpened: "validation_challenge.opened";
+    readonly validationChallengeConflictMarked: "validation_challenge.conflict_marked";
+    readonly validationChallengeAssignmentsDerived: "validation_challenge.assignments_derived";
+    readonly validationChallengeStakeBonded: "validation_challenge.stake_bonded";
+    readonly validationObservationRecorded: "validation_observation.recorded";
+    readonly validationOutcomeDerived: "validation_outcome.derived";
+    readonly validationOutcomeStakeOutcomeRecorded: "validation_outcome.stake_outcome_recorded";
+    readonly validationOutcomeApplied: "validation_outcome.applied";
   };
 }
 
@@ -1462,4 +2473,38 @@ export type {
   DisputeStakeDisposition,
   DisputeState,
   DisputeSubjectType,
+  // NET-W032 (additive): the shared validation vocabulary re-exported
+  // for API/bootstrap consumers (the single source of truth stays
+  // core/validation.ts).
+  ValidationDecision,
+  ValidationOutcomeApplication,
+  ValidationVerdict,
+  ValidatorExclusionReason,
+  ValidatorStakeDisposition,
 };
+export { VALIDATION_PROTOCOL_VERSION };
+export {
+  VALIDATION_TARGET_KINDS,
+  VALIDATION_VERDICTS,
+  VALIDATION_DECISIONS,
+  ACCEPTED_VALIDATION_DECISIONS,
+  VALIDATOR_EXCLUSION_REASONS,
+  VALIDATION_EVIDENCE_REF_KINDS,
+  VALIDATOR_STAKE_DISPOSITIONS,
+  VALIDATION_OUTCOME_APPLICATIONS,
+  VALIDATION_CHALLENGE_WINDOW_MS,
+  validateValidationQuorumPolicyShape,
+  validateValidationTimestamp,
+  validationWindowExpiry,
+  isWithinValidationWindow,
+  validatorStakeDispositionForClosure,
+  isValidationTargetKind,
+  isValidationVerdict,
+  isValidationDecision,
+  isAcceptedValidationDecision,
+  isValidatorExclusionReason,
+  isValidationEvidenceRefKind,
+  isValidatorStakeDisposition,
+  isValidationOutcomeApplication,
+  type ValidationQuorumPolicyShape,
+} from "../core/validation.ts";

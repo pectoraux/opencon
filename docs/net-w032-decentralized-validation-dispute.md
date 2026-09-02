@@ -1,6 +1,6 @@
 # NET-W032 Evidence Ledger — Decentralized validation/dispute layer
 
-**Status:** ACTIVE / READY_FOR_IMPLEMENTATION  
+**Status:** IMPLEMENTED — full local verification gate GREEN  
 **Issue:** #65  
 **Dependencies:** NET-W010 + NET-W029 + NET-W030 + NET-W031 merged/verified  
 **Architecture:** v1.0 frozen (byte-identical)  
@@ -14,43 +14,55 @@ W032 extends `/disputes` with independent validator/challenge coordination. It d
 
 | AC | Required proof | Delivered |
 |---|---|---|
-| AC-01 validator model | scoped participant identity, eligibility, role/authorization, server-bound actor | TBD |
-| AC-02 deterministic assignment | explicit anchor, eligibility filtering, conflict exclusion, stable tie-break | TBD |
-| AC-03 challenges | bounded challenge window, idempotent creation, terminal rounds, re-challenge as new round | TBD |
-| AC-04 validator observations | assignment-bound, actor-bound, evidence/attestation references, no impersonation | TBD |
-| AC-05 quorum/outcome | versioned policy, deterministic thresholds, insufficient/conflict/invalid cases | TBD |
-| AC-06 conflict/tenancy | self-dealing, beneficiary, scope and cross-tenant isolation | TBD |
-| AC-07 authority containment | validators cannot directly mutate workflow/reputation/evidence/settlement state | TBD |
-| AC-08 economic containment | stake/reserve/penalty flows use `/settlement` only, with atomicity | TBD |
-| AC-09 atomicity/concurrency | composite idempotency, locks, rollback, transactional audit, fault injection | TBD |
-| AC-10 architecture regression | frozen architecture/authority boundaries, no W033+ or new crypto | TBD |
+| AC-01 validator model | scoped participant identity, eligibility, role/authorization, server-bound actor | ✅ AC-01 (10 tests): self-registration binding (impersonation refused), one-ACTIVE-per-person scope, one-way suspension, indistinguishable cross-tenant reads, deterministic listing, audit lineage |
+| AC-02 deterministic assignment | explicit anchor, eligibility filtering, conflict exclusion, stable tie-break | ✅ AC-02 (12 tests): exactly-one set of the cardinality in the frozen (registeredAt, id) order, all §3.6 exclusions traced (target_subject / target_beneficiary / challenge_initiator / explicitly_conflicted / suspended), no cross-tenant leakage, insufficient-pool fail-closed, inclusive window bounds |
+| AC-03 challenges | bounded challenge window, idempotent creation, terminal rounds, re-challenge as new round | ✅ AC-03 (11 tests): idempotent + concurrent-convergent creation, duplicate-round gate, target resolution + anchor rules, frozen policy snapshot, one-way conflict marks, terminal immutability (every later mutation fails closed), rechallenge = NEW linked round with the closed original byte-identical |
+| AC-04 validator observations | assignment-bound, actor-bound, evidence/attestation references, no impersonation | ✅ AC-04 (13 tests): actor==assigned validator, exactly-one per (round, validator), inclusive window bounds, closed verdict vocabulary, evidence-backed UPHOLD/REJECT, opaque W029-attestation composition, revoked references fail closed, stake-bond eligibility gate |
+| AC-05 quorum/outcome | versioned policy, deterministic thresholds, insufficient/conflict/invalid cases | ✅ AC-05 (13 tests): the full decision matrix (UPHELD / DENIED / INSUFFICIENT_PARTICIPATION / NO_QUORUM / CONFLICTED_QUORUM / WINDOW_EXPIRED), abstention semantics, the pure engine's exclusion trace (not_assigned / duplicate_validator / invalid_verdict / outside_window), determinism + idempotent replay, machine-readable checks |
+| AC-06 conflict/tenancy | self-dealing, beneficiary, scope and cross-tenant isolation | ✅ AC-06 (5 tests): the self-dealing flow, the assigned-validator application conflict gate, cross-tenant fail-closed reads/observations, deny-by-default routes (13 actions × unauthenticated + authenticated), the full guarded HTTP round-trip incl. the outcome application + indistinguishable 404s |
+| AC-07 authority containment | validators cannot directly mutate workflow/reputation/evidence/settlement state | ✅ AC-07 (8 tests): the full lifecycle leaves the owning authorities' collections byte-identical, zero economic records from the coordination layer, the validator application conflict gate, the application composite is the only proof-mutating path (verified through /reputation's own pipeline), bookkeeping-only key-set pins, opaque evidence references |
+| AC-08 economic containment | stake/reserve/penalty flows use `/settlement` only, with atomicity | ✅ AC-08 (7 tests): the settlement-authority composite bond with the frozen `validation_assignment:{challenge}:{person}` purpose, the unbonded observation gate, the domain-side verification matrix (self-bonding / purpose / exact amount), submitted→RELEASE + bonded-silent→FORFEIT dispositions through /settlement, global conservation, no-false-success + compound-key retry, zero second ledger |
+| AC-09 atomicity/concurrency | composite idempotency, locks, rollback, transactional audit, fault injection | ✅ AC-09 (9 tests): injected audit-append failure rolls the derivation back entirely (no outcome, round stays open, no audit, retry succeeds), concurrent observations/derivations/conflicts converge, compound-key resolution replay with no double economic effects, the failed-authority-application ordering, end-to-end application retry, the lineage contract on every mutation |
+| AC-10 architecture regression | frozen architecture/authority boundaries, no W033+ or new crypto | ✅ AC-10 (13 tests): 0 violations across 322 files, frozen specs, vocabulary pins, W009/W010/W031 preservation, non-lifecycle/non-AI/non-consensus/non-economic bans, tier compliance, command-vocabulary containment, wiring pins, secret boundary, file list, sanctioned-amendment scoping |
 
-## Verification record
+**101 tests** across the ten W032 suites + the shared harness.
 
-To be completed on the implementation head:
+## Verification record (executed on the implementation head)
 
-- `bun run typecheck`
-- `bun run arch:check`
-- `bun run authority:check`
-- `bun run verify`
-- targeted mutation driver: every acceptance guard caught; byte-identical restoration; clean tree
-- secret scan
-- configured real PostgreSQL/Redis integration
-- CI verification + integration jobs on push and pull-request events
+- `bun run typecheck` — **PASS**
+- `bun run arch:check` — **PASS: 322 files scanned, 0 violations**
+- `bun run authority:check` — **PASS: 322 files scanned, 0 violations**
+- `bun run verify` — **PASS: 2097 pass / 15 skip / 0 fail — 2112 tests / 266 files / 28,615 expect()** (baseline 1996/15/0 — 2011 tests / 256 files ⇒ +101 tests, +10 files; every pre-existing suite preserved, the seven vocabulary/regression pins amended additively in lockstep with the sanctioned core-economics extension)
+- Targeted mutation driver (`opencon-tmp/w032-mutation-driver.py`, never committed): **25/25 behavioral mutations CAUGHT** — the conflict-of-interest exclusions (initiator, subject, suspended), the deterministic ordering inversion, the insufficient-pool gate, the actor-assignment binding, the stake-bond gate, the window bounds, the evidence-backed-verdict gate, the revoked-reference checks (proof + attestation), the quorum fail-closed decisions (window / conflicted / insufficient), the engine's exclusion re-validation, the application gates (accepted-decision, validator conflict, observable mutation), the closure→stake mapping inversion, the self-bonding + exact-amount gates, the creation-anchor gate, the closed-round immutability, the rechallenge gate (primary layer) — plus **2 structural redundancy pins PRESENT** (the double-layered rechallenge + closed-round in-tx re-checks; each layer independently produces the identical client-visible contract, so the redundant layer is verified structurally). Byte-identical restoration after every run; clean tree.
+- Secret scan — **CLEAN** (no key material in the W032 surface; `REQUIRED_IN_PRODUCTION` unchanged: `DATABASE_URL`, `REDIS_URL`, `OBJECT_STORAGE_BUCKET`; no `VALIDATION*KEY` config surface)
+- Real PostgreSQL 17.11 + Redis 8.0 integration (locally provisioned, the CI service-container equivalents): `PG_TEST_DATABASE_URL=postgres://…:55432/opencon_test REDIS_TEST_URL=redis://…:56379 bun test tests/integration/` — **17 pass / 0 fail**
+- W032 real-PG end-to-end round-trip (`opencon-tmp/w032-real-pg-roundtrip.ts`, never committed; the REAL `PostgresAuthorityAdapter` in an isolated per-run schema): policy v1 → 4 registrations with the impersonation attempt refused → challenge (frozen target facts + policy snapshot) → deterministic assignment (the registered SUBJECT excluded + traced) → 2 actor-bound observations → UPHELD with the full participation counts → idempotent replay (created=false, identical outcome) → closed round refuses a late observation → the premature application REFUSED (observable-mutation ordering) → the application recorded after the owner mutation — **ALL CHECKS PASSED**
 
-## Design decisions to close before merge
+## Design decisions to close before merge — CLOSED
 
-1. Exact validator eligibility predicate and versioned policy.
-2. Exact assignment cardinality and deterministic ordering/tie-break.
-3. Challenge-window duration and evaluation semantics.
-4. Observation verdict vocabulary and treatment of abstention/invalid observation.
-5. Quorum/threshold formula and conflict/tie behavior.
-6. Terminal outcome vocabulary.
-7. Revalidation/rechallenge round identity and immutability.
-8. Exact owner-authority application contracts for any supported dispute target.
-9. Economic stake/reserve/penalty semantics and `/settlement` WithinTx calls.
-10. Failure/rollback guarantees when authority application or audit publication fails.
+1. **Validator eligibility predicate + versioned policy.** Eligibility DERIVES from recorded state: an org-scoped ACTIVE participant (self-registered, server-bound identity), not the target subject/beneficiary, not the initiator, not explicitly conflicted — evaluated at assignment derivation. The eligibility PARAMETERS (cardinality, thresholds, window, stake requirement) live in the immutable, versioned `validation_policies` lineage (the full W007/W008/W009/W010 policy-lineage pattern: exactly latest+1, org-scoped lineage, (policyId, version) idempotency).
+2. **Assignment cardinality + deterministic ordering.** Exactly ONE set per round of exactly `assignmentCardinality` validators; ordering is the frozen `(registeredAt, participant id)` sort (the repository's deterministic order); an insufficient eligible pool fails closed with NO set recorded (the round stays open; retry after more registrations). Selection is frozen on the round with the auditable considered-but-excluded trace.
+3. **Challenge window + evaluation semantics.** The round window anchors at the challenge's explicit `effectiveAt` and expires at `effectiveAt + policy.challengeWindowMs` (the frozen default: 14 days). Observations must fall within [effectiveAt, windowExpiresAt] (inclusive); assignment derivation likewise; the outcome derivation REQUIRES `effectiveAt ≤ evaluatedAt` and derives `WINDOW_EXPIRED` fail-closed beyond expiry.
+4. **Observation verdict vocabulary + abstention/invalid handling.** `UPHOLD | REJECT | ABSTAIN`; ABSTAIN counts toward participation, never toward agreement; invalid observations are excluded entirely at derivation (re-validated: assignment membership, verdict vocabulary, window, duplicate) with per-observation machine-readable exclusion reasons — never counted.
+5. **Quorum formula + conflict behavior.** COUNT-based absolute thresholds from the versioned policy: `minimumSubmitted` (participation floor), `upholdThreshold`, `rejectThreshold`. Decision precedence (fixed): window expired → `WINDOW_EXPIRED`; participation unmet → `INSUFFICIENT_PARTICIPATION`; both thresholds → `CONFLICTED_QUORUM` (fail-closed — no coin flips); exactly one → that decision; neither → `NO_QUORUM`. Duplicate submissions are structurally impossible (one observation per (round, validator); a second fresh-key submission is a CONFLICT).
+6. **Terminal outcome vocabulary.** `UPHELD | DENIED` (the ACCEPTED, applicable decisions) + `INSUFFICIENT_PARTICIPATION | NO_QUORUM | CONFLICTED_QUORUM | WINDOW_EXPIRED` (fail-closed closures). Closed rounds are immutable; every closure is terminal.
+7. **Revalidation/rechallenge round identity.** A rechallenge creates a NEW round record carrying `rechallengeOfChallengeId` (the rechallenged round must be CLOSED); the closed original is never mutated. Exactly one assignment set per round; exactly one outcome per round.
+8. **Owner-authority application contracts.** Delivered contracts: (a) `reputation_proof_revocation` — an UPHELD outcome on a W031 proof target applies through the /reputation authority's own one-way revocation command (the composition-root composite `applyValidationOutcome`: revoke (`${key}:revoke`) → record (`${key}:mark`) with the domain verifying the proof's signed revocation state is observable BEFORE recording — failed authority application can never be recorded as success); (b) validator stakes — commit/release/forfeit only through /settlement with compound keys. The applier must NOT be an assigned validator of the round (the domain conflict gate). Lifecycle/economic end-to-end application composites for the other target kinds are NET-W033+ scope (work order §7) — deliberately absent, never silent.
+9. **Economic stake semantics + /settlement composition.** The policy's `validatorStakeRequirementCredits` (default 0) is the per-validator, per-assignment eligibility bond, committed at the composition root with the purpose `validation_assignment:{challengeId}:{validatorPersonId}` (one COMMITTED stake per assignment slot — the settlement invariant). The deterministic closure mapping (pure core `validatorStakeDispositionForClosure`): submitted → RELEASE (honest participation is never penalized — no minority-dissent slashing); bonded-silent → FORFEIT (the non-participation penalty). Applied uniformly on every terminal closure through /settlement's own commands; the domain only verifies and records.
+10. **Failure/rollback guarantees.** Every mutation commits its record + idempotency record + audit event in ONE authoritative transaction (the injected audit-append failure rolls everything back — AC-09). Composites use compound idempotency keys with skip-if-already-dispositioned orchestration (a retried resolution never re-executes a settlement step; a mid-composite retry after the economic movement but before the recording still completes the recording). Pre-tx state gates that would break same-key replays live only as in-tx re-checks (double-layered defense in depth — the structural pins).
+
+## Design decisions of record
+
+1. **Placement.** W032 lives entirely inside `/disputes` (no seventeenth domain): `validation-policy-service.ts`, `validator-registry-service.ts`, `validation-service.ts`, the pure `quorum-engine.ts`, and five authority repositories; the shared vocabulary in the pure `src/core/validation.ts` (data + validation only — the core/disputes.ts discipline).
+2. **Round state is immutable facts, never a status machine** (the authority guardrail): `assignment === null/derived` + `outcome === null/recorded` projections + the append-only event history; no `statusTransition`-style helpers; the check-authority guard passes with zero violations.
+3. **The composition root is the only join.** The domain consumes the owning authorities exclusively through the neutral lookups declared on the disputes port (target/attestation/proof/stake), wired in `runtime.ts` over the W031 proof repo, the W029 attestation repo, the W004/W006/W008 record repos, and the W010 stake lookup. Economic consequences and the owner-authority application compose in the `apiCommands` composites with compound keys — the /disputes domain code never calls /settlement or /reputation.
+4. **Privacy.** Targets and evidence are referenced opaquely (`{kind, id}`); the target facts freeze only scope/anchor/subject/beneficiary/state; the attestation lookup discloses scope + revocation state only; observations carry the validator's own statement + opaque references — never attestation content (AC-07 pins).
+5. **Tenancy.** Every route is guarded (13 flat guard actions: `validationPolicy.*`, `validator.*`, `validation.*`), deny-by-default, tenant-scoped; cross-tenant and nonexistent identifiers are indistinguishable at the read surfaces and fail closed at the mutation surfaces; the assignment pool never crosses tenants.
+6. **Sanctioned shared-file amendments** (additive, pinned by AC-10): `core/economics.ts` gains the `validation_assignment` stake purpose kind (the exact W010 `dispute_challenge` / W011 `campaign_budget` precedent) with the seven vocabulary-pinning regression suites (W009/W010/W011/W012/W013/W014/W015/W020 — the W009/W010 `openChallenge` bans lifted with the W010-amendment note pattern); the disputes module summary, port audit vocabulary, boundary index (quorum-engine re-export), and README scope section carry the additive W032 sections. The W031 proof/scoring files and the W010 dispute-service file are untouched.
+7. **Determinism.** Every derivation consumes recorded inputs + explicit anchors (never a wall clock); the pure engine is a function; the outcome record carries the full participation counts, per-observation trace and the fixed window→participation→quorum checks (machine-readable, reproducible by any auditor from the recorded records).
+8. **API surface.** 13 guarded POST routes under `/api/validation/{policies,validators,challenges,outcomes}` (201 creations / 200 mutations / 404 no-oracle reads), with strict request-shape parsers delegating closed-vocabulary + resolution failures to the domain (fail closed).
+9. **Stake purpose linkage.** `validation_assignment:{challengeId}:{validatorPersonId}` binds one escrow per assignment slot; the domain verifies owner/amount/state/purpose/window read-only at bonding and the settlement terminal state before recording any disposition (the W010 markStakeOutcome discipline).
 
 ## Review notes
 
-This ledger is intentionally incomplete until the implementation closes the exact protocol rules above. No implementation agent may treat unspecified constants as final protocol semantics merely because tests happen to pass.
+All ten design decisions the scaffold demanded are closed above with frozen code + tests + this ledger; no constant is protocol semantics without a versioned policy carrying it. The mutation-driver's two structural redundancy pins document the double-layered gates honestly (each layer independently yields the identical client contract).
