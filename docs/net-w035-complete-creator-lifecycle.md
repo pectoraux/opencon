@@ -285,40 +285,279 @@ tests/creator/
 
 Names may differ where existing conventions require it. The acceptance criteria remain one-to-one with AC-01..AC-10.
 
-## 15. Required verification record template
+## 15. Verification record (delivered)
 
-The implementation PR must replace the placeholders below with exact evidence.
+Implementation PR: #73
+Implementation branch: feat/net-w035-complete-creator-lifecycle
+Reviewed head: 749946474606e6ee534f5b1d621fd1c337f4b2e0
+Merge SHA: (pending architect approval)
+
+Changed files: 15 (12 new test files + 1 new regression suite + 1 modified TEST harness + this ledger)
+Production src changes: 0
+Frozen architecture file changes: 0
+
+bun run typecheck: PASS
+bun run arch:check: 322 files / 0 violations
+bun run authority:check: 322 files / 0 violations
+bun run verify: 2330 pass / 15 skip / 0 fail / 2345 tests / 300 files (the W034 baseline 2258/15/0 ⇒ +72 W035 composition tests across 12 new test files)
+Targeted mutations: 12/12 caught; byte-identical restoration: PASS (driver `opencon-tmp-w035/mutation-driver.py`, never committed)
+Real PostgreSQL + Redis: 17 pass / 0 fail (PG 17 on 127.0.0.1:55432 + Redis 7.2.5 on 127.0.0.1:56379)
+Real creator provider round-trip: 23 checks / 23 passed (a DEDICATED round-trip database, dropped afterwards — see §15.2)
+Secret scan: PASS (the AC-10 regression pin over the whole W035 artifact set)
+CI push exact-head: run 33665390333 — verify + integration both SUCCESS (head 7499464)
+CI pull_request exact-head: run 33665447181 — verify + integration both SUCCESS (head 7499464; 4/4 check-runs success, mergeable_state clean)
+
+Traversal witnesses: the 30 ordered stage witnesses (§15.3) over BOTH authoritative lifecycle subjects (engagement v0 DRAFT → v5 VERIFIED; contribution v0 DRAFT → v4 SUBMITTED → v5 MEASURING → v10 VERIFIED)
+Durable audit markers: 33 canonical markers in strictly ascending audit positions (the full-path scenario suite) + 31 in the real round-trip
+AC-09 rollback proof: the composite-level COMMIT failure over the ACTUAL creator-to-settlement join (the recognition composite's authoritative mutation service, `createEconomicValueService`, rebuilt over a commit-failing authority with the REAL repositories/ledger/idempotency/audit-writer + neutral lookups over the public services): the value record + balanced recognition postings + idempotency record + buffered audit all staged then rolled back — NOTHING persists (no value record, no ledger entries/transactions, no idempotency, no audit event); the healthy same-key retry through the REAL apiCommand completes exactly once
+Same-key retry: measurement submission + recognition + payment fact replays all return the committed records verbatim (created=false; one audit event each)
+Concurrent exactly-once proof: concurrent same-key recognition converges to exactly ONE value record (the economic boundary race; conservation holds)
+Tenant matrix: cross-tenant profile/match-run/engagement/grant/publication/measurement/value/payment-fact references all fail closed without existence oracles (AC-09); the foreign-scope payment fact's derived reconciliation stays `pending` (internal_lineage_not_found)
+
+Architect decision: CHANGES REQUESTED (comment 5514394512, 2026-09-02 — the canonical-path determinism blockers) → remediation delivered on the SAME PR/branch (§15.5); re-review PENDING at the remediation head.
+
+### 15.1 The delivered traversal witnesses (the exact 30-stage order)
 
 ```text
-Implementation PR: #___
-Implementation branch: feat/net-w035-complete-creator-lifecycle
-Reviewed head: __________
-Merge SHA: __________
-
-Changed files: ___
-Production src changes: ___
-Frozen architecture file changes: 0 required
-
-bun run typecheck: PASS/FAIL
-bun run arch:check: ___ files / ___ violations
-bun run authority:check: ___ files / ___ violations
-bun run verify: ___ pass / ___ skip / ___ fail / ___ tests / ___ files
-Targeted mutations: ___/___ caught; byte-identical restoration: PASS/FAIL
-Real PostgreSQL + Redis: ___ pass / ___ fail
-Real creator provider round-trip: ___ checks / ___ passed
-Secret scan: PASS/FAIL
-CI push exact-head: run ___ / PASS/FAIL
-CI pull_request exact-head: run ___ / PASS/FAIL
-
-Traversal witnesses: __________
-Durable audit markers: __________
-AC-09 rollback proof: __________
-Same-key retry: __________
-Concurrent exactly-once proof: __________
-Tenant matrix: __________
-
-Architect decision: PENDING
+creator-resolved → creator-authorized → match-hard-gates-passed
+→ match-committed → campaign-policy-resolved → opportunity-materialized
+→ terms-pinned (DRAFT v0) → creator-accepted (ASSIGNED v2)
+→ contribution-entered (DRAFT v0) → contribution-submitted (SUBMITTED v4)
+→ ugc-recorded (IN_PROGRESS v3) → rights-authorized (ACTIVE grant)
+→ ugc-submitted (SUBMITTED v4) → engagement-verified (VERIFIED v5)
+→ relationship-recorded → publication-recorded
+→ disclosure-compliance-satisfied (publication VERIFIED)
+→ lifecycle-measuring (MEASURING v5) → measurement-normalized
+→ outcome-verified → evidence-pov-verified → poh-evaluated
+→ lifecycle-completed (VERIFIED v10) → settlement-pending
+→ risk-gate-refused → risk-gate-resolved → dispute-gate-refused
+→ dispute-gate-resolved → settlement-matured → payment-committed
 ```
+
+Every witness from the engagement creation onward carries the
+AUTHORITATIVE engagement state + version read through
+`creatorEngagementService.getEngagement`; every witness from the
+contribution entry onward ALSO carries the AUTHORITATIVE contribution
+state + version read through `contributionService.getContribution` —
+a strictly deterministic executable-order proof over BOTH authorities
+(the W033 PR #68 remediation discipline carried forward).
+
+**Ordering deviation of record (the W034 precedent):** the ledger's
+template list places `settlement-pending` after the gate resolutions;
+the delivered scenario recognizes the value (PENDING) BEFORE
+exercising the gates — mechanically the ONLY real-refusal shape (the
+gates refuse the MATURATION of a pending value: `RISK_CONTROL` /
+`DISPUTE_CHALLENGE`; recognition itself is not risk-gated — the
+`refuseWhenGated`/`refuseWhenDisputed` enforcement points are the
+maturation/issuance/allocation composites). This is exactly the
+W034-approved order ("economic witnesses cannot occur before the
+required workflow/evidence/evaluation/risk gates" — the binding
+constraint is that maturation/consumption follows gate resolution,
+which the delivered order satisfies: settlement-matured and
+payment-committed both follow dispute-gate-resolved), documented here
+rather than hidden.
+
+### 15.2 The real round-trip record
+
+`opencon-tmp-w035/real-pg-roundtrip.ts` (never committed): a DEDICATED
+`opencon_w035_roundtrip` database + a staging-classified runtime (the
+REAL provider-selection path — PostgresAuthorityAdapter +
+RedisCoordinationAdapter, no shims; the delivery-notice adapter
+AUTO-WIRED from the staging SecretProvider's
+MEASUREMENT_OPENRTB_DELIVERY_KEY; the W030 trust channel from
+EXTERNAL_SETTLEMENT_REFERENCE_TRUST_KEY) + the seeded W008→W018
+guard/policy surface + ONE creator execution through the complete
+canonical chain — ALL 23 CHECKS PASSED (the REAL provider selection,
+the REAL W022 registry, the W015 profile, the W016 hard-gated match,
+the ACTIVE campaign with the escrowed budget, the W017 acceptance
+composite, the W012 contribution entry, the UGC production bound to
+the contribution + the rights view, the engagement VERIFIED walk, the
+W018 disclosure/compliance gate, the W022 measurement, the outcomes,
+the evidence/PoV + the PoH, the completed VERIFIED v10 walk, the
+risk/dispute gates fail-closed-then-resolved, the settlement
+pending/mature, the W030 external payment with the derived MATCHED
+reconciliation, the 30-witness CANONICAL TRAVERSAL ORDER, the 31
+ordered audit markers, the terminal states, the settlement
+conservation over the REAL ledger, the privacy boundary, the payment
+containment). The round-trip database dropped afterwards.
+
+### 15.3 The changed-file inventory (the authority mapping)
+
+| File | Kind | Authority exercised |
+|---|---|---|
+| tests/creator-lifecycle/_net-w035-harness.ts | NEW (shared harness) | pure test composition over the existing contracts |
+| tests/creator-lifecycle/net-w035-full-path-scenario.test.ts | NEW | the canonical traversal + audit order + conservation |
+| tests/creator-lifecycle/net-w035-ac-01-creator-discovery.test.ts | NEW | /creators + W016 matching |
+| tests/creator-lifecycle/net-w035-ac-02-campaign-terms.test.ts | NEW | /campaigns terms + escrow |
+| tests/creator-lifecycle/net-w035-ac-03-acceptance-ugc-rights.test.ts | NEW | W017 engagement/UGC/rights |
+| tests/creator-lifecycle/net-w035-ac-04-disclosure.test.ts | NEW | W018 sponsorship/disclosure |
+| tests/creator-lifecycle/net-w035-ac-05-measurement.test.ts | NEW | /measurement→/outcomes + privacy |
+| tests/creator-lifecycle/net-w035-ac-06-evidence.test.ts | NEW | /evidence PoV + PoH |
+| tests/creator-lifecycle/net-w035-ac-07-workflow-risk-dispute.test.ts | NEW | /workflows + /disputes gates |
+| tests/creator-lifecycle/net-w035-ac-08-settlement-payment.test.ts | NEW | /settlement + /payments+/adapters |
+| tests/creator-lifecycle/net-w035-ac-09-replay-concurrency-atomicity.test.ts | NEW | replay/race/atomicity/tenancy/lineage |
+| tests/regression/net-w035-ac-10-architecture-out-of-scope.test.ts | NEW (regression) | the structural pins |
+| tests/creators/_net-w018-harness.ts | MODIFIED (the ONE declared test-harness adjustment) | option forwarding of the PRE-EXISTING NetW008HarnessOptions (the W015/W016/W017 chain already threaded them): the NET-W006 measurement-provider registry + the NET-W030 trust keys — tests-only, never src/ (the W034 measurement-threading precedent) |
+| docs/net-w035-complete-creator-lifecycle.md | MODIFIED (this record) | the evidence ledger |
+
+No production source file changed. The frozen architecture files are
+byte-identical (AC-10 regression pin). The mutation driver and the
+round-trip script live OUTSIDE the repository (opencon-tmp-w035/) and
+are never committed.
+
+### 15.4 Decisions of record
+
+1. **The canonical order follows the frozen ledger literally** (match
+   before campaign; discovery → terms → acceptance → UGC → rights →
+   disclosure → MEASURING → measurement → evidence → completion →
+   gates → settlement → payment), with the W034-precedented
+   recognition-before-gates deviation documented in §15.1.
+2. **The contribution enters through the sanctioned W012 helpfulness
+   composite** on the campaign's `helpful_recommendation` opportunity
+   (the W034 decision of record — the ONLY contribution vehicle); the
+   W017 production binds the contribution id, giving the
+   engagement → production → contribution → measurement lineage.
+3. **The declared payment/settlement path is the W030 external
+   payment** (the /payments + /adapters leg the work order §3.3 and
+   AC-08 explicitly provide for): the W020 cross-promotion clearing
+   composite is placement-bound (an advertising-shaped join — /inventory
+   is explicitly OUTSIDE the W035 authority placement), so the
+   campaign's declared compensation/clearing rule (reward_allocation
+   to the CREATOR, maxDrawAmount covered by the escrowed budget) is
+   the declared compensation lineage and the external fact + derived
+   reconciliation is the payment leg. The fact posts NO ledger
+   entries; the provider acknowledgement never becomes internal
+   settlement truth.
+4. **The dispute fixture anchor is the subject's OWN authoritative
+   timestamp** (contribution.createdAt / economic_value.recordedAt —
+   the W034 PR #70 remediation discipline); the risk assessment uses
+   the fixed `2026-09-01T12:00:00.000Z` anchor; the payment fact's
+   `observedAt` is fresh at ingestion (the W030 freshness-window
+   semantics — the W030 golden-path pattern; the determinism anchors
+   never depend on it). AMENDED by the §15.5 remediation: the
+   canonical rights windows and evidence-capture timestamps are
+   FIXED anchors, the usage-rights view reads pass a FIXED
+   evaluation `asOf`, the external payment identity is DERIVED from
+   the matured value record, and the signing timestamp is the FIXED
+   `W035_PAYMENT_SIGNED_AT` anchor — the ONE sanctioned wall-clock
+   read is the provider freshness `observedAt` (the explicit
+   architect-sanctioned exception).
+5. **The AC-09 atomicity proof targets the creator-to-settlement
+   join** (the recognition composite's authoritative mutation service)
+   — a genuine composite-level COMMIT failure after full staging, NOT
+   a stale-state refusal (the W034 PR #70 remediation lesson applied
+   from the start).
+
+### 15.5 Remediation record (PR #73 — architect comment 5514394512)
+
+**The architect decision (2026-09-02): CHANGES REQUESTED** — two
+blockers in the canonical proof path's deterministic-fixture contract
+(work order §3.1):
+
+1. **Blocker 1 — the canonical traversal was not deterministic**:
+   `runCreatorScenario()` used wall-clock `Date.now()` windows for the
+   engagement requested/granted rights and `new Date().toISOString()`
+   for the production/disclosure evidence `collectedAt` timestamps.
+2. **Blocker 2 — the canonical payment identity was nondeterministic**:
+   `recordCreatorPayment()` generated the default external payment
+   identity with `randomUUID()` and signed with a fresh timestamp.
+
+**The remediation (same branch/PR; NO production source change):**
+
+- **Fixed canonical anchors (Blocker 1)** — the harness now declares
+  the exported fixed anchor block: `W035_RIGHTS_STARTS_AT`
+  (2026-09-01), `W035_RIGHTS_REQUESTED_ENDS_AT` (2026-10-01, +30d),
+  `W035_RIGHTS_GRANTED_ENDS_AT` (2026-09-30, +29d — strictly within
+  the requested envelope), `W035_RIGHTS_EVALUATION_AS_OF`
+  (2026-09-15 — inside the granted window),
+  `W035_RIGHTS_EXPIRED_AS_OF` (2040-01-01 — after every fixed
+  window), `W035_EVIDENCE_CAPTURED_AT` (2026-09-02T10:00) and
+  `W035_PAYMENT_SIGNED_AT` (2026-09-02T10:05). The canonical
+  requested/granted rights windows, ALL THREE platform evidence
+  captures (production/declaration/publication) and every local
+  AC-suite engagement fixture now compose these anchors (the W034
+  PR #70 remediation discipline applied consistently — the W023
+  fixed provider-fixture style).
+- **Deterministic rights-view reads** — every usage-rights view read
+  in the suite (the canonical scenario + full-path + AC-03 + AC-09)
+  passes an explicit FIXED `asOf` (the evaluation anchor for ACTIVE,
+  the expired anchor for the derived EXPIRED/REVOKED lifecycle
+  proofs); the authority's `asOf ?? now` default is never exercised
+  by a W035 proof path.
+- **Deterministic payment identity (Blocker 2)** — the canonical
+  default external id is `ext-pay-w035-{valueRecordId}` — DERIVED
+  from the authoritative matured value record the fact reports on
+  (never random UUID entropy), so the same canonical execution over
+  the same authoritative state reproduces the same durable external
+  lineage. The signing timestamp is the FIXED
+  `W035_PAYMENT_SIGNED_AT` anchor (integrity.signedAt is
+  shape-validated only — never freshness-gated).
+- **The ONE explicit wall-clock exception** —
+  `freshProviderObservationTimestamp()` (the single `new Date()` in
+  the entire suite) provides the W030 provider freshness `observedAt`
+  ONLY: the external-settlement authority itself wall-clock-enforces
+  the freshness window, so a fixed instant fails closed by design
+  (the architect-sanctioned exception; the determinism anchors never
+  depend on it).
+- **Test-specific payment fixtures carry EXPLICIT identities** — the
+  AC-08 fresh-fact/mismatch/failure-mode fixtures (facts recorded
+  OVER the canonical value record beyond the canonical payment) pass
+  explicit distinct external ids + idempotency keys, so each
+  fail-closed channel (wrong key / tampered / unsigned / stale)
+  remains attributable to ITS OWN gate — never masked by an identity
+  conflict with the canonical deterministic fact (proven by the
+  M8/M9 mutation catches).
+- **The strengthened AC-10 determinism pin** — a mechanical
+  comment-stripping scanner over the whole W035 suite: ZERO
+  `Date.now(`/`randomUUID` code tokens; exactly ONE `new Date(` —
+  inside the sanctioned freshness helper; the exact fixed anchor
+  values and their canonical usage counts are pinned (2 rights
+  windows, 3 evidence captures, the evaluation asOf, the derived
+  payment identity, the fixed signing anchor). This pin is the
+  durable guard: ANY regression of either blocker fails the suite.
+
+**Verification at the remediation head:**
+
+- `bun run typecheck`: PASS; `arch:check` + `authority:check`: 322
+  files / 0 violations.
+- `bun run verify`: 2330 pass / 15 skip / 0 fail — 2345 tests /
+  300 files / 31,415 expect() (the same pass/skip counts; the pin
+  strengthening adds assertions).
+- Targeted mutations: **16/16 CAUGHT** with byte-identical source
+  restoration (the 12 original W035 guards + the 4 NEW remediation
+  guards M13–M16: rights-window-wallclock, payment-random-identity,
+  payment-fresh-signedAt, evidence-wallclock — each regression of
+  the remediated fixture contract is caught by the strengthened
+  pin; driver outside the repo, never committed).
+- Real PostgreSQL 17 + Redis 7.2.5 integration: 17 pass / 0 fail (a
+  dedicated database, dropped afterwards).
+- Real-provider creator round-trip: **23/23 checks PASSED** on a
+  dedicated database with the SAME deterministic fixture discipline
+  (fixed rights windows + fixed evidence captures + the fixed
+  evaluation asOf + the derived payment identity + the fixed signing
+  anchor; the only wall-clock read is the sanctioned provider
+  freshness `observedAt`); the database dropped afterwards.
+- No production source change (the diff since 3f60333 is exactly: 8
+  modified test files — the harness + 6 composition suites + the
+  strengthened AC-10 regression pin — + this ledger). The frozen
+  architecture files remain byte-identical.
+
+### 15.6 CI verification record (the remediation heads)
+
+| Head | Event | Run | Verify | Integration |
+|---|---|---|---|---|
+| `15ba1cf` (remediation) | push | [33670240066](https://github.com/pectoraux/opencon/actions/runs/33670240066) | ✅ success | ✅ success |
+| `15ba1cf` (remediation) | pull_request | [33670244924](https://github.com/pectoraux/opencon/actions/runs/33670244924) | ✅ success | ✅ success |
+
+4/4 check-runs success at the exact remediation head 15ba1cf;
+`mergeable_state: clean`. (The prior implementation heads 7499464 and
+3f60333 are recorded in §15; the ledger-record head is recorded below
+once CI completes at it.)
+
+### 15.7 CI verification record (the ledger head)
+
+(recorded after this ledger commit is pushed — both event paths at the
+resulting exact head)
 
 ## 16. Review discipline
 

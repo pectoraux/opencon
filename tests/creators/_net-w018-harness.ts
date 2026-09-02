@@ -40,8 +40,10 @@ import {
   creatorCtx as w017CreatorCtx,
   operatorCtx as w017OperatorCtx,
   personCtx as w017PersonCtx,
+  type NetW008HarnessOptions,
   type NetW017Harness,
 } from "./_net-w017-harness.ts";
+export type { NetW008HarnessOptions };
 import { createExecutionContext } from "../../src/core/execution-context.ts";
 import type { ExecutionContext } from "../../src/core/execution-context.ts";
 import { policyActionFor } from "../../src/core/workflow.ts";
@@ -77,8 +79,18 @@ const GUARD_ACTIONS = [
   "creators.publications.verify",
 ];
 
-export async function createNetW018Harness(): Promise<NetW018Harness> {
-  const w017 = await createNetW017Harness();
+export async function createNetW018Harness(
+  opts: NetW008HarnessOptions = {},
+): Promise<NetW018Harness> {
+  // NET-W035 test-harness adjustment (declared in the W035 evidence
+  // ledger's changed-file policy): forward the PRE-EXISTING
+  // NetW008HarnessOptions (the W015/W016/W017 chain already threads
+  // them down to createRuntime) so the W035 composition harness can
+  // wire the REAL measurement provider registry (the NET-W006
+  // createRuntime option) + the NET-W030 external-settlement trust
+  // keys. Tests-only; no production source is touched — the same
+  // pattern as the NET-W034 measurement threading.
+  const w017 = await createNetW017Harness(opts);
   const runtime = w017.runtime;
   const bootstrapCtx = w017.bootstrapCtx;
 
