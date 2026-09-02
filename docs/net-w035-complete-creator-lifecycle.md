@@ -287,9 +287,9 @@ Names may differ where existing conventions require it. The acceptance criteria 
 
 ## 15. Verification record (delivered)
 
-Implementation PR: (assigned on push — recorded in §15.5)
+Implementation PR: #73
 Implementation branch: feat/net-w035-complete-creator-lifecycle
-Reviewed head: (recorded after push — see §15.5)
+Reviewed head: 749946474606e6ee534f5b1d621fd1c337f4b2e0
 Merge SHA: (pending architect approval)
 
 Changed files: 15 (12 new test files + 1 new regression suite + 1 modified TEST harness + this ledger)
@@ -304,8 +304,8 @@ Targeted mutations: 12/12 caught; byte-identical restoration: PASS (driver `open
 Real PostgreSQL + Redis: 17 pass / 0 fail (PG 17 on 127.0.0.1:55432 + Redis 7.2.5 on 127.0.0.1:56379)
 Real creator provider round-trip: 23 checks / 23 passed (a DEDICATED round-trip database, dropped afterwards — see §15.2)
 Secret scan: PASS (the AC-10 regression pin over the whole W035 artifact set)
-CI push exact-head: run (recorded after push — §15.5)
-CI pull_request exact-head: run (recorded after push — §15.5)
+CI push exact-head: run 33665390333 — verify + integration both SUCCESS (head 7499464)
+CI pull_request exact-head: run 33665447181 — verify + integration both SUCCESS (head 7499464; 4/4 check-runs success, mergeable_state clean)
 
 Traversal witnesses: the 30 ordered stage witnesses (§15.3) over BOTH authoritative lifecycle subjects (engagement v0 DRAFT → v5 VERIFIED; contribution v0 DRAFT → v4 SUBMITTED → v5 MEASURING → v10 VERIFIED)
 Durable audit markers: 33 canonical markers in strictly ascending audit positions (the full-path scenario suite) + 31 in the real round-trip
