@@ -71,8 +71,8 @@ W019, W020, W021, W022, W023 — **COMPLETE**.
 - W032 — **COMPLETE**. PR #66 merged `a65bfdbd967ab6a606757a49538aa184f6838480`. Decentralized validation/dispute coordination inside `/disputes`: scoped validator participants, deterministic assignment and conflict exclusion, versioned count-based quorum, immutable challenge rounds/rechallenge, evidence-backed independent observations, settlement-only validator stakes, and owning-authority application. Architect review initially found an idempotent-replay ordering defect; the same PR remediated it across all audited W032 mutations, adding temporal replay regressions and mutation coverage. Final remediation head `fe2c9001753a3bacac553fed953103005e1e4b59` passed the full gate before merge.
 
 ### Phase 9 — End-to-end proof
-- W033 — **CURRENT IMPLEMENTATION TARGET**. Complete contribution lifecycle: contribution → evidence → outcome → reputation → settlement → benefit.
-- W034 — **PLANNED**. Complete advertising lifecycle: advertiser → inventory/creator → measurement → Proof-of-Value → settlement.
+- W033 — **COMPLETE**. PR #68 merged `92482c6ea3b3dc18f8286d37b9c6236f9ef1c001`. Final reviewed head `476b57971a06a9e74d1545fa30824904cbc2359b`. The complete contribution traversal is proven in executable order: sanctioned `/workflows` publication to SUBMITTED, MEASURING point, `/evidence` + `/outcomes`, PoH evaluation, lifecycle completion to VERIFIED, reputation, settlement, then benefits. The same PR remediated initial sequencing drift and added deterministic traversal/audit-order witnesses.
+- W034 — **CURRENT IMPLEMENTATION TARGET**. Complete advertising lifecycle composition proof: advertiser/campaign → inventory/creator supply → measurement → Evidence/Proof-of-Value → applicable risk/privacy controls → settlement.
 - W035 — **PLANNED**. Complete creator lifecycle: creator discovery → contract → UGC → disclosure → measurement → payment.
 - W036 — **PLANNED**. Complete demand/procurement/benefit lifecycle: demand → supplier → fulfillment → verified savings → benefit allocation.
 
@@ -90,11 +90,11 @@ W014/W018/W023/W028 → W033 → W034 → W035
 W028/W033 → W036
 ```
 
-## W032 merge record
+## W033 merge record
 
-W032 is now merged and closes the decentralized-validation layer for v1.0. The architectural interpretation of “decentralized” remains independent validation participants plus deterministic quorum/dispute coordination inside `/disputes`, not a second source of truth, blockchain, token economy, or network consensus protocol. Validators cannot directly rewrite lifecycle, reputation, evidence, or economic authority; accepted outcomes cross the owning authority's explicit mutation boundary. `/settlement` remains the sole economic authority and `/workflows` the sole lifecycle authority.
+W033 is merged and closes the first Phase-9 composition milestone for the contribution side. The implementation deliberately added no new source-domain authority: the final scenario uses existing owning boundaries and proves the declared executable order with authoritative contribution state/version witnesses plus durable audit order. The final merge is PR #68 at `92482c6ea3b3dc18f8286d37b9c6236f9ef1c001` (reviewed head `476b57971a06a9e74d1545fa30824904cbc2359b`).
 
-The final W032 evidence record is `docs/net-w032-decentralized-validation-dispute.md` and the implementation PR is #66.
+The final W033 evidence record is `docs/net-w033-complete-contribution-lifecycle.md`.
 
 ## Operating procedure
 
