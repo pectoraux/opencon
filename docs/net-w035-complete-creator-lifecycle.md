@@ -544,7 +544,20 @@ blockers in the canonical proof path's deterministic-fixture contract
 
 ### 15.6 CI verification record (the remediation heads)
 
-(recorded after push — both event paths at the exact heads)
+| Head | Event | Run | Verify | Integration |
+|---|---|---|---|---|
+| `15ba1cf` (remediation) | push | [33670240066](https://github.com/pectoraux/opencon/actions/runs/33670240066) | ✅ success | ✅ success |
+| `15ba1cf` (remediation) | pull_request | [33670244924](https://github.com/pectoraux/opencon/actions/runs/33670244924) | ✅ success | ✅ success |
+
+4/4 check-runs success at the exact remediation head 15ba1cf;
+`mergeable_state: clean`. (The prior implementation heads 7499464 and
+3f60333 are recorded in §15; the ledger-record head is recorded below
+once CI completes at it.)
+
+### 15.7 CI verification record (the ledger head)
+
+(recorded after this ledger commit is pushed — both event paths at the
+resulting exact head)
 
 ## 16. Review discipline
 
