@@ -49,8 +49,8 @@ The entire W033 artifact set is composition tests (`tests/contribution-lifecycle
 - Secret scan — **CLEAN** (no key material in the W033 surface; `REQUIRED_IN_PRODUCTION` unchanged: `DATABASE_URL`, `REDIS_URL`, `OBJECT_STORAGE_BUCKET`; no new secret/config surface)
 - Real PostgreSQL 17 + Redis integration (locally provisioned, the CI service-container equivalents): `PG_TEST_DATABASE_URL=postgres://…:55432/opencon_test REDIS_TEST_URL=redis://…:56379 bun test tests/integration/` — **17 pass / 0 fail**
 - W033 real-PG end-to-end round-trip (`opencon-tmp-w033/real-pg-roundtrip.ts`, never committed): a DEDICATED round-trip database + a staging-classified runtime (the REAL provider-selection path — PostgresAuthorityAdapter + RedisCoordinationAdapter, no shims) + the same seeded guard/policy surface the W008→W028 harness chain builds + ONE contribution through the complete canonical chain — the terminal state verified (contribution VERIFIED v10, PoV VERIFIED, measured outcome VERIFIED, both reputation inputs verified-basis, value CONSUMED 100, the benefit allocation 100 across 3 members in minor units), 10 ordered transition audit events + the maturation/allocation events, global conservation over the 8 real ledger entries, the exhausted-pool fresh-key allocation failing closed — **ALL CHECKS PASSED**; the round-trip database dropped afterwards
-- CI push event — **TBD (verified at PR time)**
-- CI pull_request event — **TBD (verified at PR time)**
+- CI push event — **PASS** (run 33599585281: verify + integration, both jobs success, head `b4ccca1`)
+- CI pull_request event — **PASS** (run 33599621567: verify + integration, both jobs success, head `b4ccca1`) — the PR #68 checks: 4/4 check-runs `success`
 
 ## Required design decisions to close before merge — CLOSED
 
@@ -78,7 +78,7 @@ All decisions reuse existing contracts — no missing primitive was discovered (
 
 ## Implementation evidence
 
-Implementation PR: TBD  
+Implementation PR: #68 (the single W033 PR — head `b4ccca1`)  
 Reviewed head: TBD  
 Architect review: TBD  
 Merge SHA: TBD
