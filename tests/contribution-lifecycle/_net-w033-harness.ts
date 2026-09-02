@@ -15,14 +15,27 @@
  *    the composed benefit surfaces can also be exercised over HTTP);
  *  - the canonical end-to-end scenario factory
  *    `runCanonicalScenario` — ONE deterministic contribution
- *    traversing the ENTIRE frozen authoritative chain:
+ *    traversing the ENTIRE frozen authoritative chain IN the
+ *    canonical executable order (the PR #68 architect-remediation
+ *    decision of record: publication and the lifecycle walk come
+ *    FIRST — the /evidence and /outcomes stages run only AFTER the
+ *    lifecycle has reached the MEASURING point, and the walk
+ *    completes VERIFIED before reputation/settlement/benefits):
  *
- *      opportunity → contribution → /workflows lifecycle →
- *      /evidence Proof-of-Value → /outcomes measurement →
- *      /reputation → /settlement pending/mature → /benefits
+ *      opportunity → contribution (DRAFT)
+ *      → /workflows publication (… → SUBMITTED)
+ *      → /workflows SUBMITTED → MEASURING (the measurement point)
+ *      → /evidence Proof-of-Value (VERIFIED while MEASURING)
+ *      → /outcomes measurement (VERIFIED while MEASURING)
+ *      → PoH evaluation (QUALIFIED while MEASURING)
+ *      → /workflows walk completion (MEASURING → … → VERIFIED)
+ *      → /reputation → /settlement pending/mature → /benefits
  *
  *    with fixed evaluation anchors (OCCURRED_AT / REFERENCE_AT —
- *    never a wall clock) and every durable identifier returned.
+ *    never a wall clock), every durable identifier returned, and an
+ *    ordered `traversal` witness (the authoritative contribution
+ *    state + version at EVERY stage boundary) proving the canonical
+ *    traversal order — not just the eventual end state.
  *
  * W033 adds NO source file, domain, authority or state machine: this
  * harness is pure test composition over the existing contracts.
@@ -188,6 +201,26 @@ export function personCtx(
 // authoritative chain, with every durable identifier returned.
 // ---------------------------------------------------------------------------
 
+/**
+ * One canonical-traversal stage witness: the AUTHORITATIVE
+ * contribution state + version read through the owning boundary
+ * (`contributionService.getContribution`) at the moment the named
+ * scenario stage completed. The contribution version increments on
+ * every /workflows lifecycle mutation (v0 DRAFT → v4 SUBMITTED →
+ * v5 MEASURING → v10 VERIFIED) and nothing else moves it, so the
+ * witness array is a strictly deterministic ordering proof: a stage
+ * witnessed at version N ran after every lifecycle mutation below
+ * N and before every mutation above it.
+ */
+export interface TraversalStageWitness {
+  /** The scenario stage that just completed. */
+  readonly stage: string;
+  /** The contribution's authoritative lifecycle state at the boundary. */
+  readonly contributionState: string;
+  /** The contribution's authoritative version at the boundary. */
+  readonly contributionVersion: number;
+}
+
 export interface CanonicalScenario {
   // Stage 1 — opportunity / contribution (AC-01)
   readonly campaignId: string;
@@ -222,6 +255,14 @@ export interface CanonicalScenario {
     readonly totalAllocated: number;
     readonly draw: unknown;
   };
+  /**
+   * The ordered canonical traversal witnesses — one per stage
+   * boundary, in executable order (the PR #68 remediation's
+   * ordering proof: publication + the MEASURING lifecycle point are
+   * witnessed BEFORE the /evidence and /outcomes stages, and the
+   * completed VERIFIED walk before reputation/settlement/benefits).
+   */
+  readonly traversal: readonly TraversalStageWitness[];
 }
 
 export interface RunCanonicalScenarioOptions {
@@ -236,10 +277,14 @@ export interface RunCanonicalScenarioOptions {
 
 /**
  * The canonical deterministic scenario: ONE helpful contribution
- * traversing every authority in the frozen order. Every step runs
- * through the OWNING boundary (service or composition-root composite)
- * — never a direct repository write. Returns every durable identifier
- * in the lineage.
+ * traversing every authority in the frozen order — publication and
+ * the /workflows lifecycle FIRST, the /evidence and /outcomes stages
+ * at the MEASURING lifecycle point, the walk completed to VERIFIED
+ * before reputation/settlement/benefits. Every step runs through
+ * the OWNING boundary (service or composition-root composite) —
+ * never a direct repository write. Returns every durable identifier
+ * in the lineage plus the ordered traversal witnesses (the
+ * executable-order proof).
  */
 export async function runCanonicalScenario(
   harness: NetW033Harness,
@@ -267,31 +312,74 @@ export async function runCanonicalScenario(
     },
   );
 
-  // -- Stage 3a: the ATTESTED evidence basis for the PoH.
+  // The canonical traversal witness — the AUTHORITATIVE contribution
+  // state + version read through the owning boundary after every
+  // stage completes (see TraversalStageWitness: the deterministic
+  // executable-order proof the PR #68 remediation requires).
+  const traversal: TraversalStageWitness[] = [];
+  const witness = async (stage: string): Promise<void> => {
+    const current = await runtime.contributionService.getContribution(
+      ctx,
+      contribution.id,
+    );
+    traversal.push({
+      stage,
+      contributionState: current.state,
+      contributionVersion: current.version,
+    });
+  };
+  await witness("contribution-created"); // DRAFT v0.
+
+  // -- Stage 2a: the PUBLICATION composite — the sanctioned
+  //    contribution submission (DRAFT → READY → ASSIGNED →
+  //    IN_PROGRESS → SUBMITTED through /workflows, with the
+  //    user-controlled publication gate + recordPublication).
+  //    CANONICAL ORDER: this runs BEFORE every downstream
+  //    /evidence and /outcomes stage.
+  await publishHelpfulContribution(harness.w014.w012, contribution.id);
+  await witness("contribution-submitted"); // SUBMITTED v4.
+
+  // -- Stage 2b: the lifecycle reaches the MEASUREMENT point through
+  //    /workflows (SUBMITTED → MEASURING) — the intended lifecycle
+  //    point at which the downstream /evidence and /outcomes stages
+  //    execute (work order §2: /workflows precedes /evidence and
+  //    /outcomes; the declared requiresEvidenceReference edge
+  //    MEASURING → EVALUATING is entered only after the evidence
+  //    exists).
+  await advanceToMeasuring(harness, contribution.id);
+  await witness("lifecycle-measuring"); // MEASURING v5.
+
+  // -- Stage 3a: the ATTESTED evidence basis for the PoH — created
+  //    through /evidence while the contribution is IN MEASURING.
   const { evidenceId: basisEvidenceId } = await attachEvidenceBasis(
     harness.w014.w012,
     contribution.id,
   );
 
   // -- Stage 3b: the VERIFIED Proof-of-Value (platform + provider
-  //    evidence, an independent attestation, aggregation → VERIFIED).
+  //    evidence, an independent attestation, aggregation → VERIFIED)
+  //    — the /evidence authority, exercised while MEASURING.
   const { proofOfValueId, platformEvidenceId, providerEvidenceId, attestationId } =
     await createVerifiedProofOfValueForSubject(harness, contribution.id);
+  await witness("evidence-pov-verified"); // still MEASURING v5.
 
   // -- Stage 4: the VERIFIED normalized measured outcome — a platform
   //    observation EXPLICITLY LINKED to the PoV's platform evidence
-  //    (evidence lineage), immediate maturation, rollup, finalize.
+  //    (evidence lineage), immediate maturation, rollup, finalize —
+  //    the /outcomes authority, exercised while MEASURING.
   const { observationId, measuredOutcomeId } =
     await createVerifiedMeasuredOutcomeForSubject(
       harness,
       contribution.id,
       platformEvidenceId,
     );
+  await witness("outcome-measured"); // still MEASURING v5.
 
-  // -- Stage 2: the lifecycle walk through /workflows — the
-  //    publication composite (DRAFT → … → SUBMITTED), then the PoH
-  //    evaluation, then the six forward transitions to VERIFIED.
-  await publishHelpfulContribution(harness.w014.w012, contribution.id);
+  // -- Stage 5: the PoH evaluation — the deterministic helpfulness
+  //    gate re-resolves EVERY basis through its truth authority
+  //    while the contribution is IN MEASURING (the engine's
+  //    publication gate requires lifecycle state ≥ SUBMITTED, which
+  //    MEASURING satisfies).
   const poh = await runtime.helpfulnessService.evaluateHelpfulness(ctx, {
     contributionId: contribution.id,
     idempotencyKey: key("w033-poh-eval"),
@@ -301,10 +389,18 @@ export async function runCanonicalScenario(
       `W033 canonical scenario failed: PoH state ${poh.state} (reasons: ${poh.evaluations[poh.evaluations.length - 1]?.reasons.join("; ")})`,
     );
   }
+  await witness("poh-evaluated"); // still MEASURING v5.
+
+  // -- Stage 2c: the lifecycle walk COMPLETES through /workflows —
+  //    the remaining forward transitions MEASURING → EVALUATING →
+  //    CHALLENGE_WINDOW → SETTLING → SETTLED → VERIFIED, entered
+  //    only after every evidence/outcome basis exists and the PoH
+  //    is QUALIFIED.
   const verifiedContribution = await walkToVerified(
     harness,
     contribution.id,
   );
+  await witness("contribution-verified"); // VERIFIED v10.
 
   // -- Stage 5a: the reputation policy (the 8-dimension default rules)
   //    and the DIRECT evidence/outcome-derived reputation input
@@ -332,6 +428,7 @@ export async function runCanonicalScenario(
     occurredAt: OCCURRED_AT,
     idempotencyKey: key("w033-reputation-direct"),
   });
+  await witness("reputation-input-recorded"); // VERIFIED v10.
 
   // -- Stage 6: settlement — the recognition composite (VERIFIED
   //    contribution → PENDING economic value) and the maturation
@@ -341,7 +438,9 @@ export async function runCanonicalScenario(
     contribution.id,
     { amount: opts.amount ?? 100 },
   );
+  await witness("settlement-pending"); // VERIFIED v10 (recognition).
   const matured = await matureValue(harness.w014, recognized.value.id);
+  await witness("settlement-mature"); // VERIFIED v10 (maturation).
 
   // -- Stage 5b: the settlement → reputation join (the sanctioned
   //    composition-root composite over the MATURE record).
@@ -355,6 +454,7 @@ export async function runCanonicalScenario(
       idempotencyKey: key("w033-reputation-effect"),
     },
   );
+  await witness("settlement-reputation-effect"); // VERIFIED v10.
 
   // -- Stage 7: the reputation snapshot at the FIXED reference anchor.
   const snapshotResult = await runtime.reputationSnapshotService.recordSnapshot(
@@ -367,9 +467,11 @@ export async function runCanonicalScenario(
       idempotencyKey: key("w033-reputation-snapshot"),
     },
   );
+  await witness("reputation-snapshot-recorded"); // VERIFIED v10.
 
   if (opts.skipBenefitAllocation === true) {
     return {
+      traversal,
       campaignId: campaign.id,
       opportunityId,
       contribution: verifiedContribution,
@@ -464,8 +566,10 @@ export async function runCanonicalScenario(
       idempotencyKey: key("w033-benefit-allocation"),
     },
   );
+  await witness("benefit-allocated"); // VERIFIED v10.
 
   return {
+    traversal,
     campaignId: campaign.id,
     opportunityId,
     contribution: verifiedContribution,
@@ -610,9 +714,51 @@ export async function createVerifiedMeasuredOutcomeForSubject(
 }
 
 /**
- * Walk a SUBMITTED contribution to the terminal VERIFIED state through
- * the /workflows authority (the six forward transitions — exactly the
- * W014 sequence, with fresh idempotency keys).
+ * Advance a SUBMITTED contribution to the MEASURING lifecycle point
+ * through the /workflows authority (the single SUBMITTED → MEASURING
+ * transition) — the canonical point at which the downstream
+ * /evidence and /outcomes stages execute (work order §2: the
+ * lifecycle precedes /evidence and /outcomes).
+ */
+export async function advanceToMeasuring(
+  harness: NetW033Harness,
+  contributionId: string,
+): Promise<Contribution> {
+  const ctx = harness.contributorCtx("w033-advance-measuring");
+  const current = await harness.runtime.contributionService.getContribution(
+    ctx,
+    contributionId,
+  );
+  if (current.state !== "SUBMITTED") {
+    throw new Error(
+      `W033 canonical scenario failed: expected SUBMITTED at the measurement-point advance, got ${current.state}`,
+    );
+  }
+  await harness.runtime.workflowService.requestTransition(
+    {
+      subjectId: contributionId,
+      subjectKind: "contribution",
+      targetState: "MEASURING",
+      expectedVersion: current.version,
+      idempotencyKey: key("w033-t-measuring"),
+      actorPersonId: harness.contributorPersonId,
+      policyAction: policyActionFor("contribution", "SUBMITTED", "MEASURING"),
+      metadata: { contributionLifecycle: "net-w033" },
+    },
+    ctx,
+  );
+  return harness.runtime.contributionService.getContribution(
+    ctx,
+    contributionId,
+  );
+}
+
+/**
+ * Walk a MEASURING contribution to the terminal VERIFIED state
+ * through the /workflows authority (the remaining forward
+ * transitions MEASURING → EVALUATING → CHALLENGE_WINDOW → SETTLING
+ * → SETTLED → VERIFIED — exactly the W014 sequence tail, with fresh
+ * idempotency keys).
  */
 export async function walkToVerified(
   harness: NetW033Harness,

@@ -4,12 +4,17 @@
  * creation through benefit outcome").
  *
  * ONE canonical contribution traverses the ENTIRE frozen authoritative
- * chain — opportunity → contribution → /workflows lifecycle →
- * /evidence Proof-of-Value → /outcomes measurement → /reputation →
- * /settlement pending/mature → /benefits allocation — through the
- * OWNING boundary at every step, with fixed evaluation anchors, and
- * the end state is globally conserved. The AC suites then pin each
- * authority's composition contract in depth.
+ * chain — opportunity → contribution → /workflows publication →
+ * MEASURING → /evidence Proof-of-Value → /outcomes measurement →
+ * PoH evaluation → /workflows walk completion (VERIFIED) →
+ * /reputation → /settlement pending/mature → /benefits allocation —
+ * through the OWNING boundary at every step, with fixed evaluation
+ * anchors, and the end state is globally conserved. The AC suites
+ * then pin each authority's composition contract in depth, and the
+ * third test below proves the CANONICAL TRAVERSAL ORDER itself
+ * (stage witnesses + the audit commit order) — not just the
+ * eventual end-state lineage (the PR #68 architect-remediation
+ * requirement).
  */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
@@ -180,6 +185,91 @@ describe("NET-W033 full-path scenario (contribution → benefit)", () => {
       resourceId: scenario.allocationId,
     });
     expect(allocationEvents).toHaveLength(1);
+
+    await assertGlobalConservation(
+      harness.w014.w013.w012.w011.w010.w009.w008,
+    );
+  });
+
+  test("the CANONICAL TRAVERSAL ORDER is proven (stage witnesses + the audit commit order)", async () => {
+    const scenario = await runCanonicalScenario(harness);
+
+    // (a) The scenario's ordered stage witnesses: the AUTHORITATIVE
+    // contribution state + version (read through the owning
+    // boundary) at EVERY stage boundary. The contribution version
+    // increments only on /workflows lifecycle mutations (v0 DRAFT →
+    // v4 SUBMITTED → v5 MEASURING → v10 VERIFIED), so this array is
+    // the deterministic executable-order proof: publication
+    // (SUBMITTED v4) and the lifecycle's MEASURING point (v5) are
+    // reached BEFORE the /evidence and /outcomes stages (each
+    // witnessed IN MEASURING at v5 — after five lifecycle mutations
+    // committed, before the sixth), and the walk completes VERIFIED
+    // (v10) before reputation/settlement/benefits.
+    expect(scenario.traversal).toEqual([
+      { stage: "contribution-created", contributionState: "DRAFT", contributionVersion: 0 },
+      { stage: "contribution-submitted", contributionState: "SUBMITTED", contributionVersion: 4 },
+      { stage: "lifecycle-measuring", contributionState: "MEASURING", contributionVersion: 5 },
+      { stage: "evidence-pov-verified", contributionState: "MEASURING", contributionVersion: 5 },
+      { stage: "outcome-measured", contributionState: "MEASURING", contributionVersion: 5 },
+      { stage: "poh-evaluated", contributionState: "MEASURING", contributionVersion: 5 },
+      { stage: "contribution-verified", contributionState: "VERIFIED", contributionVersion: 10 },
+      { stage: "reputation-input-recorded", contributionState: "VERIFIED", contributionVersion: 10 },
+      { stage: "settlement-pending", contributionState: "VERIFIED", contributionVersion: 10 },
+      { stage: "settlement-mature", contributionState: "VERIFIED", contributionVersion: 10 },
+      { stage: "settlement-reputation-effect", contributionState: "VERIFIED", contributionVersion: 10 },
+      { stage: "reputation-snapshot-recorded", contributionState: "VERIFIED", contributionVersion: 10 },
+      { stage: "benefit-allocated", contributionState: "VERIFIED", contributionVersion: 10 },
+    ]);
+
+    // (b) The durable audit commit order: the global append-only log
+    // preserves insertion order (= committed-mutation order; every
+    // material mutation publishes its audit strictly post-commit).
+    // The canonical stage markers appear in EXACTLY the declared
+    // order: publication → the MEASURING lifecycle point → /evidence
+    // (basis, PoV, attestation, aggregation) → /outcomes
+    // (observation, rollup, VERIFIED) → the lifecycle walk
+    // resumption + completion → reputation → settlement → the
+    // settlement→reputation join → benefits.
+    const audit = harness.runtime.auditWriter;
+    const log = await audit.query({ limit: 1_000_000 });
+    const pos = (eventType: string, resourceId: string): number => {
+      const index = log.findIndex(
+        (e) => e.eventType === eventType && e.resourceId === resourceId,
+      );
+      expect(
+        index,
+        `missing audit event ${eventType} for ${resourceId}`,
+      ).toBeGreaterThanOrEqual(0);
+      return index;
+    };
+    const contributionId = scenario.contribution.id;
+    const markers: readonly [string, string][] = [
+      ["contribution.transition.in_progress_to_submitted", contributionId],
+      ["contribution.transition.submitted_to_measuring", contributionId],
+      ["evidence.created", scenario.basisEvidenceId],
+      ["proof_of_value.created", scenario.proofOfValueId],
+      ["attestation.created", scenario.attestationId],
+      ["proof_of_value.aggregated", scenario.proofOfValueId],
+      ["outcome_observation.created", scenario.observationId],
+      ["measured_outcome.rollup_recorded", scenario.measuredOutcomeId],
+      ["outcome_measurement.transition.measuring_to_verified", scenario.measuredOutcomeId],
+      ["contribution.transition.measuring_to_evaluating", contributionId],
+      ["contribution.transition.settled_to_verified", contributionId],
+      ["reputation_input.recorded", scenario.directInputId],
+      ["economic_value.recorded", scenario.value.id],
+      ["economic_value.matured", scenario.value.id],
+      ["reputation_input.recorded", scenario.settlementEffectInputId],
+      ["benefits_pool.allocation_recorded", scenario.allocationId],
+    ];
+    const positions = markers.map(([eventType, resourceId]) =>
+      pos(eventType, resourceId),
+    );
+    for (let i = 1; i < positions.length; i += 1) {
+      expect(
+        positions[i]! > positions[i - 1]!,
+        `canonical audit order violated at marker ${String(i)} (${markers[i]![0]} for ${markers[i]![1]})`,
+      ).toBe(true);
+    }
 
     await assertGlobalConservation(
       harness.w014.w013.w012.w011.w010.w009.w008,
