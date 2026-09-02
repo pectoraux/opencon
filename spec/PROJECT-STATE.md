@@ -15,23 +15,23 @@
 
 ### Last merged work item
 
-**NET-W033 — Complete contribution lifecycle**
+**NET-W034 — Complete advertising lifecycle**
 
-- GitHub issue: #67 — completed by merged PR #68
-- PR: #68 — squash-merged
-- Final reviewed head: `476b57971a06a9e74d1545fa30824904cbc2359b`
-- Merge SHA: `92482c6ea3b3dc18f8286d37b9c6236f9ef1c001`
+- GitHub issue: #69 — completed by merged PR #70
+- PR: #70 — squash-merged
+- Final reviewed head: `f66cb4f380afde56ed23716453a297d0280b2411`
+- Merge SHA: `7c19a19addd44a07965fa25ee7cab021bab2016a`
 - Status: MERGED
 - Architectural decision: APPROVED after same-PR remediation.
-- Scope: composition/evidence milestone only; no new source implementation, domain, authority, vocabulary, state machine, crypto or economic primitive.
-- Canonical executable order proven by the scenario: contribution creation → sanctioned publication through `/workflows` to SUBMITTED → `/workflows` SUBMITTED→MEASURING → `/evidence` PoV/bases → `/outcomes` measurement → PoH evaluation → `/workflows` completion to VERIFIED → reputation → settlement pending/mature → benefits.
-- The remediation was required because the first PR implementation created evidence/outcome artifacts before the lifecycle had reached the intended MEASURING point. The same branch reordered the scenario and added deterministic traversal/audit-order witnesses; no owning-boundary gate was bypassed.
-- Final verification recorded in the W033 ledger: `bun run verify` 2170 pass / 15 skip / 0 fail; `arch:check` + `authority:check` 322 files / 0 violations; 9/9 targeted behavioral mutations caught and sources restored byte-identically; real PostgreSQL + Redis integration 17/0; real-PG end-to-end round-trip passed; current-head CI green on push and pull_request paths.
-- Two unrelated pre-existing wall-clock flakes in legacy W027/W030 suites were transparently recorded and re-run successfully; they were not folded into the W033 composition-only scope.
+- Scope: Phase-9 advertising composition/evidence milestone; no new production domain, authority, ledger, workflow engine, cryptographic primitive, AI authority or frozen-architecture amendment.
+- Canonical executable order proven: campaign/policy → supply/provenance → W021 selection → placement → campaign opportunity → contribution entry/publication → `/workflows` MEASURING → W022 measurement → `/outcomes` → `/evidence` Proof-of-Value → PoH evaluation → `/workflows` completion to VERIFIED → risk/dispute gates → `/settlement` pending/mature → declared campaign clearing.
+- The architect initially requested changes because the first AC-09 fault fixture pre-consumed the value out-of-band and therefore proved only stale-state fail-closed behavior, not rollback of a partially staged clearing transaction. The same PR remediated this with a genuine composite-level commit-failure proof over the actual W020 clearing composite, and replaced the dispute fixture's `Date.now()` anchor with the authoritative subject timestamp.
+- Final W034 verification recorded in the ledger: `bun run verify` 2258 pass / 15 skip / 0 fail; `arch:check` + `authority:check` 322 files / 0 violations; 12/12 targeted behavioral mutations caught with byte-identical source restoration; real PostgreSQL + Redis integration 17/0; real-provider advertising round-trip 11/11 on a freshly recreated dedicated database; exact-head CI green on push and pull_request; no production `src/` changes.
+- The clean dedicated round-trip reported 26 real ledger entries rather than an earlier 46-entry run because the earlier database contained 20 residual entries from a prior development iteration; conservation held in the clean run and the discrepancy was explicitly documented rather than hidden.
 
 ### Previous completed milestones
 
-NET-W001 through NET-W033 are complete and merged.
+NET-W001 through NET-W034 are complete and merged.
 
 Important lineage checkpoints:
 - W004 `/workflows` lifecycle authority
@@ -61,33 +61,35 @@ Important lineage checkpoints:
 - W031 portable reputation proofs
 - W032 decentralized validation/dispute coordination inside `/disputes`
 - W033 complete contribution lifecycle composition proof
+- W034 complete advertising lifecycle composition proof
 
 ## Next implementation target
 
-**NET-W034 — Complete advertising lifecycle**
+**NET-W035 — Complete creator lifecycle**
 
-- GitHub issue: #69 — OPEN
-- Status: READY_FOR_IMPLEMENTATION
-- Branch: `feat/net-w034-complete-advertising-lifecycle`
-- Dependencies: NET-W020, NET-W021, NET-W022, NET-W023, NET-W033 — VERIFIED/MERGED
-- Requirements/scope: prove advertiser → inventory/creator supply → measurement → Evidence/Proof-of-Value → applicable risk/privacy controls → settlement using only existing authorities.
-- Work order: author `spec/work-orders/NET-W034.md` before coding.
-- Evidence ledger: author `docs/net-w034-complete-advertising-lifecycle.md` before coding.
+- GitHub issue: #70-equivalent backlog target (create/confirm canonical issue before activation)
+- Status: NEXT / DEPENDENCY-READY after W034 merge
+- Branch: to be created from W034 merge SHA `7c19a19addd44a07965fa25ee7cab021bab2016a`
+- Dependencies: NET-W018 + NET-W034 — VERIFIED/MERGED
+- Requirements/scope: prove creator discovery → contract → UGC → disclosure → measurement → payment using existing frozen authorities.
+- Work order: author `spec/work-orders/NET-W035.md` before coding.
+- Evidence ledger: author `docs/net-w035-complete-creator-lifecycle.md` before coding.
 
-W034 is a composition/proof milestone. Do not add a new domain or authority. Campaign policy remains `/campaigns`; inventory/placement/supply semantics remain in the existing frozen boundary; measurement semantics remain `/measurement` + `/outcomes`; evidence/PoV remains `/evidence`; risk remains `/disputes`; economic state remains `/settlement`; provider-specific protocol behavior remains `/adapters`; reputation remains `/reputation` where applicable.
+W035 is a composition/proof milestone. Do not add a new domain or authority. `/creators` remains creator identity/matching/creator-record authority; `/campaigns` remains campaign policy; `/inventory` remains supply/placement; `/workflows` remains lifecycle; `/evidence` remains provenance/PoV; `/outcomes` and `/measurement` remain measurement authority/integration; `/disputes` remains risk/control; `/settlement` remains payment/economic authority; `/adapters` remains provider-specific integration.
 
 Required proof shape:
 
 ```text
-advertiser/campaign
-  → inventory / creator supply
+creator discovery
+  → contract / campaign terms
+  → UGC production / rights
+  → disclosure / compliance
   → measurement
   → evidence / Proof-of-Value
-  → risk/privacy/disclosure gates where applicable
-  → /settlement
+  → settlement / payment
 ```
 
-The exact executable order must be established in the W034 work order and then proven by the scenario; terminal end state alone is insufficient for a traversal milestone.
+The exact executable order must be established in the W035 work order and proven with authoritative state/version and durable audit witnesses; terminal payment alone is insufficient.
 
 ## Review lessons that must persist
 
@@ -142,6 +144,12 @@ Every tamper helper must guarantee a real difference; fixed-prepend character ta
 ### End-to-end traversal proof
 A Phase-9 composition milestone must pin the declared executable order explicitly. Use authoritative state/version witnesses and, where ordering depends on committed mutations, durable audit insertion/commit order. Reorder a scenario on the same PR when the architect identifies sequencing drift; do not weaken the owning-domain gates merely to make the fixture executable.
 
+### Composite transaction-failure proof
+When a work item claims atomicity for a coupled composite, a stale-state rejection is not a rollback proof. The evidence must force failure after material work is staged inside the composite transaction and prove that no economic, bookkeeping, audit or idempotency state survives; then prove a healthy same-key retry commits exactly once.
+
+### Deterministic fixtures
+Canonical end-to-end fixtures must derive policy/window timestamps from fixed anchors or authoritative subject timestamps. Do not introduce fresh `Date.now()` dependencies into proof paths whose semantics are expected to be reproducible.
+
 ## Quality gate
 
 Canonical local gate:
@@ -150,7 +158,7 @@ Canonical local gate:
 bun run verify
 ```
 
-Material work also requires configured real PostgreSQL/Redis integration. Architectural work requires `arch:check` and `authority:check`; material trust/integrity work requires targeted mutation checks and secret scanning. W034 must additionally include a real end-to-end advertising round-trip over the actual provider-selection path.
+Material work also requires configured real PostgreSQL/Redis integration. Architectural work requires `arch:check` and `authority:check`; material trust/integrity work requires targeted mutation checks and secret scanning. Phase-9 composition milestones additionally require a real end-to-end round-trip over the actual provider-selection path.
 
 ## GitHub workflow state machine
 
@@ -177,4 +185,4 @@ Never merge merely because CI is green. Never create a second implementation PR 
 
 ## Current action
 
-Activate **NET-W034** from issue #69 and `spec/work-orders/NET-W034.md` on `feat/net-w034-complete-advertising-lifecycle`. First author the work order and evidence ledger, re-read the frozen architecture/lock, roadmap, backlog and dependency graph, then inspect the W019–W023 authorities and the W033 traversal-proof precedent. Implement exactly one composition/proof PR. Do not introduce W035/W036 behavior or alter frozen architecture.
+W034 is merged and architect-approved. Confirm/create the canonical NET-W035 issue from `spec/work-items.md`, then author `spec/work-orders/NET-W035.md` and `docs/net-w035-complete-creator-lifecycle.md` on a branch created from merge SHA `7c19a19addd44a07965fa25ee7cab021bab2016a`. Read the frozen architecture/lock, dependency graph, W018, W033 and W034 evidence/work orders before implementation. Do not introduce W036 behavior or alter frozen architecture.
