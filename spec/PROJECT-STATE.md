@@ -15,39 +15,32 @@
 
 ### Last merged work item
 
-**NET-W035 — Complete creator lifecycle**
+**NET-W036 — Complete demand/procurement/benefit lifecycle**
 
-- Issue: #71 — completed
-- Implementation PR: #73 — squash-merged
-- Final reviewed head: `eaf19bd9292a1c924cf7a8e6d086838369a5affc`
-- Merge SHA: `85e5d6d7b8ff1df2fda4740fdd1f541890496610`
-- Architectural decision: APPROVED after same-PR remediation.
-- Final evidence: `bun run verify` 2330 pass / 15 skip / 0 fail; architecture + authority 322/0; targeted mutations 16/16 caught with byte-identical restoration; real PostgreSQL + Redis 17/17; real-provider creator round-trip 23/23; exact-head CI green; no production `src/` changes.
-- Determinism remediation closed the canonical rights/evidence wall-clock blockers and made payment identity deterministic; AC-09 retained genuine composite commit-failure rollback plus healthy same-key exactly-once retry.
+- Issue: #75 — completed
+- Implementation PR: #81 — squash-merged
+- Final reviewed head: `d795b12b3db26c56593357fc8e2da62295c3e8bb`
+- Merge SHA: `e7e858e6f5734cf4be0a95b287e6b736f50f3287`
+- Architectural decision: APPROVED at the exact reviewed head; merged with exact-head CI green on both the push and pull_request event paths.
+- Final evidence: `bun run verify` 2404 pass / 15 skip / 0 fail (2419 tests / 312 files / 34,225 expect() calls); architecture + authority 322 files / 0 violations; targeted mutations 17/17 caught with byte-identical restoration; real PostgreSQL + Redis 17/17; real provider-selection round-trip 26/26 (run twice); secret scan PASS; no production `src/` changes; frozen architecture byte-identical.
+- Traversal proof: the full 17-stage witness sequence (demand-pool-resolved → aggregate-disclosure-gated → qualified-demand-resolved → supplier-offers-recorded → supplier-eligibility-evaluated → competitive-selection-committed → fulfillment-entered-sanctioned → execution-state-observed → realized-outcome-normalized → baseline-counterfactual-resolved → savings-verified-pov-qualified → settlement-value-recognized-pending → risk-dispute-controls-exercised → value-matured → benefit-funding-reference-resolved → benefit-allocation-committed → lineage-reconstruction-completed), each with owning authority and durable record id, plus the fulfillment contribution's authoritative state/version ladder (ASSIGNED v2 → IN_PROGRESS v3 → MEASURING v5 → VERIFIED v10) and 44 strictly-ascending durable audit markers from `procurement_pool.created` to `benefits_pool.allocation.recorded`.
+- Determinism record: the W036 harness contains zero wall-clock/random code tokens (regression-pinned); the baseline comparison window is derived from the pool's authoritative server-set `createdAt` via pure ISO day arithmetic; all fixture anchors are fixed constants; all canonical idempotency keys are fixed `w036-*` strings.
+- Evidence ledger: `docs/net-w036-complete-demand-procurement-benefit-lifecycle.md` — merged as delivered.
 
 ### Previous completed milestones
 
-NET-W001 through NET-W035 are complete and merged.
+NET-W001 through NET-W036 are complete and merged.
 
-Key authority lineage: W004 workflows; W005 evidence; W006 outcomes/measurement; W008 settlement; W009/W010 disputes; W011 campaigns; W015/W016 creators; W017 rights; W018 disclosure; W019 inventory; W020 clearing; W021 matching; W022 attribution/privacy; W023 supply-chain; W024–W028 demand/procurement/savings/benefits; W029 attestations; W030 external settlement; W031 reputation proofs; W032 decentralized dispute coordination; W033 contribution E2E; W034 advertising E2E; W035 creator E2E.
+Key authority lineage: W004 workflows; W005 evidence; W006 outcomes/measurement; W008 settlement; W009/W010 disputes; W011 campaigns; W015/W016 creators; W017 rights; W018 disclosure; W019 inventory; W020 clearing; W021 matching; W022 attribution/privacy; W023 supply-chain; W024–W028 demand/procurement/savings/benefits; W029 attestations; W030 external settlement; W031 reputation proofs; W032 decentralized dispute coordination; W033 contribution E2E; W034 advertising E2E; W035 creator E2E; W036 demand/procurement/benefit E2E.
 
 ## Next implementation target
 
-**NET-W036 — Complete demand/procurement/benefit lifecycle**
+**None — the canonical backlog terminates at NET-W036.**
 
-- Canonical issue: #75 — OPEN, `ready-for-implementation`
-- Duplicate transition issues #74, #76, #77 are closed as `duplicate`; temporary stop issue #78 is closed `not_planned`; #75 is the sole authoritative W036 issue.
-- Documentation preparation PR: #80 — squash-merged `6d02bcea0b335dd8b8ea71a7316d40f922e38fe9`
-- Work order: `spec/work-orders/NET-W036.md` — merged and frozen
-- Evidence ledger: `docs/net-w036-complete-demand-procurement-benefit-lifecycle.md` — merged and frozen
-- Implementation branch: `feat/net-w036-complete-demand-procurement-benefit-lifecycle`
-- Implementation branch base: W035 merge SHA `85e5d6d7b8ff1df2fda4740fdd1f541890496610`
-- Dependencies: NET-W028 + NET-W033 — VERIFIED/MERGED
-- Scope: demand aggregation → privacy-safe qualified demand → supplier offers/hard eligibility/deterministic selection → fulfillment lifecycle → measurement/outcomes → W027 baseline/counterfactual → verified savings/PoV → `/settlement` → W028 benefit funding/deterministic allocation.
-
-W036 is composition/proof-only. `/demand` owns demand pools/offers/selection; `/workflows` owns lifecycle; `/measurement` + `/outcomes` own measurement integration/semantics; W027 owns savings/baseline/counterfactual; `/evidence` owns provenance/PoV; `/settlement` owns all economic state; `/benefits` owns benefit-pool/allocation semantics; `/adapters` owns provider-specific facts. Do not create a second ledger, lifecycle engine, savings authority, benefit authority or W037 behavior.
-
-The W036 executable order must be proven with authoritative state/version witnesses and durable audit ordering, not merely a local test array or terminal allocation.
+- `spec/work-items.md` defines no work item after NET-W036, and the canonical dependency sequence ends at `W028/W033 → W036`.
+- Phases 1–9 are all COMPLETE. There is no authorized next work item.
+- Do not fabricate a W037 issue, work order, branch, PR or behavior. The standing "no W037 behavior / no second authority / no architecture amendment" prohibitions recorded in the W036 work order and evidence ledger remain in force.
+- The next valid action, if the program continues, is an architect-authored canonical backlog amendment: a new work item defined in `spec/work-items.md` and `spec/dependency-graph.md`, with frozen acceptance criteria, before any implementation branch or PR exists. A seventeenth domain boundary additionally requires an Architecture Change Request and a new architecture version per the program invariant.
 
 ## Review lessons that must persist
 
@@ -100,4 +93,4 @@ same PR        ↓
 
 ## Current action
 
-W035 is complete. W036 is the active implementation target. Its canonical work order and evidence ledger are frozen on `main`, and the implementation branch `feat/net-w036-complete-demand-procurement-benefit-lifecycle` is rooted directly at W035 merge SHA `85e5d6d7b8ff1df2fda4740fdd1f541890496610`. The implementation agent should now implement exactly one W036 PR under `spec/work-orders/NET-W036.md`, with any architect remediation staying on that same PR/branch. Do not introduce W037 behavior or amend frozen architecture.
+W036 is complete and merged: PR #81 at merge SHA `e7e858e6f5734cf4be0a95b287e6b736f50f3287`, from architect-approved reviewed head `d795b12b3db26c56593357fc8e2da62295c3e8bb`, with issue #75 completed. The canonical backlog terminates at W036: every work item W001–W036 is merged and verified, and there is no authorized next work item. Do not open new implementation branches or PRs, and do not fabricate W037 issues or behavior. If work resumes, it must begin with an architect-authored backlog amendment that defines the next canonical work item, its dependencies and its acceptance criteria first. Until then, the repository is at its terminal state.

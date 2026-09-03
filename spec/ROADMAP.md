@@ -1,7 +1,7 @@
 # OpenCon Persistent Roadmap
 
 **Architecture:** Open Contribution Protocol Architecture v1.0  
-**Status:** Frozen architecture / approved requirements; implementation progressing by sequential NET-W work items  
+**Status:** Frozen architecture / approved requirements; all canonical work items W001–W036 complete — backlog terminal at NET-W036  
 **Canonical backlog:** `spec/work-items.md`  
 **Canonical dependency graph:** `spec/dependency-graph.md`  
 **Canonical frozen constraints:** `spec/architecture.md`, `spec/architecture-lock.md`  
@@ -68,7 +68,7 @@ W029, W030, W031, W032 — **COMPLETE**.
 - W033 — **COMPLETE**. PR #68 merged `92482c6ea3b3dc18f8286d37b9c6236f9ef1c001`; final reviewed head `476b57971a06a9e74d1545fa30824904cbc2359b`. Complete contribution traversal proved in executable order with authoritative state/version witnesses and durable audit ordering; initial sequencing drift was remediated on the same PR.
 - W034 — **COMPLETE**. PR #70 squash-merged `7c19a19addd44a07965fa25ee7cab021bab2016a`; final reviewed head `f66cb4f380afde56ed23716453a297d0280b2411`. Advertising traversal proved campaign/policy → supply/provenance → W021 selection → placement → lifecycle → MEASURING → real W022 measurement → outcomes → evidence/PoV → workflow completion → risk/dispute → settlement pending/mature → clearing. The same PR remediated the AC-09 fault proof into a genuine composite commit-failure rollback and replaced a wall-clock dispute fixture anchor.
 - W035 — **COMPLETE**. PR #73 squash-merged `85e5d6d7b8ff1df2fda4740fdd1f541890496610`; final reviewed head `eaf19bd9292a1c924cf7a8e6d086838369a5affc`. Creator traversal proved discovery/matching → terms → W017 acceptance/UGC/rights → W018 disclosure/compliance → MEASURING → real W022 measurement → outcomes → evidence/PoV → workflow completion → risk/dispute → settlement → W030 external payment. Architect CHANGES REQUESTED on determinism was remediated on the same PR with fixed/authoritative timestamps, deterministic payment identity, a mechanical regression pin and additional mutation coverage. Final evidence: 2330 pass / 15 skip / 0 fail, 322/0 architecture+authority violations, 16/16 targeted mutations caught with byte-identical restoration, real PostgreSQL/Redis 17/17, real-provider round-trip 23/23, exact-head CI green, no production `src/` changes.
-- W036 — **CURRENT IMPLEMENTATION TARGET**. Canonical issue #75: Complete demand/procurement/benefit lifecycle. Documentation preparation PR #80 squash-merged `6d02bcea0b335dd8b8ea71a7316d40f922e38fe9`. Frozen work order: `spec/work-orders/NET-W036.md`. Frozen evidence ledger: `docs/net-w036-complete-demand-procurement-benefit-lifecycle.md`.
+- W036 — **COMPLETE**. PR #81 squash-merged `e7e858e6f5734cf4be0a95b287e6b736f50f3287`; final reviewed head `d795b12b3db26c56593357fc8e2da62295c3e8bb`; issue #75 completed. Demand/procurement/benefit traversal proved demand pool → aggregate disclosure gate → qualified demand → supplier offers/hard eligibility/deterministic selection → sanctioned fulfillment lifecycle → measurement/outcomes → W027 baseline/counterfactual → verified savings/PoV → settlement → W028 benefit funding/deterministic allocation, with the 17-stage witness sequence, authoritative state/version ladder, 44 strictly-ascending durable audit markers, 17/17 targeted mutations caught with byte-identical restoration, real PostgreSQL/Redis 17/17, real provider round-trip 26/26, and exact-head CI green on both event paths. **Phase 9 and the canonical backlog are complete.**
 
 ## Dependency sequence
 
@@ -90,25 +90,17 @@ W035 is merged and closes the creator-side Phase-9 composition milestone. The im
 
 The W035 evidence record is `docs/net-w035-complete-creator-lifecycle.md`. The same-PR determinism remediation is part of the durable evidence record.
 
-## W036 implementation freeze
+## W036 merge record
 
-NET-W036 is the final Phase-9 demand/procurement/benefit composition proof. The frozen execution contract is:
+W036 is merged and closes the demand/procurement/benefit Phase-9 composition milestone and, with it, the canonical backlog. Final merge is PR #81 at `e7e858e6f5734cf4be0a95b287e6b736f50f3287`, from the architect-approved reviewed head `d795b12b3db26c56593357fc8e2da62295c3e8bb`. The implementation remained composition/proof-only with no production `src/` changes and no architecture amendment.
 
-```text
-demand pool
-→ privacy-safe qualified demand
-→ supplier offers / hard eligibility / deterministic selection
-→ fulfillment lifecycle
-→ measurement / outcomes
-→ supported baseline / counterfactual
-→ evidence / Proof-of-Value
-→ settlement
-→ benefit funding / deterministic allocation
-```
+The W036 evidence record is `docs/net-w036-complete-demand-procurement-benefit-lifecycle.md`: the frozen 17-stage traversal contract proved with authoritative state/version witnesses and 44 ordered durable audit markers, 17/17 targeted mutations with byte-identical restoration, real PostgreSQL/Redis integration, a real provider-selection round-trip, and exact-head CI green on both event paths. The frozen work order `spec/work-orders/NET-W036.md` remains the governing record of the delivered contract.
 
-W036 must keep `/demand` authoritative for demand/offer/selection; `/workflows` authoritative for lifecycle; W027 authoritative for savings/baseline/counterfactual semantics; `/evidence` authoritative for provenance/PoV; `/settlement` authoritative for economic value; `/benefits` authoritative for pool/allocation semantics; `/adapters` authoritative for provider-specific facts. Commitment count and distinct buyer-organization count are separate procurement privacy dimensions. Hard supplier eligibility precedes deterministic selection. Savings must preserve uncertainty and fail closed when support is stale, invalid or insufficient. Benefit allocation must consume authoritative funded value and conserve source value.
+## Terminal backlog state
 
-No W037 behavior, second ledger, new lifecycle engine, new economic/savings/benefit primitive, new decentralized semantics or architecture amendment is permitted.
+`spec/work-items.md` and `spec/dependency-graph.md` terminate at NET-W036. There is no canonical W037 or later work item, and none may be fabricated. The program invariant stands: OpenCon is one protocol with sixteen frozen domain boundaries, and no second authority may be created for anything an existing boundary already owns; a seventeenth domain requires an Architecture Change Request and a new architecture version.
+
+Any further work must begin with an architect-authored canonical backlog amendment — a new work item defined in `spec/work-items.md` and `spec/dependency-graph.md` with frozen acceptance criteria — before any implementation branch or PR exists. Until such an amendment exists, the program is at its terminal state with all work items W001–W036 merged and verified.
 
 ## Operating procedure
 
