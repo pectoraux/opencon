@@ -1,7 +1,9 @@
 # UX-01 Evidence Ledger — Unified product client experience
 
-**Status:** DELIVERED — implementation delivered in the product client environment; this PR is the governance record and awaits architect review  
-**Work order:** `spec/work-orders/UX-01.md` (frozen in this PR)  
+**Status:** DELIVERED — governance merged; implementation delivered in the product client environment  
+**Issue:** #83  
+**Governance PR:** #82 — squash-merged `2efe8dbd4d9146d3dea750d1f3ee87647f9dcc59`  
+**Work order:** `spec/work-orders/UX-01.md` (frozen)  
 **Direction of record:** the architect-approved OpenCon Unified Product UX implementation brief  
 
 ## 1. Where the implementation lives
@@ -81,8 +83,18 @@ Browser verification (agent-browser, fresh session): all five destinations
    ("Suggested match — needs your approval"); real generation belongs to
    `/llm` and must remain advisory-only.
 
-## 5. Remediation discipline
+## 5. Governance / implementation boundary
 
-Any architect CHANGES REQUESTED finding is remediated on this same PR/branch
-with the corresponding client artifacts updated in the product environment,
-re-verified, and re-reviewed. No second governance PR for UX-01.
+The governance record is merged as PR #82. The product implementation remains
+outside this protocol repository until an implementation-specific work item
+and implementation PR are authorized. Any backend capability gap must be
+implemented through the owning `/api`/integration boundary rather than by
+creating client-side authority. Any UX-01 implementation remediation remains
+on its single implementation PR.
+
+## 6. Remediation discipline
+
+Any architect CHANGES REQUESTED finding is remediated on the same UX-01
+implementation PR/branch with the corresponding client artifacts updated in
+the product environment, re-verified, and re-reviewed. No second implementation
+PR for UX-01.
