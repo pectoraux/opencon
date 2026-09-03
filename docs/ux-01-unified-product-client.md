@@ -1,6 +1,6 @@
 # UX-01 Evidence Ledger — Unified product client experience
 
-**Status:** DELIVERED — implementation PR opened from `feat/ux-01-unified-product-client` (created from main checkpoint `4a9ce3777ba8df2c92535c7998fc1190f9f59613`); awaiting architect review. Any remediation stays on that same PR.  
+**Status:** DELIVERED — implementation PR **#84** (open, awaiting architect review) from `feat/ux-01-unified-product-client`, created from main checkpoint `4a9ce3777ba8df2c92535c7998fc1190f9f59613`. Any remediation stays on that same PR.  
 **Issue:** #83  
 **Governance PR:** #82 — squash-merged `2efe8dbd4d9146d3dea750d1f3ee87647f9dcc59`  
 **Work order:** `spec/work-orders/UX-01.md` (frozen)  
@@ -102,7 +102,7 @@ Implementation-PR remediations (found by the fresh verification run, fixed
 ## 5. Governance / implementation boundary
 
 The governance record is merged as PR #82, and issue #83 (READY_FOR_IMPLEMENTATION)
-authorizes exactly one UX-01 implementation PR — opened from the implementation
+authorizes exactly one UX-01 implementation PR — **#84**, opened from the implementation
 branch `feat/ux-01-unified-product-client` (from main checkpoint `4a9ce37`). The
 product implementation itself continues to live in the product client environment
 and remains outside protocol authority boundaries: this repository records the work
