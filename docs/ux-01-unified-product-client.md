@@ -1,6 +1,6 @@
 # UX-01 Evidence Ledger — Unified product client experience
 
-**Status:** DELIVERED — governance merged; implementation delivered in the product client environment  
+**Status:** DELIVERED — implementation PR **#84** (open, awaiting architect review) from `feat/ux-01-unified-product-client`, created from main checkpoint `4a9ce3777ba8df2c92535c7998fc1190f9f59613`. Any remediation stays on that same PR.  
 **Issue:** #83  
 **Governance PR:** #82 — squash-merged `2efe8dbd4d9146d3dea750d1f3ee87647f9dcc59`  
 **Work order:** `spec/work-orders/UX-01.md` (frozen)  
@@ -27,8 +27,9 @@ order and the evidence; the implementation artifacts are:
 ## 2. Verification record
 
 ```text
-Interaction-path tests: 23 pass / 0 fail / 123 expect() — lifecycle translation,
-  money phase semantics (pending never spendable), server-side guards
+Interaction-path tests: 23 pass / 0 fail / 125 expect() — lifecycle translation,
+  money phase semantics (pending never spendable; settled campaign spend is its
+  own dimension, never completed earnings), server-side guards
   (rights-before-submit, payout gating, benefit eligibility, matched
   acceptance), the creator journey end-to-end with a fake clock
   (accept → rights → disclosure → start → submit → MEASURING → EVALUATING →
@@ -40,17 +41,32 @@ Interaction-path tests: 23 pass / 0 fail / 123 expect() — lifecycle translatio
 Architecture regression: arch:check violations identical to the pre-existing
   7 scaffold violations — zero new; frozen architecture files untouched;
   no src/{core,domain,infra,adapter} changes; no W036/W037 protocol behavior.
-Browser verification (agent-browser, fresh session): all five destinations
-  render with live data; the creator journey completed through the real UI
-  (rights checklist → start → submit → live verification ladder → payout →
-  "Paid out"); the dispute was responded and auto-resolved in the user's
-  favor with value released; a campaign was created through the wizard and
-  settled; an eligible benefit was claimed ($300 to the Wallet) and an
-  ineligible benefit was rejected with the server's human reason; global
+Browser verification (agent-browser, fresh session, re-run after the
+  implementation-PR remediations): all five destinations render with live
+  data and navigate correctly from every shell (sidebar, bottom bar, cards,
+  deep links); the creator journey completed through the real UI (rights
+  checklist → start → submit → live verification ladder → payout →
+  SETTLED/paid); the dispute was responded and auto-resolved in the user's
+  favor with value released; a campaign was created through the wizard,
+  ended, measured and settled (spend shown in its own wallet dimension);
+  an eligible benefit was claimed ($300 to the Wallet) and an ineligible
+  benefit was rejected with the server's human reason verbatim; global
   search and notification deep-links work; role switching adapts Home and
-  Discover; 390px shows zero horizontal overflow with the bottom nav and
-  footer at document end (short and long pages); 1280px shows the sidebar
-  shell; zero console errors and zero page errors in a fresh session.
+  Discover; 390px shows zero horizontal overflow on every destination with
+  the bottom nav and 52px targets, footer at viewport bottom on short pages
+  and at document end on long pages; 1280px shows the sidebar shell; zero
+  console errors and zero page errors in a fresh session.
+
+Implementation-PR remediations (found by the fresh verification run, fixed
+  before opening the PR, each re-verified):
+  1. shell navigation now uses plain fragment anchors — next/link's
+     history.pushState navigation changed the URL without firing hashchange,
+     so the view never re-rendered;
+  2. settled campaign spend moved to its own wallet dimension
+     (spendSettledUsd) so completed earnings can never go net-negative;
+     pinned by a regression test;
+  3. min-w-0 on grid-item cards removed a 3px horizontal overflow at 390px;
+  4. the page title now reads "OpenCon — One network, one product".
 ```
 
 ## 3. Authority-separation proof points
@@ -85,12 +101,15 @@ Browser verification (agent-browser, fresh session): all five destinations
 
 ## 5. Governance / implementation boundary
 
-The governance record is merged as PR #82. The product implementation remains
-outside this protocol repository until an implementation-specific work item
-and implementation PR are authorized. Any backend capability gap must be
-implemented through the owning `/api`/integration boundary rather than by
-creating client-side authority. Any UX-01 implementation remediation remains
-on its single implementation PR.
+The governance record is merged as PR #82, and issue #83 (READY_FOR_IMPLEMENTATION)
+authorizes exactly one UX-01 implementation PR — **#84**, opened from the implementation
+branch `feat/ux-01-unified-product-client` (from main checkpoint `4a9ce37`). The
+product implementation itself continues to live in the product client environment
+and remains outside protocol authority boundaries: this repository records the work
+item, the frozen work order and the evidence; it gains no frontend surface and no
+client authority. Any backend capability gap must be implemented through the owning
+`/api`/integration boundary rather than by creating client-side authority. Any UX-01
+implementation remediation remains on its single implementation PR.
 
 ## 6. Remediation discipline
 
