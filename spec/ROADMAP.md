@@ -1,7 +1,7 @@
 # OpenCon Persistent Roadmap
 
 **Architecture:** Open Contribution Protocol Architecture v1.0  
-**Status:** Frozen architecture / approved requirements; canonical work items W001–W036 complete; UX-01 complete  
+**Status:** Frozen architecture / approved requirements; canonical work items W001–W036 complete; UX-01 complete; UC-01 authorized  
 **Canonical backlog:** `spec/work-items.md`  
 **Canonical dependency graph:** `spec/dependency-graph.md`  
 **Canonical frozen constraints:** `spec/architecture.md`, `spec/architecture-lock.md`  
@@ -74,6 +74,12 @@ W029, W030, W031, W032 — **COMPLETE**.
 
 - UX-01 — **COMPLETE**. Issue #83 closed as completed. Governance PR #82 merged `2efe8dbd4d9146d3dea750d1f3ee87647f9dcc59`; implementation PR #84 squash-merged `d87977c7ed14bb67f51925a3d3d09c67e76c79a1` from reviewed head `acc44c90789f0705d7b3866dc893accc9333c50a`. The unified client remains external to this protocol repository and is a pure consumer of the versioned product API.
 
+### Phase 11 — Use-case validation (post-backlog)
+
+- **UC-01 — Consumer demand to member benefit validation — AUTHORIZED.** Governance issue #85. Governance PR #86 is the decision record. Frozen work order: `spec/work-orders/UC-01.md`. Evidence contract: `docs/uc-01-consumer-demand-benefit.md`.
+- The first implementation stream is intentionally consumer-side: demand → privacy-preserving qualification → supplier competition → sanctioned fulfillment → provider measurement → normalized outcome → evidence-backed savings → savings-funded member benefit entitlement → privacy-preserving member view.
+- UC-01 is not W037, does not create a new protocol dependency edge, and does not amend Architecture v1.0. Any discovered API/product/provider/architecture gap must be separately classified and governed.
+
 ## Dependency sequence
 
 ```text
@@ -88,7 +94,7 @@ W014/W018/W023/W028 → W033 → W034 → W035
 W028/W033 → W036
 ```
 
-The protocol dependency graph terminates at W036. UX-01 is post-backlog product work, not a new protocol dependency edge.
+The protocol dependency graph terminates at W036. UX-01 is post-backlog product work and UC-01 is post-backlog validation work; neither is a new protocol dependency edge.
 
 ## W036 merge record
 
@@ -100,16 +106,20 @@ UX-01 is the first authorized post-backlog product-client work item. Governance 
 
 The implementation record is `docs/ux-01-unified-product-client.md`. The product client remains outside the protocol repository; no frontend authority, new ledger, lifecycle engine, W037 behavior, or architecture amendment was introduced. The final evidence records 23 interaction-path tests / 125 assertions, protocol architecture + authority 322/0, fresh browser verification, responsive verification and exact-head CI green including real PostgreSQL + Redis integration.
 
-## Post-backlog state
+## UC-01 governance record
 
-There is currently **no authorized successor work item** after UX-01. No UX-02 or W037 may be invented. The next implementation must first be authorized through the governance process with a frozen scope, acceptance criteria, authority placement and verification gate.
+UC-01 is the first authorized post-backlog capability-validation use case. Governance issue #85 binds the frozen scope. Governance PR #86 carries:
 
-The intended operating mode is now **use-case-driven platform validation**. `spec/USE-CASE-PROGRAM.md` defines the candidate scoring, capability-coverage matrix, capability-gap classification, evidence contract and implementation/merge discipline. The candidate scenario families in that document are not authorized work items.
+- `spec/work-orders/UC-01.md` — frozen scope, actors/tenancy, canonical traversal, authority map, AC-01..AC-10, trust/evidence/provider/product contracts and capability-gap disposition;
+- `docs/uc-01-consumer-demand-benefit.md` — evidence contract and negative/atomicity/provider/mutation proof requirements;
+- corrected `README.md` and `docs/ROADMAP-START-HERE.md` stale checkpoints.
+
+UC-01 deliberately does not authorize new cash redemption, external payment execution, a new ledger, a new lifecycle state machine, a new domain or a product-client authority. Savings-funded benefit allocations are entitlement-only under the existing W028 semantics.
 
 ## Operating procedure
 
-1. Confirm issue/readiness/dependencies or, for post-backlog work, complete the governance authorization first.
-2. Read roadmap, project state, frozen architecture/lock and the active governance/use-case/work item.
+1. Confirm issue/readiness/dependencies or, for post-backlog work, complete governance authorization first.
+2. Read roadmap, project state, frozen architecture/lock and the active governance/use-case/work order.
 3. Author/freeze the work order and evidence ledger before coding.
 4. Reuse existing ports and `...WithinTx` primitives.
 5. Implement one-to-one acceptance tests plus architecture/out-of-scope regression.
