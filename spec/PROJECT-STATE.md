@@ -33,14 +33,19 @@ NET-W001 through NET-W036 are complete and merged.
 
 Key authority lineage: W004 workflows; W005 evidence; W006 outcomes/measurement; W008 settlement; W009/W010 disputes; W011 campaigns; W015/W016 creators; W017 rights; W018 disclosure; W019 inventory; W020 clearing; W021 matching; W022 attribution/privacy; W023 supply-chain; W024–W028 demand/procurement/savings/benefits; W029 attestations; W030 external settlement; W031 reputation proofs; W032 decentralized dispute coordination; W033 contribution E2E; W034 advertising E2E; W035 creator E2E; W036 demand/procurement/benefit E2E.
 
-## Next implementation target
+## Post-backlog product target
 
-**None — the canonical backlog terminates at NET-W036.**
+**UX-01 — Unified product client experience**
 
-- `spec/work-items.md` defines no work item after NET-W036, and the canonical dependency sequence ends at `W028/W033 → W036`.
-- Phases 1–9 are all COMPLETE. There is no authorized next work item.
-- Do not fabricate a W037 issue, work order, branch, PR or behavior. The standing "no W037 behavior / no second authority / no architecture amendment" prohibitions recorded in the W036 work order and evidence ledger remain in force.
-- The next valid action, if the program continues, is an architect-authored canonical backlog amendment: a new work item defined in `spec/work-items.md` and `spec/dependency-graph.md`, with frozen acceptance criteria, before any implementation branch or PR exists. A seventeenth domain boundary additionally requires an Architecture Change Request and a new architecture version per the program invariant.
+- Issue: #83 — OPEN, `ready-for-implementation`
+- Governance PR: #82 — squash-merged `2efe8dbd4d9146d3dea750d1f3ee87647f9dcc59`
+- Work order: `spec/work-orders/UX-01.md` — frozen and bound to issue #83
+- Evidence ledger: `docs/ux-01-unified-product-client.md` — governance merged; implementation evidence recorded from the product client environment
+- Dependencies: none on new protocol work; consumes W001–W036 authorities and the external/versioned product API contract
+- Scope: unified Home / Discover / Work / Wallet / You client, server-authoritative actions/value/lifecycle/evidence, responsive/a11y experience, with no protocol authority in the client
+- Implementation branch: **to be created from the current `main` checkpoint after this state/roadmap update**
+
+The canonical protocol backlog still terminates at NET-W036. UX-01 is the first authorized post-backlog product-client work item; it does not create W037 protocol behavior and does not amend Architecture v1.0.
 
 ## Review lessons that must persist
 
@@ -93,4 +98,4 @@ same PR        ↓
 
 ## Current action
 
-W036 is complete and merged: PR #81 at merge SHA `e7e858e6f5734cf4be0a95b287e6b736f50f3287`, from architect-approved reviewed head `d795b12b3db26c56593357fc8e2da62295c3e8bb`, with issue #75 completed. The canonical backlog terminates at W036: every work item W001–W036 is merged and verified, and there is no authorized next work item. Do not open new implementation branches or PRs, and do not fabricate W037 issues or behavior. If work resumes, it must begin with an architect-authored backlog amendment that defines the next canonical work item, its dependencies and its acceptance criteria first. Until then, the repository is at its terminal state.
+NET-W036 remains the last canonical protocol work item and is complete at PR #81 / merge SHA `e7e858e6f5734cf4be0a95b287e6b736f50f3287`. Governance PR #82 established UX-01 as the first authorized post-backlog product-client work item and merged at `2efe8dbd4d9146d3dea750d1f3ee87647f9dcc59`; issue #83 is READY_FOR_IMPLEMENTATION. Create the single UX-01 implementation branch from the updated main checkpoint, then implement exactly one UX-01 implementation PR under the frozen work order. Any implementation remediation remains on that same PR/branch. Do not fabricate W037 protocol behavior or amend frozen architecture.
