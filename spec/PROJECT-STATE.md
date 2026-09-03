@@ -43,23 +43,38 @@ NET-W001 through NET-W036 are complete and merged. The canonical protocol backlo
 
 ## Current program position
 
-**STATUS: POST-BACKLOG GOVERNANCE CHECKPOINT — no successor work item is currently authorized.**
+**STATUS: UC-01 GOVERNANCE AUTHORIZED — implementation not started.**
 
-The canonical protocol backlog remains W001–W036. UX-01 is complete as the first authorized post-backlog product-client work item. Do not invent W037, UX-02, a new dependency edge, or a new architecture version without an architect-authored governance amendment.
+**UC-01 — Consumer demand to member benefit validation** is the first post-backlog use-case-validation work item. Governance issue **#85** and governance PR **#86** are the decision record. The frozen work order is `spec/work-orders/UC-01.md`; the evidence contract is `docs/uc-01-consumer-demand-benefit.md`.
 
-The next intended operating mode is **use-case-driven platform validation**. The governing method is frozen in `spec/USE-CASE-PROGRAM.md` and summarized in `docs/LLM-ARCHITECT-HANDOFF.md`. Realistic end-to-end scenarios should be used to exercise as much of the existing platform as possible while preserving authority boundaries. A candidate scenario is not an authorized implementation.
+The canonical protocol backlog remains W001–W036. UX-01 remains complete. UC-01 is not W037, is not a new protocol domain, and does not add a dependency edge to `spec/dependency-graph.md`. `spec/work-items.md`, `spec/architecture.md`, `spec/architecture-lock.md`, and `spec/dependency-graph.md` remain historical/frozen and must not be modified by UC-01 implementation.
+
+### Authorized use-case
+
+The frozen UC-01 journey is:
+
+```text
+consumer demand
+→ privacy-preserving qualification
+→ supplier competition
+→ sanctioned fulfillment
+→ provider measurement
+→ normalized outcome
+→ evidence-backed savings
+→ savings-funded benefit entitlement
+→ privacy-preserving member view
+```
+
+Implementation must stop and classify any missing capability as an existing defect, API/product gap, provider integration gap, architecture conflict, or explicitly excluded future behavior. No missing subsystem may be invented merely to complete the scenario.
 
 ### Next valid action
 
-The next architect should:
-
-1. review the completed W001–W036 protocol evidence and UX-01 product evidence;
-2. select candidate real-world use cases using the coverage/ranking model in `spec/USE-CASE-PROGRAM.md`;
-3. classify capability gaps instead of implementing missing behavior opportunistically;
-4. author and approve one governance-bound use-case work item with frozen scope, acceptance criteria, authority placement, evidence contract, verification gate and GitHub issue binding;
-5. only then create its implementation branch and exactly one implementation PR.
-
-No successor work item is currently authorized.
+1. Start from the merged UC-01 governance state and read `spec/work-orders/UC-01.md` plus `docs/uc-01-consumer-demand-benefit.md`.
+2. Create exactly one UC-01 implementation branch and exactly one implementation PR bound to GitHub issue #85.
+3. Implement only the frozen scope and use the existing authorities/primitives.
+4. Produce the complete evidence contract: authoritative traversal witnesses, durable audit order, tenancy/authorization negatives, replay, concurrency, transaction-level rollback/retry, provider round-trip, privacy/secret regression, mutations, full verification and exact-head CI.
+5. If a capability gap is discovered, stop that portion and follow the gap disposition; do not silently expand UC-01.
+6. Architect reviews the exact implementation head; CHANGES REQUESTED remediation stays on the same branch/PR.
 
 ## Review lessons that must persist
 
@@ -81,6 +96,7 @@ No successor work item is currently authorized.
 - Atomicity proofs require fault after material work is staged inside the real composite transaction, then a healthy same-key exactly-once retry.
 - Canonical proof fixtures must use fixed/authoritative anchors; fresh wall-clock or random identifiers are forbidden except explicitly isolated provider-freshness semantics.
 - Product clients consume the versioned API and cannot become protocol authority; backend capability gaps require separately authorized `/api` or integration work.
+- UC-01 adds a distinct consumer-side validation lens and must not be reduced to a replay of W036's business-procurement scenario.
 
 ## Quality gate
 
