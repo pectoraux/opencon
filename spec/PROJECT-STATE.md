@@ -9,7 +9,9 @@
 **Canonical architecture:** `spec/architecture.md`  
 **Canonical lock:** `spec/architecture-lock.md`  
 **Canonical dependency graph:** `spec/dependency-graph.md`  
-**Agent entry point:** `AGENTS.md`
+**Agent entry point:** `AGENTS.md`  
+**Architect handoff:** `docs/LLM-ARCHITECT-HANDOFF.md`  
+**Post-backlog use-case governance:** `spec/USE-CASE-PROGRAM.md`
 
 ## Current checkpoint
 
@@ -41,13 +43,23 @@ NET-W001 through NET-W036 are complete and merged. The canonical protocol backlo
 
 ## Current program position
 
-**Status: POST-BACKLOG GOVERNANCE CHECKPOINT — no successor work item is currently authorized.**
+**STATUS: POST-BACKLOG GOVERNANCE CHECKPOINT — no successor work item is currently authorized.**
 
-The canonical protocol backlog remains W001–W036. UX-01 is complete as the first authorized post-backlog product-client work item. No UX-02 issue or successor product-client work item is currently authorized. Do not invent W037, UX-02, a new dependency edge, or a new architecture version without an architect-authored governance amendment.
+The canonical protocol backlog remains W001–W036. UX-01 is complete as the first authorized post-backlog product-client work item. Do not invent W037, UX-02, a new dependency edge, or a new architecture version without an architect-authored governance amendment.
+
+The next intended operating mode is **use-case-driven platform validation**. The governing method is frozen in `spec/USE-CASE-PROGRAM.md` and summarized in `docs/LLM-ARCHITECT-HANDOFF.md`. Realistic end-to-end scenarios should be used to exercise as much of the existing platform as possible while preserving authority boundaries. A candidate scenario is not an authorized implementation.
 
 ### Next valid action
 
-Authorize the next work item through the governance process first. The next item must have a frozen scope, acceptance criteria, authority placement, evidence/verification gate, and explicit issue binding before an implementation branch or PR is created.
+The next architect should:
+
+1. review the completed W001–W036 protocol evidence and UX-01 product evidence;
+2. select candidate real-world use cases using the coverage/ranking model in `spec/USE-CASE-PROGRAM.md`;
+3. classify capability gaps instead of implementing missing behavior opportunistically;
+4. author and approve one governance-bound use-case work item with frozen scope, acceptance criteria, authority placement, evidence contract, verification gate and GitHub issue binding;
+5. only then create its implementation branch and exactly one implementation PR.
+
+No successor work item is currently authorized.
 
 ## Review lessons that must persist
 
