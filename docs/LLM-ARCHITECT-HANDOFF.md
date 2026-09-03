@@ -13,13 +13,13 @@ For a new architect with no conversation context, read in this order:
 7. `spec/work-items.md`
 8. `spec/dependency-graph.md`
 9. `docs/LLM-ARCHITECT-HANDOFF.md`
-10. the relevant completed evidence records and GitHub PR discussions when auditing prior decisions
+10. the relevant use-case work order, evidence contract and GitHub PR discussion when auditing the active decision
 
 The repository is the source of truth. Do not rely on prior chat context.
 
 ## Current checkpoint
 
-The canonical protocol implementation program is complete through **NET-W036**. The first authorized post-backlog product-client work, **UX-01**, is also complete.
+The canonical protocol implementation program is complete through **NET-W036**. The first authorized post-backlog product-client work, **UX-01**, is also complete. The first post-backlog capability-validation use case, **UC-01**, is now governed and authorized.
 
 ### Canonical protocol completion
 
@@ -35,129 +35,75 @@ The canonical protocol implementation program is complete through **NET-W036**. 
 - UX-01 implementation is represented in this protocol repository by its frozen work order/evidence; the actual client lives in the product-client environment.
 - Final UX evidence included 23 interaction-path tests / 125 assertions, fresh browser verification across the five product destinations and key journeys, zero new protocol architecture violations, and exact-head CI with real PostgreSQL/Redis integration.
 
+### First post-backlog validation use case
+
+- **UC-01 — Consumer demand to member benefit validation: AUTHORIZED.**
+- Governance issue: #85.
+- Governance PR: #86.
+- Frozen work order: `spec/work-orders/UC-01.md`.
+- Evidence contract: `docs/uc-01-consumer-demand-benefit.md`.
+
 ## Program status
 
-**POST-BACKLOG GOVERNANCE CHECKPOINT. There is currently no authorized successor work item.**
+**UC-01 IS AUTHORIZED; IMPLEMENTATION IS NOT YET STARTED.**
 
-Do not create or implement `W037`, `UX-02`, a new dependency edge, or a new architecture version merely because a desirable capability is missing. The next body of work must first be authorized by an architect-authored governance artifact with a frozen scope, acceptance criteria, authority placement, evidence contract, verification gate and explicit GitHub issue binding.
+UC-01 is a validation and capability-composition instrument, not a new protocol subsystem. Its frozen path is:
 
-## Strategic direction: use-case-driven validation
+```text
+consumer demand
+→ privacy-preserving qualification
+→ supplier competition
+→ sanctioned fulfillment
+→ provider measurement
+→ normalized outcome
+→ evidence-backed savings
+→ savings-funded benefit entitlement
+→ privacy-preserving member view
+```
 
-The next program should validate OpenCon primarily through **specific, realistic end-to-end use cases** rather than adding speculative features one subsystem at a time.
+It composes the existing authorities under Architecture v1.0. It does not create W037, a new domain, a new dependency edge, a second ledger, a new lifecycle authority, or a payment authority.
 
-The purpose of a use-case work item is to exercise as much of the already-built platform as one coherent business journey can legitimately touch, while proving that the journey still obeys the frozen authorities. A use case is not permission to add missing functionality implicitly: a genuine capability gap must be classified as an existing implementation defect, an API/product capability gap, a separately scoped integration, or an Architecture Change Request.
+## UC-01 implementation rule
 
-Each use case should be selected for **capability coverage**, not marketing breadth. Prefer journeys that cross many authorities and stress their boundaries in a realistic sequence.
+Before coding, read:
 
-### Required use-case design
+1. `spec/work-orders/UC-01.md`
+2. `docs/uc-01-consumer-demand-benefit.md`
+3. W024–W028 evidence and relevant W033–W036 composition evidence.
 
-Every proposed use case should specify:
+Then create exactly one implementation branch and exactly one implementation PR bound to issue #85. Implementation must remain inside the frozen scope.
 
-- **Actor and tenant model:** who participates, which organizations own which resources, and which identities/roles act at each step.
-- **Business objective:** what the participant is trying to accomplish and what a successful outcome means.
-- **Canonical executable path:** the exact authoritative order through creators, campaigns, opportunities/contributions, workflows, UGC/rights, disclosure, measurement/outcomes, evidence/PoV, reputation where applicable, disputes/risk, settlement/payment, demand/procurement, benefits, and adapters where applicable.
-- **Capability coverage matrix:** each step maps to existing protocol capabilities and identifies which authority owns the resulting truth.
-- **Positive and negative gates:** each material gate has a success path and a fail-closed path.
-- **Economic path:** verified value, pending/mature states, conservation, settlement/payment lineage and any external-provider boundary used.
-- **Trust path:** authorization, tenancy, replay, concurrency, atomicity, audit and privacy expectations appropriate to the journey.
-- **Provider path:** at least one realistic provider-selection boundary when the relevant capability exists; provider-specific semantics remain behind adapters.
-- **Determinism:** fixed anchors or authoritative subject timestamps in proof fixtures; no fresh wall-clock dependencies that make a canonical proof non-reproducible.
-- **Durable witnesses:** authoritative state/version plus durable audit order wherever committed mutations establish sequence.
-- **Out-of-scope boundary:** explicitly list features the use case must not silently invent.
-
-### Use-case scoring model
-
-Before authorization, rank candidate journeys by:
-
-1. **Authority coverage** — number and importance of authoritative boundaries exercised.
-2. **Economic coverage** — whether the path reaches verified value, settlement, payment, or benefit effects.
-3. **Trust coverage** — tenancy, authorization, fraud/risk, dispute, replay, concurrency and atomicity.
-4. **Interoperability coverage** — measurement, creator platforms, ad/supply integrations, payment or settlement adapters.
-5. **Evidence depth** — ability to reconstruct provenance from raw/provider input through normalized outcomes and evidence to economic effect.
-6. **Product realism** — whether the journey corresponds to a real user/business workflow rather than a synthetic test sequence.
-7. **Failure-path richness** — whether meaningful negative scenarios can be exercised without inventing behavior.
-
-Use cases that cover the same capabilities through nearly identical paths should be consolidated rather than multiplied.
-
-## Candidate use-case families for the next architect to evaluate
-
-These are **candidate shapes, not authorized work items**. The architect must verify actual repository capabilities before freezing any of them.
-
-### Creator campaign execution
-
-A brand discovers and selects a creator, agrees terms, creator accepts, produces UGC under explicit rights, completes disclosure/compliance, campaign results are measured, evidence/PoV is verified, risk/dispute controls are exercised, and verified creator value is settled/paid.
-
-Core coverage: `/creators`, `/campaigns`, `/opportunities`, `/contributions`, `/workflows`, W017/W018 rights/disclosure, `/measurement`, `/outcomes`, `/evidence`, `/disputes`, `/settlement`, `/payments`, `/adapters`, audit/idempotency.
-
-### Native advertising execution
-
-An advertiser activates a campaign, selects eligible inventory/creator supply, places an execution, measures delivery/outcome through a provider boundary, verifies value, survives risk/dispute controls, and clears the resulting economic value.
-
-Core coverage: `/campaigns`, `/inventory`, W021/W022/W023, `/workflows`, `/outcomes`, `/evidence`, `/disputes`, `/settlement`.
-
-### Helpfulness/recommendation journey
-
-A person presents a real need; eligible contribution opportunities are discovered; a participant provides a useful recommendation without being rewarded for raw activity or fabricated positive sentiment; evidence verifies helpfulness; the lifecycle completes and the resulting value is settled/reputationally accounted for where permitted.
-
-Core coverage: `/opportunities`, `/contributions`, `/campaigns`, `/evidence`, `/outcomes`, `/reputation`, `/workflows`, `/settlement`, disclosure/moderation and AI-advisory boundaries.
-
-### Consumer demand to benefit journey
-
-Consumers form privacy-preserving demand, qualified demand reaches supplier competition, an offer is selected, fulfillment occurs, savings are verified against a supported baseline, verified value funds an eligible benefit allocation, and the member claims the benefit.
-
-Core coverage: `/demand`, `/settlement`, supplier selection, savings/counterfactual evidence, `/benefits`, privacy/competition controls and economic conservation.
-
-### Business procurement journey
-
-Multiple business participants contribute demand without disclosing competitor-sensitive terms; suppliers submit offers; the system deterministically selects among eligible offers; fulfillment produces measured savings; savings evidence is verified and allocated through the benefit/economic authorities.
-
-Core coverage: demand pools, procurement privacy, selection, evidence/counterfactuals, settlement and benefits.
-
-### Cross-network settlement journey
-
-A verified internal economic result is reconciled against an external settlement/payment provider fact, including authentication, freshness, idempotency, retry/failure and reconciliation mismatch behavior, while internal settlement remains authoritative.
-
-Core coverage: `/settlement`, `/payments`, `/adapters`, W030 external settlement fact ingestion, audit and reconciliation invariants.
-
-### Portable trust/reputation journey
-
-A participant earns evidence-backed performance history, derives a privacy-preserving portable reputation proof, presents it to another context, and the receiving path verifies it without receiving raw private history or letting reputation become purchasable.
-
-Core coverage: `/reputation`, W029 attestations/commitments, W031 proofs, privacy/disclosure and deterministic fail-closed verification.
-
-## Testing doctrine for use-case work
-
-The next architect should treat each use case as a **coverage instrument** over already-built protocol capabilities.
-
-A strong implementation PR should normally contain:
-
-- one canonical deterministic happy-path scenario;
-- explicit authoritative traversal witnesses;
-- durable audit ordering where sequence depends on committed mutations;
-- one-to-one acceptance tests for the use-case's material gates;
-- adversarial negatives for authorization and tenancy;
-- replay and a real concurrent race at the material economic boundary;
-- a genuine transaction-level fault injection after material work is staged, followed by a healthy same-key retry;
-- provider-selection round-trip(s) for relevant external integrations;
-- privacy/secret leakage regression;
-- targeted mutation checks over each material guard, with byte-identical source restoration;
-- repository-wide architecture and authority checks;
-- complete local/integration verification and exact-head CI.
-
-A terminal record is not proof of traversal. Local witness arrays without authoritative state/version or durable commit evidence are not proof of order. A stale-state rejection is not a composite atomicity proof. A green CI run is not architect approval.
-
-## Capability-gap handling
-
-When a use case reaches a missing capability, stop and classify the gap instead of filling it opportunistically:
+When a missing capability appears, stop and classify it:
 
 | Gap | Correct treatment |
 |---|---|
-| Existing behavior is incorrect | Fix at the existing owning authority; add regression/mutation evidence. |
-| Capability exists but product/API cannot expose it | Create an explicitly scoped API/product-client work item under the existing boundary. |
-| External provider is required but integration boundary is skeletal | Scope provider integration separately; keep semantics in the existing owning authority. |
-| Requirement conflicts with frozen architecture | Open an Architecture Change Request and create a new architecture version before implementation. |
-| Requirement is W036/procurement/benefit behavior absent from a use-case scope | Do not invent a new behavior merely to complete the scenario. |
-| UX needs a read model not served by the API | Document it as a backend capability gap; never recreate authority in the client. |
+| Existing behavior is incorrect | Fix at the owning authority; add regression/mutation evidence. |
+| API/product capability missing | Separately authorize the `/api` or product work; never recreate protocol authority in the client. |
+| External provider integration missing | Separately authorize the existing integration boundary. |
+| Requirement conflicts with frozen architecture | Architecture Change Request + new architecture version. |
+| Cash/credit redemption or other unsupported future behavior | Exclude from UC-01; do not invent it. |
+
+## Candidate-selection decision
+
+UC-01 was selected because it adds consumer-side business realism and product/API pressure without simply repeating the already-proven W033 contribution, W034 advertising, W035 creator and W036 business-procurement compositions. The candidate ranking and scope-freeze record are in issue #85 and the UC-01 work order.
+
+## Required use-case design
+
+Every active use-case implementation must specify:
+
+- actor and tenant model;
+- business objective;
+- canonical executable authority traversal;
+- capability coverage matrix;
+- positive and negative gates;
+- economic path and conservation rules;
+- trust path covering authorization, tenancy, replay, concurrency and atomicity where applicable;
+- provider path through existing adapters;
+- deterministic proof anchors;
+- durable state/version and audit witnesses;
+- explicit out-of-scope boundary.
+
+A terminal record or local witness array is not proof of traversal. A stale-state rejection is not a composite atomicity proof. A green CI run is not architect approval.
 
 ## Frozen authority map
 
@@ -180,7 +126,7 @@ When a use case reaches a missing capability, stop and classify the gap instead 
 
 PostgreSQL is authoritative application state in v1.0. Redis, queues and worker memory are never authoritative. External platforms remain authoritative for their own platform state.
 
-## Historical review lessons that still govern new use cases
+## Historical review lessons that still govern UC-01
 
 - Positive tests are insufficient; pair them with behavioral negative guards.
 - Cross-tenant references fail closed without existence oracles.
@@ -196,9 +142,9 @@ PostgreSQL is authoritative application state in v1.0. Redis, queues and worker 
 - Savings/counterfactuals require supported baselines and preserved uncertainty.
 - Benefit funding is references-only and economic posting remains `/settlement` owned.
 - Mutation helpers must actually change behavior and restore source bytes exactly.
-- Phase-9 traversal proofs require executable order plus authoritative state/version and durable audit witnesses.
-- Canonical proof fixtures use fixed/authoritative anchors; do not introduce fresh `Date.now()`/randomness unless isolated to an explicitly required provider-freshness behavior.
+- Canonical proof fixtures use fixed/authoritative anchors; fresh wall-clock or random identifiers are forbidden except explicitly isolated provider-freshness semantics.
 - Product clients consume the versioned API and cannot become protocol authority.
+- UC-01 must not turn a missing API/provider/redemption capability into an opportunistic subsystem.
 
 ## Canonical development/merge loop
 
