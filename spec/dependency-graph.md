@@ -103,6 +103,22 @@ After NET-W001..003:
 6. Decentralization depends on stable off-chain semantics rather than defining them.
 7. Provider-specific integrations remain adapters.
 
+## Product client (post-backlog, architect-approved)
+
+```text
+NET-W001 (API contract conventions)
+        ↓
+UX-01 — Unified product client experience
+        consumes the versioned product API;
+        renders authoritative workflow/settlement/evidence facts;
+        holds no authority
+```
+
+UX-01 depends on no new protocol work item: it consumes the external API
+contract and the authorities delivered by W001–W036. Where the UX requires
+product read models the API does not yet serve, those are documented backend
+capability gaps for the Architect — never frontend-invented authority.
+
 ## API / workflow convergence
 
 ```text

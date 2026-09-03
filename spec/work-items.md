@@ -269,6 +269,14 @@ Objective: Prove demand → supplier → fulfillment → verified savings → be
 Verification: end-to-end procurement/benefit scenario suite.
 Definition of done: Demand aggregation, supplier competition, savings verification and member benefit allocation are all evidence-linked.
 
+## Phase 10 — Product client (post-backlog, architect-approved)
+
+### UX-01 — Unified product client experience
+Dependencies: none (consumes the versioned API contract; authoritative behavior across W001–W036).
+Objective: Deliver the approved OpenCon unified product UX — one coherent adaptive client (Home / Discover / Work / Wallet / You) over the existing authorities, with the frontend strictly a consumer of the product API.
+Verification: interaction-path tests; browser-verified journeys; architecture/out-of-scope regression; accessibility and responsive checks.
+Definition of done: A new user can traverse the core journeys without seeing protocol machinery, pending and available value are distinguishable, trust is drillable, and no frontend path bypasses or invents authority.
+
 ## Definition of Done rules
 
 Every NET-W work item is complete only when:
