@@ -5,7 +5,8 @@
 **Canonical backlog:** `spec/work-items.md`  
 **Canonical dependency graph:** `spec/dependency-graph.md`  
 **Canonical frozen constraints:** `spec/architecture.md`, `spec/architecture-lock.md`  
-**Operational state:** `spec/PROJECT-STATE.md`
+**Operational state:** `spec/PROJECT-STATE.md`  
+**Post-backlog use-case governance:** `spec/USE-CASE-PROGRAM.md`
 
 ## Purpose
 
@@ -31,7 +32,7 @@ OpenCon is one protocol with explicit authorities. Do not create a second author
 | creator identity / matching / creator records | `/creators` |
 | inventory / placements | `/inventory` |
 | provider-specific integrations | `/adapters` |
-| LLM / provider-neutral AI boundary | `/llm` |
+| LLM / provider-neutral AI | `/llm` |
 | agent/orchestration mechanisms | `/agents` |
 | API / workers / persistence / audit / config / observability | infrastructure boundaries |
 
@@ -103,13 +104,15 @@ The implementation record is `docs/ux-01-unified-product-client.md`. The product
 
 There is currently **no authorized successor work item** after UX-01. No UX-02 or W037 may be invented. The next implementation must first be authorized through the governance process with a frozen scope, acceptance criteria, authority placement and verification gate.
 
+The intended operating mode is now **use-case-driven platform validation**. `spec/USE-CASE-PROGRAM.md` defines the candidate scoring, capability-coverage matrix, capability-gap classification, evidence contract and implementation/merge discipline. The candidate scenario families in that document are not authorized work items.
+
 ## Operating procedure
 
-1. Confirm issue/readiness/dependencies.
-2. Read roadmap, project state, frozen architecture/lock and canonical work item.
-3. Author work order and evidence ledger before coding.
+1. Confirm issue/readiness/dependencies or, for post-backlog work, complete the governance authorization first.
+2. Read roadmap, project state, frozen architecture/lock and the active governance/use-case/work item.
+3. Author/freeze the work order and evidence ledger before coding.
 4. Reuse existing ports and `...WithinTx` primitives.
-5. Implement one-to-one AC suites plus architecture/out-of-scope regression.
+5. Implement one-to-one acceptance tests plus architecture/out-of-scope regression.
 6. Run complete local/integration gates and targeted mutations.
 7. Create exactly one implementation PR.
 8. Architect reviews; CHANGES REQUESTED is remediated on the same PR.
